@@ -4,7 +4,7 @@
 >
 > created: 2026-10-07 21:33:58
 >
-> updated: 2026-10-07 21:33:58
+> updated: 2026-11-02 15:05:00
 >
 > author: [sjzhao](https://github.com/ShiJieCloud/rhost)
 
@@ -239,7 +239,7 @@
 - 移除 5 项 TODO 徽章：`tunnelAutoStart`、`tunnelPortConflict`、`tunnelRetryCount`、`tunnelReconnect`、`tunnelDnsResolve`
 - `tunnelDnsResolve` desc 补充：「`local` 时本机 DNS/hosts/VPN 与远端解析结果可能不一致，排错困难」
 - **`tunnelNotify` 从 schema 移除**：`settings.ts` 类型删除 + SettingsModal 行删除 + 后端 `SettingsSection` 字段删除；老配置残留值由后端 `#[serde(flatten)] extra` 静默保留
-- 保留 TODO：`tunnelKeepaliveSec`（desc 补注「主连接保活已覆盖」）、`tunnelIdleTimeoutSec`
+- 保留 TODO：`tunnelKeepaliveSec`（desc 补注「主连接保活已覆盖」）、`tunnelIdleTimeoutSec`；后者已在后续增量接入（`tunnel_start` → `TunnelEntry::idle_sec` → `relay_channel_tcp` 看门狗），徽章移除，详见 `tunnel-design.md` §6.11
 
 **验收**：IDE 诊断无错；真机三模式启停/状态/流量显示正常。
 

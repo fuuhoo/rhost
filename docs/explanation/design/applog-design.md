@@ -1,6 +1,6 @@
 # 应用日志（App Log）设计方案与规范
 
-> status: 设计定稿，待落地（2026-10-05）
+> status: 已落地（2026-11-02 逐项核对代码）
 >
 > 日期：2026-10-05
 >
@@ -170,8 +170,8 @@
 | 初始化脚本清理失败 | `ssh.session.init_script_cleanup_failed` | WARN | `初始化脚本清理失败…` / `初始化脚本清理通道打开失败…`（shutdown 时主动清理残留脚本；常见连接已断开或通道打开被拒） |
 | 断开（主动/异常） | `ssh.disconnect` | INFO/WARN | `连接已断开` reason、uptime_s |
 | 重连中 | `ssh.reconnect` | WARN | `连接中断，准备重连` attempt、max、delay_ms |
-| SFTP 通道建立 | `ssh.sftp.channel.open` | DEBUG | `SFTP 通道建立` |
-| SFTP 通道关闭 | `ssh.sftp.channel.close` | DEBUG | `SFTP 通道空闲超时关闭` idle_s |
+| SFTP 通道建立 | `ssh.sftp.channel.open` | INFO | `SFTP 通道建立` idle_timeout_sec（本会话空闲关闭阈值秒，0 = 常驻） |
+| SFTP 通道关闭 | `ssh.sftp.channel.close` | INFO | `SFTP 通道空闲超时关闭` idle_sec（实际空闲秒）、limit_sec；SSH 终端不受影响，下次 SFTP 操作透明重建通道 |
 
 连接时序约束：
 
@@ -190,22 +190,32 @@
 
 ### 4.3 SFTP 传输与管理（target: `sftp`）
 
-传输任务七个生命周期事件（与 DockPanel 现有 pushLog 文案对齐迁移）：
+传输任务十个生命周期事件（与 DockPanel 现有 pushLog 文案对齐迁移）：
 
 | 事件 | event_id | 级别 | 消息与 kv |
 |---|---|---|---|
 | 入队 | `sftp.transfer.enqueue` | INFO | `上传/下载加入队列` name、size、dir（up/down）、from、to |
 | 开始 | `sftp.transfer.start` | INFO | `上传/下载开始` name、size、resume_from（续传偏移，0 为全新） |
-| 完成 | `sftp.transfer.complete` | INFO | `上传/下载完成` name、size、elapsed_ms、speed_bps（B/s）、verify（none/pass/fail） |
+| 完成 | `sftp.transfer.complete` | INFO | `上传/下载完成` name、size、elapsed_ms、speed_bps（B/s）、verify（none/pass/fail/skipped，skipped 为覆盖策略跳过） |
+| 入队前拦下 | `sftp.transfer.blocked` | INFO | `上传命中黑名单，未创建任务` name、size、dir、reason（blacklist）、from（前端消费 `sftpBlacklist`，零字节传输） |
+| 自动重试 | `sftp.transfer.retry` | WARN | `上传/下载失败，自动重试` name、attempt、max、wait_ms、err、transferred、total（仅瞬时错误；取消/跳过/冲突/校验失败不重试） |
 | 失败 | `sftp.transfer.failed` | ERROR | `上传/下载失败` name、err、transferred、total |
 | 取消 | `sftp.transfer.cancel` | WARN | `上传/下载已取消` name、transferred、total |
 | 暂停 | `sftp.transfer.pause` | WARN | `已暂停` name、pct |
 | 恢复 | `sftp.transfer.resume` | INFO | `上传/下载继续` name、pct（与暂停配对的显式用户动作，默认级别须可见） |
 | 校验失败 | `sftp.transfer.verify_failed` | ERROR | `完整性校验失败` name、expect、actual |
 
-管理操作记 INFO（成功）/ ERROR（失败），event_id 分别为 `sftp.manage.remove` / `sftp.manage.rename` / `sftp.manage.mkdir` / `sftp.manage.copy`，kv 带 path（rename/copy 带 src+dst）。**不记录文件内容**。
+管理操作记 INFO（成功）/ ERROR（失败），event_id 分别为 `sftp.manage.remove` / `sftp.manage.rename` / `sftp.manage.mkdir` / `sftp.manage.copy` / `sftp.manage.chmod`，kv 带 path（rename/copy 带 src+dst；chmod 另带 mode 八进制串、recursive、scope）。**不记录文件内容**。
 
-### 4.4 指标与其他（target: `metrics` / `ipc` / `web`）
+外部编辑器协同（远端文件取回临时副本 → 编辑器保存 → 自动回写）三个事件：
+
+| 事件 | event_id | 级别 | 消息与 kv |
+|---|---|---|---|
+| 打开编辑 | `sftp.edit.open` | INFO | `编辑器打开远端文件` name、remote、temp、size、editor（编辑器标签）；取回失败记 ERROR（err） |
+| 保存回写 | `sftp.edit.sync` | INFO | `编辑保存已回写` name、remote、size、elapsed_ms（副本落盘 → 回写完成的墙钟） |
+| 回写冲突 | `sftp.edit.conflict` | WARN | `远端已变化，等待用户裁决` name、remote、base_mtime_ms、now_mtime_ms、decision（overwrite/keep-remote） |
+
+### 4.4 指标与其他（target: `metrics` / `ipc` / `web` / `external`）
 
 | 事件 | event_id | 级别 | 说明 |
 |---|---|---|---|
@@ -216,6 +226,8 @@
 | 慢 IPC 调用 | `ipc.slow_call` | WARN | `IPC 调用耗时过长` cmd、elapsed_ms（阈值 2000ms，只告警不阻断）。**豁免**：`sftp_upload`/`sftp_download` 等流式传输命令——大文件天然长耗时，进度由 Channel 推送，invoke 总时长不反映卡顿且包含用户主动暂停时间；传输卡顿监控应基于进度帧间隔而非 invoke 时长 |
 | 前端 IPC 错误 | `web.ipc.error` | ERROR | 前端 invoke 失败统一上报：cmd、err |
 | 前端未捕获异常 | `web.unhandled_error` | ERROR | window.onerror / unhandledrejection：err、stack 摘要（截断 500 字符） |
+| 堡垒机外部链接入队 | `external.link_open` | INFO | `收到堡垒机外部连接链接` source（cli/second_instance/url_event）、count、rejected、targets（`user@host:port`，sftp 加后缀）；**kv 永不含密码** |
+| 外部链接被拒 | `external.link_rejected` | WARN | `链接无法解析，已忽略` reason（同时送前端 toast）、source |
 
 ### 4.5 端口转发隧道（target: `tunnel`）
 

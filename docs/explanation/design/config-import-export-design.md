@@ -1,6 +1,6 @@
 # 应用配置导入导出设计方案
 
-> status: 设计定稿，待落地
+> status: 已落地（2026-11-02 逐项核对代码）
 >
 > 日期：2026-10-06
 >
@@ -123,10 +123,16 @@
       "opacity": 96,
       "splashDurationMs": 400,
       "splashTransparent": true,
-      "fontFamily": "JetBrains Mono",
-      "fontSize": 13,
-      "lineHeight": 145,
+      "fontFamily": "DejaVu Sans Mono",
+      "fontSize": 14,
+      "lineHeight": 125,
       "fontWeight": "400",
+      "termTheme": "fs",
+      "termBg": "dark",
+      "termBgImageOn": false,
+      "termBgImage": "",
+      "termBgImageOpacity": 60,
+      "termBgImageBlur": 0,
       "colorPrompt": true,
       "motd": true,
       "motdLogoOn": false,
@@ -135,11 +141,12 @@
       "trimOnCopy": true,
       "pasteGuard": false,
       "rightClick": "menu",
-      "cursorStyle": "bar",
+      "cursorStyle": "block",
       "cursorBlink": true,
       "autoReconnect": true,
       "autoReconnectMaxAttempts": 5,
       "env": [{ "key": "EDITOR", "value": "nvim" }],
+      "commandTemplates": [{ "name": "nginx 状态", "command": "systemctl status nginx" }],
       "key.newTab": "⌘+T",
       "key.closeTab": "⌘+W",
       "key.splitV": "⌘+D",
@@ -151,7 +158,7 @@
       "gpuAccel": true,
       "renderer": "auto",
       "memInterval": 2,
-      "metricsInterval": 3,
+      "metricsInterval": 2,
       "memPauseHidden": true,
       "memAlertMb": 300,
       "sftpChunkKb": 64,

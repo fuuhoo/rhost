@@ -44,6 +44,9 @@ features:
   - icon: 📊
     title: 服务器监控
     details: MOTD 欢迎面板 + CPU / 内存 / 磁盘 / 网络 / 进程 / GPU 周期指标，经独立 exec 通道采集，零 sudo、零远端落盘。
+  - icon: 🚪
+    title: 堡垒机外部连接
+    details: 兼容 Xshell / WinSCP 的命令行调用（-url / -newtab / /sessionname=），可被 JumpServer 等堡垒机当作 SSH / SFTP 客户端拉起：ssh:// 开终端、sftp:// 开文件管理，会话不保存、密码只在内存、每条连接只开一条通道；已在运行时链接交给现有实例。
   - icon: 🔐
     title: 主机密钥校验
     details: TOFU 首次信任 + known_hosts 指纹持久化，密钥变更弹红色警告，防中间人攻击。

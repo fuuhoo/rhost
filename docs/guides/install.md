@@ -21,7 +21,7 @@ Rhost 基于 Tauri 2，SSH 连接由纯 Rust 的 `russh` 实现，**无需安装
 
 ## 2. 获取安装包
 
-前往 [Releases 页面](https://github.com/ShiJieCloud/rhost/releases)，按系统选择：
+前往 [Releases 页面](https://github.com/fuuhoo/rhost/releases)，按系统选择：
 
 | 系统 | 安装包 | 适用 |
 |---|---|---|
@@ -157,7 +157,7 @@ Rhost 通过 `src-tauri/capabilities/default.json` 声明最小权限集：
 ## 7. 升级
 
 1. 退出运行中的 Rhost；
-2. 从 [Releases](https://github.com/ShiJieCloud/rhost/releases) 下载新版安装包；
+2. 从 [Releases](https://github.com/fuuhoo/rhost/releases) 下载新版安装包；
 3. 直接安装覆盖旧版（macOS 拖入 `/Applications` 替换、Windows 安装器覆盖、Linux 重装包）；
 4. 启动新版。
 

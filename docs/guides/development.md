@@ -112,6 +112,17 @@ docker run -d --name rhost-test-sshd-debian -p 2223:22 rhost-sshd-debian
 # 应用中新建主机 127.0.0.1:2223，账号 test / rhost123
 ```
 
+不想起容器时，也可以把用例指向一台真实 SSH 主机（PTY / SFTP / 目录树类用例通用）：
+
+```bash
+RHOST_E2E_HOST=10.0.0.1 RHOST_E2E_PORT=22 RHOST_E2E_USER=root \
+  RHOST_E2E_PASSWORD='…' cargo test --test ssh_e2e -- --nocapture --test-threads=1
+```
+
+- 密码只从环境变量取，用例与日志都不打印它；
+- 隧道类（`tunnel_*`）与主机密钥类（`ssh_hostkey_*`）会**自动跳过**：前者真的会在目标机上开转发端口，后者的校验项写死了容器地址，两类都不该拿真实主机当测试床；
+- 真实主机常有限流：连开二十来个连接后偶发 `Operation timed out`，用例按「环境缺失」跳过而非失败，稍后单跑那几条即可。
+
 ### 4.3 前端
 
 目前没有单元测试框架，前端改动以 `npm run build` 类型检查 + 浏览器/桌面手动验证为准。
@@ -137,6 +148,7 @@ docker run -d --name rhost-test-sshd-debian -p 2223:22 rhost-sshd-debian
 
 - 全局弹窗在 `App.vue` **常驻挂载**，通过 store 的 `showXxx` ref 控制显隐；
 - 弹层/右键菜单用 `<Teleport to="body">`，显隐用 `defineModel<boolean>('visible')` 契约，外部点击/Esc/滚动关闭，document 级监听必须成对移除（参考 `components/wb/ContextMenu.vue`）；
+- 注入面板头部的 `<Teleport>` 目标（`#mp-head-actions` / `#rp-head-actions`）与内容组件同属一棵子树，挂载瞬间该子树还没插入 document，`querySelector` 取不到 target 会让 teleport 内容整体不挂载（`vnode.el` 保持 null），下次更新即在 `patchElement` 抛 `null is not an object`，因此**必须加 `defer`**；
 - 拦截 xterm 等组件原生事件（copy/paste）时，在 **capture 阶段**注册抢在内部 handler 前，并保证不干扰 Ctrl+C 等无选区信号；
 - 反馈统一走 `toast(msg, type, duration)`（`composables/useToast.ts`），错误一般先 `console.error` 留痕再 toast；
 - 样式：全局令牌（`--bg/--panel/--border/--green…/--rhost-status-*`）定义在 `src/style.css`，组件内用 `<style scoped>`；全站等宽字体、深色基调；不要引入新的 UI/CSS 框架。
@@ -212,5 +224,5 @@ refactor(sftp): 传输队列改为串行调度
 ## 8. 已知的文档/工程偏差
 
 - 根目录 `README.md` 的部分技术描述已过时（写的是 Pinia、ssh2、sled、spawn_blocking、旧目录结构），与当前实现不符时**以本文档与代码为准**；
-- 仓库暂无 lint/format 配置与 CI，提交前至少保证 `npm run build` 与 `cargo test` 通过；
-- 代码中注释带"逻辑待实现"的功能（如 SFTP 覆盖策略的部分分支、SHA256 断点校验）以 `settings.ts` 字段注释为准，勿假设已生效。
+- 仓库无前端 lint/format 配置，但有 `.husky/commit-msg` + commitlint 约束提交信息，以及 `.github/workflows/{docs,release}.yml`；提交前至少保证 `npm run build` 与 `cargo test` 通过；
+- SFTP 覆盖策略、断点校验（含 SHA256）、并发上限与带宽限速、失败重试、GPU/WebGL 渲染后端均已接入业务逻辑；设置项若仍带 TODO 徽章（`tunnelKeepaliveSec`、`key.splitV/H`、`autoUpdate`、`updateChannel`）则为仅持久化未消费，以 `SettingsModal.vue` 的 `todo` 说明为准。

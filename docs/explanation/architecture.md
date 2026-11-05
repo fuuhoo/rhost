@@ -27,7 +27,7 @@ Rhost 是一款基于 **Tauri 2** 的跨平台 SSH 远程主机管理器（对�
 | 桌面框架 | Tauri 2.12 | 无边框窗口（`decorations: false`），自绘标题栏 |
 | 后端 | Rust edition 2024（rustc ≥ 1.90）、tokio 全异步 | russh 0.63 / russh-sftp 3，**纯 async，禁止 `spawn_blocking` 包 SSH IO** |
 | 前端 | Vue 3.5（`<script setup>`）+ TypeScript 6 + Vite 8 | **未使用 Pinia、Vue Router**；状态用模块级单例 |
-| 终端 | @xterm/xterm 6 + addon-fit + addon-web-links | 透明背景，固定 ANSI 配色 |
+| 终端 | @xterm/xterm 6 + addon-fit + addon-web-links | 透明背景（xterm 主题 `background` 恒透明，容器底色由 CSS 变量提供，可走玻璃不透明度），ANSI 配色由「配色方案 × 背景颜色」解析（`lib/termThemes.ts` 单一来源）；背景图片开启时「背景颜色」整条退出、衬底改由图片自身提供（浓度层下面垫图片平均色，避免浅色窗口玻璃把壁纸洗成灰膜），墨色按图片平均亮度在方案的深/浅变体里取对比度更高的一套（模糊/浓度只作用图片层，文字恒清晰）；等宽字形四款随包内置（`public/fonts` TTF + `@fontsource` woff2），不依赖系统安装 |
 | 其他 | thiserror、keyring、sysinfo、chrono、uuid、tauri-plugin-opener / clipboard-manager | |
 | 校验 | 前端构建含 `vue-tsc` 类型检查；Rust 内联单测 + e2e | 仓库暂无 ESLint / Prettier / rustfmt 配置 |
 
@@ -54,13 +54,14 @@ rhost/
 │   └── src/
 │       ├── main.rs / lib.rs   # 启动入口；插件与 invoke 命令注册、State 注入
 │       ├── ipc.rs             # IPC 适配层（薄）：参数校验 + 转发，无业务逻辑
+│       ├── external.rs        # 堡垒机 ssh:// / sftp:// 链接：命令行与 URL 事件解析、入队投递
 │       ├── ssh/               # frame / session / manager / sftp
 │       ├── metrics/           # 远端指标解析（纯函数）+ collector（周期采集）
 │       ├── motd/              # MOTD 结构化指令生成
 │       ├── store.rs           # connections.json + 系统钥匙串
 │       ├── localfs.rs         # 本地文件系统命令
 │       └── sysmon.rs          # 本机内存采集
-│   └── tests/ssh_e2e.rs       # 依赖本地 Docker sshd 的端到端测试
+│   └── tests/ssh_e2e.rs       # 端到端测试（默认本地 Docker sshd，RHOST_E2E_* 可指向真实主机）
 └── docker/debian-sshd/        # MOTD 全功能测试容器（端口 2223）
 ```
 
@@ -68,7 +69,7 @@ rhost/
 
 ```
 ┌──────────────────────────── 前端（Vue3）────────────────────────────┐
-│  views / components（TerminalPane、DockPanel、Inspector、Settings…） │
+│  views / components（TerminalPane、DockPanel、MonitorPanel、Settings…） │
 │          │ 只依赖 stores 层的导出函数与单例 ref                       │
 │  stores（session / hosts / settings / groups / keys）               │
 │          │ invoke() 低频 JSON          │ Channel 高频二进制帧       │
@@ -100,6 +101,7 @@ rhost/
 |---|---|---|
 | `lib.rs` | 注册插件、注入 `SessionManager` 全局 State、登记全部 invoke 命令 | **新增命令必须在此 `invoke_handler!` 列表登记** |
 | `ipc.rs` | 命令入参结构（`#[serde(rename_all = "camelCase")]`）、调用 manager、错误转 String | 连接命令会 spawn 帧转发任务：Channel send 失败即退出 |
+| `external.rs` | 堡垒机外部连接：解析 `ssh://` / `sftp://` 链接与 Xshell / WinSCP 命令行参数，入队 `PendingLinks` 并 emit `external-open`，把窗口带到前台 | 链接用**入队 + 事件**双轨送达（冷启动时前端监听器尚未挂载）；`take_external_links` 是取空语义，重复触发不重复开会话；日志只记 `user@host:port`，密码不落盘、不写钥匙串 |
 | `ssh/frame.rs` | 帧类型枚举与 `encode_frame/decode_frame` | 帧类型是前后端共同协议常量，改动需同步前端 |
 | `ssh/session.rs` | 单条 SSH 会话：russh handler、认证、PTY 读写、4KB/5ms 攒包、RTT、指标调度、彩色提示符注入 | 文件头有完整数据流 ASCII 图；常量化队列容量与超时时长 |
 | `ssh/manager.rs` | 会话池生命周期：create/write/resize/disconnect、指标开关 | 统一手法：**clone Arc 后立刻释放锁，禁止持锁 await** |
@@ -120,7 +122,9 @@ rhost/
 - Workbench 一旦挂载过就用 `v-show` 保活（终端/xterm 状态不被销毁），即使关闭全部会话也不卸载；
 - 全局弹窗（NewConnection / Settings / Group / Keys / Password / Toast）在 App.vue 常驻挂载，通过各 store 的 `showXxx` ref 控制显隐。
 
-工作台结构（`views/Workbench.vue`）：`WbSideBar + (WbTabs → TerminalPane → DockPanel) + Inspector + StatusBar`。
+工作台结构（`views/Workbench.vue`）：`MonitorPanel（左栏监控，内含 MonitorPane）+ (WbTabs → TerminalPane → DockPanel)`；右栏 `RightPanel`（主机 / AI 页签，首页主机页签为 HistoryPane）与 `RightIconRail` 挂在 `App.vue` 的 `app-body` 上，`StatusBar` 横贯底部。
+
+`sftp://` 外部连接会话没有 PTY（`.sftp-fill`）：TerminalPane 让位，DockPanel 以 `flex:1` 顶替终端占满工作区，此时 `.dock` 的内联高度由样式表 `!important` 覆盖、拖拽柄隐藏。
 
 ### 6.2 stores（模块级单例，非 Pinia）
 
@@ -130,6 +134,7 @@ rhost/
 | `stores/hosts.ts` | 主机列表、筛选、与后端 `StoredHost` 的双向转换、增删改 |
 | `stores/settings.ts` | `AppSettings` 接口 + 默认值 + localStorage 持久化 + 强调色应用 |
 | `stores/groups.ts` / `stores/keys.ts` | 分组、密钥管理 |
+| `lib/externalLinks.ts` | 堡垒机外部连接入口：监听 `external-open` → `take_external_links` 领取链接 → `openExternalSession`（`stores/session.ts`）开不保存会话；解析失败的原因以 toast 呈现 |
 
 约定：`export const xxx = ref(...)` 即为全局单例；高频整帧替换的数据用 `shallowRef(new Map())` + 手动 `triggerRef`。
 
@@ -203,7 +208,7 @@ xterm fit → `onResize` → 前端节流（leading 立即发 + 50ms trailing �
 
 ### 8.3 指标采集（另见 metrics-design.md）
 
-只有"活动 Tab + Inspector 可见"的会话采集：前端 `start_metrics` 带间隔启动后端 `MetricsCollector`，经**独立 exec 通道**跑普通用户可读命令（禁止 sudo/落盘/拼接），解析为 Metrics 帧周期推送；面板隐藏时心跳停止，后端停采集；会话断开随 CancellationToken 清理。
+只有"活动 Tab + 左栏监控面板可见"的会话采集：前端 `start_metrics` 带间隔启动后端 `MetricsCollector`，经**独立 exec 通道**跑普通用户可读命令（禁止 sudo/落盘/拼接），解析为 Metrics 帧周期推送；面板隐藏时心跳停止，后端停采集；会话断开随 CancellationToken 清理。
 
 ### 8.4 SFTP 浏览与传输
 

@@ -1,19 +1,19 @@
-# 右侧栏主机指标采集设计方案
+# 左栏主机指标采集设计方案
 
 > status: P0–P4 已全部落地（2026-10-03）；100 会话压测、断连清理、Darwin 式无 procfs 降级均已 e2e/单测验证
 >
-> 日期：2026-10-03
+> 日期：2026-10-03（2026-11-02 更新：面板由右栏迁至左栏，组件更名 MonitorPanel / MonitorPane，默认采集间隔 3s → 2s；同日再按 FinalShell 重排为「头部 / 文本行 / 资源横条 / GPU / 页签图表 / 磁盘表」六区，见 §2.2）
 >
-> scope: 工作台右侧栏（Inspector）全部远程主机指标的采集、传输、渲染与生命周期管理
+> scope: 工作台左栏（MonitorPanel → MonitorPane）全部远程主机指标的采集、传输、渲染与生命周期管理
 >
-> 关联代码：`src-tauri/src/ssh/{session,frame,manager}.rs`、`src-tauri/src/motd/mod.rs`、`frontend/src/components/wb/Inspector.vue`、`frontend/src/stores/session.ts`
+> 关联代码：`src-tauri/src/ssh/{session,frame,manager}.rs`、`src-tauri/src/motd/mod.rs`、`frontend/src/components/wb/{MonitorPanel,MonitorPane}.vue`、`frontend/src/stores/session.ts`
 
 ## 1. 设计目标与硬约束
 
 | 目标 | 量化口径 |
 |---|---|
 | 高性能 | 无 GPU 时单轮远端执行 P95 < 50ms；帧 payload < 4KB；本地解析 < 1ms |
-| 低消耗 | **只有「当前活动 Tab + Inspector 可见」的会话才采集**；侧栏隐藏/窗口最小化时零 SSH 流量；Rhost 自身 CPU 增量 < 1%/活动会话 |
+| 低消耗 | **只有「当前活动 Tab + 左栏监控面板可见」的会话才采集**；面板折叠/窗口最小化时零 SSH 流量；Rhost 自身 CPU 增量 < 1%/活动会话 |
 | 安全 | 零命令拼接、零远端落盘、零 sudo、零常驻进程；argv 不泄露；断连零残留 |
 | 高并发 | 100+ 会话不雪崩：每会话单飞 + 全局信号量闸门 + 启动错峰 + watch 丢帧合并 |
 
@@ -34,7 +34,7 @@
 |---|---|---|---|
 | 静态 | 系统信息 | 连接时 **1 次** | `/etc/os-release`（PRETTY_NAME）、`uname -srm`、`nproc`、`/proc/cpuinfo`（model name 去重）、`/proc/uptime`、`date +%z %Z`、默认路由 iface/IP（MOTD 已有）、GPU 能力探测 |
 | 动态 | CPU/内存/Swap、GPU、网络、进程 | 2–3s | `/proc/stat`（两次差值）、`/proc/loadavg`、`/proc/meminfo`（MemTotal/**MemAvailable**/SwapTotal/SwapFree）、`/proc/net/dev`（字节差值算速率）、遍历 `/proc/[0-9]*/stat`、`nvidia-smi --query-gpu`（AMD 回退 `rocm-smi`） |
-| 低频 | 磁盘 | 30s（每 10 轮夹带一次） | `df -Pk`（POSIX、KB 精确值），过滤 tmpfs/devtmpfs/伪 fs，保留 overlay |
+| 低频 | 磁盘 | 30s（每 10 轮夹带一次） | `df -PkT`（GNU/busybox 支持时附文件系统类型列，失败回退 `df -Pk`；POSIX、KB 精确值），仅滤零容量内核伪 fs 与容器注入单文件挂载，tmpfs/devtmpfs/overlay 全保留（全挂载点列表，对齐 FinalShell） |
 
 口径要点：
 
@@ -43,7 +43,7 @@
 - **进程 CPU%** 用 `/proc/pid/stat` 的 utime+stime（字段 14/15）**两次采样差值 / 实际间隔** 计算。`ps aux` 的 CPU% 是进程生命周期均值，不可用；busybox `ps -o/--sort` 支持残缺，直接读 /proc 最稳（Alpine/嵌入式通用）。
 - **进程名**取 `/proc/pid/stat` 第 2 字段 comm（内核给的可执行名），用「最后一个 `)`」切分（comm 可含空格/括号，是经典解析坑）；**不读 cmdline**——见安全章节。RSS = 字段 24 × page size。
 - **网络速率** = `/proc/net/dev` 收发字节差 / 两次采样墙钟差。
-- **磁盘**用 `df -Pk`（POSIX 标准 `-P` 单行记录、`-k` 输出 1K 块精确值）；同设备多挂载点去重；overlay 必须保留（容器根分区）。
+- **磁盘**用 `df -PkT`（POSIX 标准 `-P` 单行记录、`-k` 输出 1K 块精确值；`-T` 附文件系统类型列，macOS/BSD 的 df 不支持时整体失败 → 脚本 `||` 回退 `df -Pk`，解析端兼容两种列布局）。全挂载点列表（对齐 FinalShell）：不按容量三元组去重——那会吞掉 btrfs 子卷与容器每层 overlay；只滤零容量内核伪 fs（total==0 兜底）与 /etc/hosts 等容器注入单文件挂载；tmpfs/devtmpfs/overlay 全保留，表体在前端内部滚动。
 - **无 swap**（SwapTotal=0）时前端隐藏 Swap 进度条，而非显示 0%。
 
 ### 2.1 指标对照表（相对当前 Inspector 实现）
@@ -67,8 +67,8 @@
 | 网络 | 上传/下载速率 | `/proc/net/dev` 字节差值 ÷ 真实采样间隔（sparkline 保留） | 随机数 |
 | 网络 | 累计收发字节 rxBytes/txBytes | `/proc/net/dev` | 界面缺失 |
 | 网络 | 丢包/错误累计计数 | `/proc/net/dev` drop/error 列 | 显示无法采集的链路「丢包率 0.02%」 |
-| 磁盘 | 全挂载点列表 + 可用容量 Avail | `df -Pk` 过滤 tmpfs/devtmpfs 等伪 fs，保留 overlay | 4 条写死数据 |
-| 磁盘 | 文件系统类型 fs（ext4/xfs/overlay） | `df -Pk` + 挂载枚举 | 界面缺失 |
+| 磁盘 | 全挂载点列表 + 可用容量 Avail | `df -PkT`/`df -Pk`，仅滤零容量伪 fs 与容器注入单文件挂载（tmpfs/devtmpfs 保留） | 4 条写死数据 |
+| 磁盘 | 文件系统类型 fs（ext4/xfs/overlay） | `df -PkT` Type 列（无 -T 支持时为空、前端隐藏徽标） | 界面缺失 → 已补齐（路径右侧类型徽标） |
 | 进程 | 进程总数 | `/proc/[0-9]*` 计数 | 显示 mock 数组长度 |
 | 进程 | PID / 命令名 / CPU% | 遍历 /proc，utime+stime 两次差值，按 CPU 排序取 Top N；命令名只取内核 comm（不读 cmdline 防泄露密钥） | mock 数组 |
 | 进程 | 进程 RSS 实际字节 | `/proc/pid/stat` 字段 24 × page size | mem 列为含义模糊的 mock 百分比 |
@@ -80,12 +80,25 @@
 - **链路丢包率 / RTT 持续探测**：主机自身采不到「到本机链路」的丢包率；RTT 沿用建连时单次值（持续刷新需走 SSH keepalive global request 计时，列入后续增强）。
 - **GPU 进程列表**（哪张卡上跑着哪些 PID）：nvidia-smi 可取但解析重、敏感度高，列为二期可选项。
 
+### 2.2 面板布局（2026-11-02 按 FinalShell 重排）
+
+左栏自上而下六区，只动渲染层，采集门控与数据口径（§5.2、§2.1）不变：
+
+| 区 | 内容 | 说明 |
+|---|---|---|
+| 连接头部 | 状态（五态圆点）+ 会话时长 → 主机名 → `IP 地址 + 复制` → `账号 · 认证方式 · RTT` → 「系统信息」整宽按钮 | 系统信息默认收起，展开为发行版/内核/架构/CPU 型号/时区/服务器 IP/登录时间键值表；运行时长移出到下一区 |
+| 文本行 | `运行 <主机开机时长>`、`负载 <1/5/15 分钟>` | 纯文本行，不占用进度条位置 |
+| 资源横条 | CPU / 内存 / 交换 各一行 | 标签在条外左侧，百分比在条内左、用量在条内右；填充半透明以保证条内文字对比；`SwapTotal=0` 时交换整行隐藏 |
+| GPU | 每卡「利用率 + 显存」两条同款横条 | 温度/功耗作为条内右侧附注（温度语义色向强文本混合，避免压在填充上看不清）；无 GPU 主机整块隐藏 |
+| 页签区 | 「网络」/「进程 · N」两页签 | 网络=上传/下载双序列面积曲线（28 点环形数组、共用一个纵轴刻度、网卡名标在右上、0 落在图底）；进程=CPU Top 5 表 |
+| 磁盘表 | `路径 \| 可用 / 大小 \| 使用%` 密集表格 | 挂载点可达数十条（每容器一条 overlay），表体自身滚动（≤232px）不把面板撑长；使用率 ≥65% 黄、≥85% 红 |
+
 ## 3. 总体架构
 
 ```
 前端                          后端(Rust)                      远端
 ─────                         ──────────                      ────
-Inspector 可见且活动
+左栏监控可见且活动
   │ invoke start_metrics(sid, {intervalMs})
   │ 每 5s heartbeat ──────────► Collector::start
   │                            ┌─ tokio interval(+jitter)
@@ -256,12 +269,12 @@ const activeMetrics = computed(() => metricsMap.value.get(activeSessionId.value)
 以下条件全部满足才 start，任一变化即重新评估：
 
 - `activeSession.state === 'online'`；
-- `inspectorVisible === true`（侧栏折叠不采）；
-- Inspector 滚动容器在视口内（IntersectionObserver，沿用状态栏内存监控的成熟模式）；
+- `monitorVisible === true`（左栏折叠不采）；
+- 监控面板滚动容器在视口内（IntersectionObserver，沿用状态栏内存监控的成熟模式）；
 - `document.visibilityState === 'visible'`（最小化/切别的 App 暂停，恢复时立即补采一帧）；
 - `autoRefresh === true`。
 
-**后台 Tab 的会话永不采集**——这是高并发下消耗不随 Tab 数线性增长的根本。轮询间隔进全局设置（沿用 settings.ts 数据驱动面板模式），默认 3s，范围 1–10s。
+**后台 Tab 的会话永不采集**——这是高并发下消耗不随 Tab 数线性增长的根本。轮询间隔进全局设置（沿用 settings.ts 数据驱动面板模式），默认 2s（对齐 FinalShell），范围 1–10s。
 
 ## 6. 安全设计（清单）
 

@@ -12,7 +12,7 @@
 
 | 平台 | 地址 |
 |---|---|
-| GitHub | https://github.com/ShiJieCloud/rhost |
+| GitHub | https://github.com/fuuhoo/rhost |
 | GitCode | https://gitcode.com/qq_20185737/rhost |
 
 两个平台同步镜像，PR 可提交到任意一方。

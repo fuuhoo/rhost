@@ -4,7 +4,7 @@
 >
 > created: 2026-10-13 09:43:42
 >
-> updated: 2026-10-13 10:34:36
+> updated: 2026-11-03 16:10:00
 >
 > author:
 
@@ -51,7 +51,7 @@
 | `frontend/src/components/AiChatPanel.vue` | 单行 `<input>`；`buildWireMessages` 过滤 `content.trim()` 为空的 user 消息 | 无附件采集/预览/压缩/读取；无 `images` / `files` 装配；纯附件消息（无文本）会被过滤丢弃 |
 | 输入区 UI | 单行 flex：[权限档] [Plan] [input] [发送] | 与参考图差距：需大圆角容器 + 多行 textarea + 底部工具行 + 圆形发送按钮 + `+` 附件按钮 |
 
-结论：本设计补齐五块——后端 content 透传放宽、拖放开关放开以启用 HTML5 采集、前端图片与文本/代码附件采集/压缩/读取/预览/装配链路、输入区外观重构，以及附件类型判别（`kind`）驱动的分流与回显。
+结论：本设计补齐五块——后端 content 透传放宽、拖拽入口改走 Tauri webview 级拖放事件（见 §6.1 的「拖放归属」，早期为放 HTML5 而关处理器的做法已回退）、前端图片与文本/代码附件采集/压缩/读取/预览/装配链路、输入区外观重构，以及附件类型判别（`kind`）驱动的分流与回显。
 
 ## 4. 目标与非目标
 
@@ -78,7 +78,7 @@
 ```text
 采集入口（三态）
    ├─ 粘贴：paste 事件 → clipboardData.files（仅图片）→ File
-   ├─ 拖拽：dragover/drop 事件 → dataTransfer.files → File（过滤：图片 or 白名单文本）
+   ├─ 拖拽：桌面端 Tauri webview 级拖放事件 → 绝对路径 → 读回字节重组 File；浏览器模式 dragover/drop → dataTransfer.files
    └─ 选择：点击 + → 隐藏 <input type="file" accept="图片 MIME + 文本扩展名"> → File
             │
             ▼
@@ -104,7 +104,7 @@
      AiChatMessage.images / .files 随 persist() 落盘 → 历史回显缩略图与文件 chip
 ```
 
-与既有模块的关系：采集与压缩全在前端完成（Web API：`paste` / `drop` / `<input type=file>` / `canvas`），后端零新增依赖，仅把 `AiMessage.content` 放宽为透传 JSON。ReAct 工具循环、授权、计划等链路对本特性透明。
+与既有模块的关系：校验与压缩全在前端完成（Web API：`paste` / `drop` / `canvas`），桌面端拖拽额外的字节读回走 `localfs::read_local_file_base64`，后端没有其它新增依赖，`AiMessage.content` 仍只做透传。ReAct 工具循环、授权、计划等链路对本特性透明。
 
 ## 6. 详细设计
 
@@ -113,10 +113,10 @@
 | 入口 | 触发 | 取值方式 |
 |---|---|---|
 | 粘贴 | 输入区 `@paste` | `e.clipboardData.files`（截图/复制图片，仅图片）；命中图片则 `preventDefault` 阻止二进制粘入 textarea |
-| 拖拽 | 输入区 `@dragover.prevent` + `@drop` | `e.dataTransfer.files`；仅收图片与白名单文本文件，其余静默忽略；拖拽全程给输入区加 `.dragging` 高亮 |
+| 拖拽 | 桌面端 `watchFileDrop`（Tauri webview 级拖放事件，落点按输入区矩形判定）；浏览器模式输入区 `@dragover.prevent` + `@drop` | 桌面端拿到绝对路径，按扩展名定 MIME（图片 / 白名单文本）后用 `read_local_file_base64` 读回字节重组 `File`；浏览器端直接取 `e.dataTransfer.files`。两条通道都只收图片与白名单文本文件，其余静默忽略；拖拽全程给输入区加 `.dragging` 高亮 |
 | 选择 | `+` 按钮 → 隐藏 `<input type="file">` | `input.files`；`accept` 由「图片 MIME + 文本/代码扩展名」派生；选择后清空 `input.value` 以允许重复选同一文件 |
 
-- **拖放开关**：Tauri 默认启用拖放处理器（拦截 OS 文件拖放并改发 Tauri 事件），导致 webview 收不到携带 File 的 HTML5 `drop`。在 `src-tauri/src/lib.rs` 建窗处追加 `.disable_drag_drop_handler()` 关闭该处理器，让 webview 原生处理 HTML5 拖放。经检索前端无任何 Tauri 拖放事件（`tauri://drag-drop`）消费方，放开无回归影响；
+- **拖放归属**：Tauri 的拖放处理器保持开启（SFTP 的「拖入即上传」必须要它——只有该事件给出被拖入项的真实路径）。开启时 webview 收不到携带 File 的 HTML5 `drop`，所以 AI 附件的桌面端拖拽同样订阅 `tauri://drag-drop`，落点用输入区矩形判定（`frontend/src/lib/fileDrop.ts` 的 `watchFileDrop` / `dropOverElement`，物理像素 × `devicePixelRatio` 与 DOM 矩形对齐）；浏览器预览模式没有这条通道，保留 HTML5 处理器。webview 级事件只有路径没有字节，重组 `File` 依赖后端 `localfs::read_local_file_base64`（与设置里选背景图共用，20MB 上限由其把关）；
 - 三入口统一收敛到 `addFiles(files: File[])`，内部按 MIME 分流：`image/*` → `addImageFile(file, name?)`，其余 → `addTextFile(file)`；`name` 为拖拽/选择可得文件名，粘贴缺省为「粘贴的图片」；
 - 拖拽/选择可携带多个文件：逐个分流处理，各自受数量上限约束。
 

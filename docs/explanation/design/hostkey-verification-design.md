@@ -4,7 +4,7 @@
 >
 > created: 2026-10-08 09:28:16
 >
-> updated: 2026-10-08 12:13:11
+> updated: 2026-11-02 17:00:00
 >
 > author: [sjzhao](https://github.com/ShiJieCloud/rhost)
 
@@ -39,6 +39,8 @@
 - 错误前缀 / invoke 入参变更须在同 PR 更新 `docs/architecture.md`、`docs/development.md` 的前缀清单（docs-spec「代码改动联动」）——本文新增 `HOSTKEY_UNKNOWN:` / `HOSTKEY_MISMATCH:` 即适用。
 
 ## 3. 现状盘点与差距
+
+> 本节是 2026-10-08 设计定稿时的快照：表中「差距」列此后已按 §6 全部落地，不再代表当前状态。
 
 | 位置 | 现状 | 差距 |
 |---|---|---|

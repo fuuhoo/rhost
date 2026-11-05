@@ -162,7 +162,7 @@ git push origin v1.0.0
 
 适用于升级依赖后验证三平台打包，不创建 Release：
 
-1. 打开 `https://github.com/ShiJieCloud/rhost/actions/workflows/release.yml`
+1. 打开 `https://github.com/fuuhoo/rhost/actions/workflows/release.yml`
 2. 点 `Run workflow` → 选 `main` → 运行
 
 产物在 Actions 运行详情页的 Artifacts 区下载，保留 90 天。

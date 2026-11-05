@@ -4,7 +4,7 @@
 >
 > created: 2026-10-07 18:37:33
 >
-> updated: 2026-10-07 23:22:03
+> updated: 2026-11-02 15:05:00
 >
 > author: [sjzhao](https://github.com/ShiJieCloud/rhost)
 
@@ -48,6 +48,9 @@
 
 ## 3. 现状盘点与差距
 
+> 本节是设计定稿时的快照：表中「差距」列此后已按 §6.2–§6.11 全部落地，不再代表当前状态。
+> 当前哪个设置项被谁消费，以 §6.11 消费矩阵与代码为准。
+
 | 位置 | 现状 | 差距 |
 |---|---|---|
 | `frontend/src/components/NewConnectionModal.vue` 端口转发卡片 | **结构化规则编辑器已上线**：卡片列表，每条规则含类型（本地/远程/动态）、名称、启用开关、绑定地址+端口、目标地址+端口（动态无目标）；支持增删改、拖拽/键盘排序、逐条启用；`save()` 把 `tunnelRules` 写入 `Host.tunnels` | 无（数据模型与表单均已完成） |
@@ -72,7 +75,8 @@
 4. 规则随主机配置持久化（`extra.tunnels` 结构化数组，**链路已就绪，本期不改 schema**），新建/编辑/导入导出全链路保留；
 5. 会话内可逐条启停、查看状态（活动/失败原因/实际端口/活动连接数/双向流量）；
 6. 连接建立后按设置自动启动**已启用**（`enabled=true`）的规则；转发瞬态失败按设置重试；SSH 断线重连成功后自动恢复规则；
-7. 落地 5 个设置项：`tunnelAutoStart`、`tunnelPortConflict`、`tunnelRetryCount`、`tunnelReconnect`、`tunnelDnsResolve`；`tunnelNotify` 从设置 schema 移除（失败 toast 改为内置默认行为）。
+7. 落地 5 个设置项：`tunnelAutoStart`、`tunnelPortConflict`、`tunnelRetryCount`、`tunnelReconnect`、`tunnelDnsResolve`；`tunnelNotify` 从设置 schema 移除（失败 toast 改为内置默认行为）；
+8. `tunnelIdleTimeoutSec`（后续增量落地）：`tunnel_start` 把它透传给引擎并快照进规则条目，转发连接双向静默超过该时长即关闭并释放通道资源。
 
 ### 非目标
 
@@ -80,7 +84,6 @@
 - 会话内添加「临时规则」（规则一律在主机配置面板维护；Dock 页签只做运行态启停与观测，不做规则增删）；
 - SOCKS5 用户/密码认证、`BIND`、`UDP ASSOCIATE`；
 - X11 转发、streamlocal（Unix socket）转发；
-- `tunnelIdleTimeoutSec`（空闲自动断开）：保持 TODO 不消费；
 - `tunnelKeepaliveSec`：保持 TODO 不消费——主连接已有的 RTT global-request 任务（30s 周期，见 `ssh/session.rs` `rtt_task`）客观上覆盖了 NAT 保活作用，转发通道无需独立保活报文；
 - 系统级桌面通知：不引入 `tauri-plugin-notification`；`tunnelNotify` 设置项移除，失败提示固定为应用内 toast；
 - 流量数据持久化：字节计数仅存内存，重启/重连清零。
@@ -258,7 +261,7 @@ struct TunnelEntry {
 | `COPY_BUF` | 16384 | 转发为交互式流量，16KB 在延迟与吞吐间平衡 |
 | `SOCKS_HANDSHAKE_MAX` | 512 | SOCKS5 方法协商 + CONNECT 请求最大长度远小于此，防恶意客户端灌包 |
 | `HANDSHAKE_TIMEOUT` | 10s | 本地 accept 后到 channel 打开成功的总窗口（含 SOCKS 握手 + SSH channel open），逾期强制关闭 TCP |
-| `CONN_COPY_TIMEOUT` | 0（无空闲超时） | 运行期 copy 不设空闲超时（由 `tunnelIdleTimeoutSec` 将来接管，见非目标）；连接长活不断 |
+| 空闲关闭阈值（`TunnelEntry::idle_sec`） | 0（不因空闲关闭） | 运行期 copy 不设硬超时；`idle_sec > 0` 时 `relay_channel_tcp` 起看门狗，两路 copy 都无流量超过该时长即取消本连接（检查粒度 `idle/4`，限幅 250ms–5s），由收尾路径关通道、归还许可；取值在 start 时快照，改设置不影响已在传的连接 |
 | `SUPERVISOR_RETRY_BASE_MS` / `SUPERVISOR_RETRY_MAX_MS` | 1000 / 30000 | 监听器监督器退避：1s 起翻倍，封顶 30s |
 | `SUPERVISOR_MAX_RETRIES` | 5 | 连续 accept 失败后规则置 Error，不再无限重启 |
 | `ACCEPT_RATE_BURST` | 200 | 单规则接入速率令牌桶突发上限；限流在 burst 前对突发友好，达限后平滑拒绝 |
@@ -459,7 +462,7 @@ loop {
 | `tunnelDnsResolve` | 落地，移除 TODO 徽章；**设置项 desc 补充提示**：`local` 时本机 DNS/hosts/VPN 与远端解析结果可能不一致，排错困难 | SOCKS5 握手后域名处理 |
 | `tunnelNotify` | **从 schema 移除**（`settings.ts` 类型 + `SettingsModal.vue` 行 + 后端 `SettingsSection` 字段）；失败 toast 为内置默认行为；老配置中的残留值由后端 `#[serde(flatten)] extra` 静默保留不消费 | — |
 | `tunnelKeepaliveSec` | 不消费，保留 TODO 徽章，描述补注「主连接保活已覆盖」 | — |
-| `tunnelIdleTimeoutSec` | 不消费，保留 TODO 徽章 | — |
+| `tunnelIdleTimeoutSec` | 落地，移除 TODO 徽章；**desc 补充提示**：取值在建立转发连接时快照，改设置不影响已在传的连接；0 表示不断开 | `ipc::tunnel_start` → `StartOptions::idle_timeout_sec` → `TunnelEntry::idle_sec` → `relay_channel_tcp` 看门狗 |
 
 并发/限流/超时参数（`MAX_CONN_*`、令牌桶、`HANDSHAKE_TIMEOUT`、`SHUTDOWN_DRAIN_SEC`、监督器退避等）全部为**内部常量，不开放配置**——用户无合理调整动机，暴露只会增加排错噪音。
 
