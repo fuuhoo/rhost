@@ -2,7 +2,8 @@ import { computed, reactive, ref, shallowRef, triggerRef, watch } from 'vue'
 import { Channel, invoke } from '@tauri-apps/api/core'
 import type { Host } from '../types'
 import { hosts } from './hosts'
-import { savedSettings } from './settings'
+import { savedSettings, termPalette } from './settings'
+import { hexToSgr, type TermPalette } from '../lib/termThemes'
 import { clearSessionTunnels, handleTunnelFrame, restoreOnReconnect, startSavedOnConnect, tunnelSnapshots } from './tunnels'
 import { isTauri } from '../lib/tauri'
 import { getSnapshot, onConfigLoad, patchUiState } from './appConfig'
@@ -43,7 +44,13 @@ export const activeHost = computed(() => activeSession.value?.host ?? null)
 export const connected = computed(() => activeSession.value?.state === 'online')
 
 /* ---- Dock / 面板 UI 状态 ---- */
-export const sidebarVisible = ref(true)
+
+/** 左栏监控面板显隐（仅工作台）；折叠时宽度保留，展开无缝恢复 */
+export const monitorVisible = ref(true)
+/** 左栏监控面板宽度（px），拖拽右缘调整 */
+export const monitorWidth = ref(300)
+export const MONITOR_MIN_W = 240
+export const MONITOR_MAX_W = 560
 
 /** Dock 展开高度（px）；折叠态下该值保留，展开时无缝恢复 */
 export const dockHeight = ref(286)
@@ -55,9 +62,9 @@ const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : n
 const bool = (v: unknown, dflt: boolean) => (typeof v === 'boolean' ? v : dflt)
 
 /** 右侧面板显隐（全局共享：首页折叠→工作台也折叠）；false 时仅常驻右侧图标栏 */
-export const rightPanelVisible = ref(false)
-/** 右侧面板当前页签 */
-export const rightPanelTab = ref<'monitor' | 'ai'>('monitor')
+export const rightPanelVisible = ref(true)
+/** 右侧面板当前页签：hosts = 工作台主机列表 / 首页历史会话，ai = AI 助手 */
+export const rightPanelTab = ref<'hosts' | 'ai'>('hosts')
 /** 右侧面板宽度（px）；拖拽左缘调整，普通模式夹取 280~动态上限 */
 export const rightPanelWidth = ref(320)
 /** 右侧面板专注模式：占满主区（隐藏中央内容），用于沉浸式 AI 对话 */
@@ -80,11 +87,15 @@ export interface RecentConnection {
 export const recentConnections = ref<RecentConnection[]>([])
 /** SFTP 双栏左侧（本地）宽度占比；夹取 0.2~0.8 */
 export const sftpLocalRatio = ref(0.5)
+/** 「文件」页左侧远程目录树宽度（px）；拖拽右缘调整，夹取 132~420 */
+export const sftpTreeWidth = ref(200)
 
 /* ---- 历史会话操作 ---- */
 
 /** 添加或更新一条历史会话记录，并截断到设置上限 */
 export function addRecentConnection(s: Session) {
+  // 外部连接不进历史：堡垒机每次点击都会拉起新链接，历史记录既无意义也泄露地址
+  if (isExternalSession(s)) return
   const entry: RecentConnection = {
     hostId: s.host.id,
     name: s.host.id,
@@ -112,11 +123,6 @@ function hydrateRecentConnections(list: unknown) {
     )
     .map(r => ({ ...r, name: r.name ?? r.label ?? r.ip }))
 }
-/** SFTP 传输队列展开高度（px）；折叠态下保留，展开无缝恢复 */
-export const sftpQueueHeight = ref(180)
-/** SFTP 传输队列折叠状态；初始折叠，用户调整后跨重启保留 */
-export const sftpQueueCollapsed = ref(true)
-
 /** hydrate 当次的批量赋值不回写（watch flush sync 同步拦截） */
 let layoutHydrated = false
 
@@ -127,11 +133,18 @@ onConfigLoad(snap => {
   if (savedDockH !== null) dockHeight.value = savedDockH // 视口级 clamp 由 DockPanel 挂载时完成
   // 旧字段 inspectorVisible 一次性映射为 rightPanelVisible（兼容老配置，下次落盘即清除）
   const rpVisible = ui.rightPanelVisible !== undefined ? ui.rightPanelVisible : ui.inspectorVisible
-  rightPanelVisible.value = bool(rpVisible, false)
-  rightPanelTab.value = ui.rightPanelTab === 'ai' || ui.rightPanelTab === 'monitor' ? ui.rightPanelTab : 'monitor'
+  // 默认展开：右栏内容已从「监控」换成「主机列表」，收起会让常用入口消失
+  rightPanelVisible.value = bool(rpVisible, true)
+  // 页签改名 monitor → hosts（旧值 'monitor' 自然落入 hosts 分支）
+  rightPanelTab.value = ui.rightPanelTab === 'ai' ? 'ai' : 'hosts'
   const savedRpWidth = num(ui.rightPanelWidth)
   rightPanelWidth.value = savedRpWidth !== null ? Math.min(800, Math.max(280, savedRpWidth)) : 320
   rightPanelMaximized.value = bool(ui.rightPanelMaximized, false)
+  monitorVisible.value = bool(ui.monitorVisible, true)
+  const savedMonitorW = num(ui.monitorWidth)
+  monitorWidth.value = savedMonitorW !== null
+    ? Math.min(MONITOR_MAX_W, Math.max(MONITOR_MIN_W, savedMonitorW))
+    : 300
   hydrateRecentConnections(ui.recentConnections)
   dockCollapsed.value = bool(ui.dockCollapsed, false)
   dockVisible.value = bool(ui.dockVisible, true)
@@ -139,19 +152,16 @@ onConfigLoad(snap => {
   const savedRatio = num(ui.sftpLocalRatio)
   sftpLocalRatio.value =
     savedRatio !== null ? Math.min(0.8, Math.max(0.2, savedRatio)) : 0.5
-  // 队列高度只做异常值防呆夹取（28 为拖拽折叠残留值，展开时组件恢复默认）；
-  // 视口级适配由 DockPanel 布局自然约束
-  const savedQueueH = num(ui.sftpQueueHeight)
-  sftpQueueHeight.value =
-    savedQueueH !== null ? Math.min(720, Math.max(28, savedQueueH)) : 180
-  sftpQueueCollapsed.value = bool(ui.sftpQueueCollapsed, true)
+  const savedTreeW = num(ui.sftpTreeWidth)
+  sftpTreeWidth.value =
+    savedTreeW !== null ? Math.min(420, Math.max(132, savedTreeW)) : 200
   layoutHydrated = true
 })
 
 /** 状态变化经 ui_state 合并写落盘（patchUiState 内部 300ms 防抖合并连续变更） */
 watch(
   [rightPanelVisible, rightPanelTab, rightPanelWidth, rightPanelMaximized, dockVisible, dockCollapsed, dockTab, dockHeight, sftpLocalRatio,
-   sftpQueueHeight, sftpQueueCollapsed],
+   sftpTreeWidth, monitorVisible, monitorWidth],
   () => {
     if (!isTauri || !layoutHydrated) return
     patchUiState({
@@ -164,8 +174,9 @@ watch(
       dockTab: dockTab.value,
       dockHeight: dockHeight.value,
       sftpLocalRatio: sftpLocalRatio.value,
-      sftpQueueHeight: sftpQueueHeight.value,
-      sftpQueueCollapsed: sftpQueueCollapsed.value,
+      sftpTreeWidth: sftpTreeWidth.value,
+      monitorVisible: monitorVisible.value,
+      monitorWidth: monitorWidth.value,
     })
   },
   { flush: 'sync' },
@@ -177,6 +188,14 @@ export function openDock(tab?: 'sftp' | 'log' | 'tunnel') {
   dockVisible.value = true
   if (tab) dockTab.value = tab
 }
+
+/**
+ * sftp:// 外部连接专用布局：这类会话没有 PTY，终端区留空没有意义，
+ * 让底部面板顶替终端占满工作区（折叠时仍回到常规布局）。
+ */
+export const sftpFillActive = computed(
+  () => activeSession.value?.host.external === 'sftp' && !dockCollapsed.value,
+)
 
 export function toggleDock() {
   dockVisible.value = !dockVisible.value
@@ -200,7 +219,7 @@ export const searchTick = ref(0)
 const FRAME_DATA = 0x01 // PTY 原始输出
 const FRAME_EXIT = 0x02 // 会话结束（payload 为可选原因文本）
 const FRAME_ERROR = 0x03 // 会话内部错误
-const FRAME_MOTD = 0x04 // Rhost MOTD 指令数组（JSON，先于一切 PTY 数据到达）
+const FRAME_MOTD = 0x04 // MOTD 状态面板指令数组（JSON，先于一切 PTY 数据到达）
 const FRAME_HOST_INFO = 0x05 // 主机静态信息（JSON HostInfo，连接时一次，先于 PTY 数据）
 const FRAME_METRICS = 0x06 // 主机动态指标（JSON Metrics，周期推送）
 const FRAME_RTT = 0x07     // 链路 RTT（JSON {"ms": 23}，建连即测 + 30s 周期）
@@ -312,6 +331,8 @@ export interface NetMetricsData {
 export interface DiskMetricsData {
   /** 挂载点 */
   mount: string
+  /** 文件系统类型（ext4/xfs/overlay/tmpfs…，FinalShell 磁盘表同款列）；df 无 -T 支持时为空串 */
+  fs?: string
   /** 总容量 */
   total: number
   /** 已用 */
@@ -386,7 +407,7 @@ const textDecoder = new TextDecoder()
 
 /* ============================================================
  * MOTD 前端渲染：后端只下发结构化指令 [{t,text,cls}]，
- * 配色取 xterm 主题同色值（与 TerminalPane 主题一致）。
+ * 配色逐值取自当前终端配色方案（与 xterm 主题同一份定义，见 lib/termThemes.ts）。
  * 反引号 `...` 段切换链接高亮色，反引号本身不显示。
  * ============================================================ */
 interface TermCmd {
@@ -394,18 +415,19 @@ interface TermCmd {
   text?: string
   cls?: string
 }
-/** cls → ANSI SGR 前景色（truecolor，对齐 TerminalPane 主题） */
-const MOTD_SGR: Record<string, string> = {
-  brand: '38;2;57;197;207', // #39c5cf cyan
-  green: '38;2;63;185;80', // #3fb950
-  warn: '38;2;210;153;34', // #d29922
-  err: '38;2;248;81;73', // #f85149
-  cmd: '38;2;230;237;243', // #e6edf3
-  white: '38;2;230;237;243',
-  author: '1;38;2;242;193;78', // #f2c14e 金色 + 加粗，重点标识作者行
+/** cls → ANSI SGR 前景参数（truecolor）。MOTD 在连接时一次性写入终端，
+ *  切换配色后已写入的不重绘，新连接即用新配色。未知 cls 落正文弱档（dim）。 */
+function motdSgr(cls: string, p: TermPalette): string {
+  switch (cls) {
+    case 'brand': return hexToSgr(p.brand)
+    case 'green': return hexToSgr(p.ansi.green)
+    case 'warn': return hexToSgr(p.ansi.yellow)
+    case 'err': return hexToSgr(p.ansi.red)
+    case 'cmd':
+    case 'white': return hexToSgr(p.foreground)
+    default: return hexToSgr(p.dim)
+  }
 }
-const MOTD_SGR_DIM = '38;2;110;118;129' // #6e7681
-const MOTD_SGR_LINK = '38;2;79;214;224' // #4fd6e0
 
 /** 把 Motd 帧 payload 渲染为带 ANSI 配色的终端字节（首尾各留一空行） */
 function renderMotd(payload: Uint8Array): Uint8Array {
@@ -417,15 +439,18 @@ function renderMotd(payload: Uint8Array): Uint8Array {
   }
   if (!Array.isArray(cmds)) return new Uint8Array(0)
 
+  const p = termPalette.value
+  const sgrLink = hexToSgr(p.link)
+
   let out = '\r\n'
   for (const cmd of cmds) {
     if (cmd.t !== 'print') continue
-    const sgr = MOTD_SGR[cmd.cls ?? ''] ?? MOTD_SGR_DIM
+    const sgr = motdSgr(cmd.cls ?? '', p)
     out += `\x1b[${sgr}m`
     const segs = (cmd.text ?? '').split('`')
     segs.forEach((seg, i) => {
       if (i % 2 === 1) {
-        out += `\x1b[${MOTD_SGR_LINK}m${seg}\x1b[${sgr}m`
+        out += `\x1b[${sgrLink}m${seg}\x1b[${sgr}m`
       } else {
         out += seg
       }
@@ -482,7 +507,7 @@ function handleFrame(id: string, frame: Uint8Array) {
     return
   }
   if (type === FRAME_HOST_INFO) {
-    // 主机静态信息：存入按会话隔离的 map，供右侧栏 Inspector 读取
+    // 主机静态信息：存入按会话隔离的 map，供左栏监控面板读取
     try {
       const info = JSON.parse(textDecoder.decode(payload)) as HostInfoData
       hostInfoMap.set(id, info)
@@ -531,7 +556,7 @@ function handleFrame(id: string, frame: Uint8Array) {
   if (type === FRAME_RTT) {
     // 链路 RTT：直写 host.lat 运行时字段。不走 updateHost——lat 不入持久化，
     // 避免 30s 周期触发一次 save_connection 写盘；s.host 是 hosts 数组项引用，
-    // 改属性即响应式生效（状态栏/Inspector 消费同一字段）
+    // 改属性即响应式生效（状态栏/监控面板消费同一字段）
     try {
       const { ms } = JSON.parse(textDecoder.decode(payload)) as { ms: number }
       const s = sessions.value.find(x => x.id === id)
@@ -614,6 +639,14 @@ async function resolvePassword(host: Host): Promise<string> {
   // 本次会话内已缓存的密码直接用（避免重连反复查钥匙串）
   if (host.password) return host.password
 
+  // 外部连接：密码只来自 ssh:// 链接、只留在内存——既不读也不写系统钥匙串；
+  // 链接未内嵌密码时仍弹框询问一次（堡垒机一般不需要走到这里）
+  if (host.external) {
+    const pw = await promptPassword(`输入 ${host.user}@${host.ip} 的登录密码：`)
+    if (pw) host.password = pw
+    return pw ?? ''
+  }
+
   // Tauri 环境：尝试从系统钥匙串读取
   if (isTauri) {
     try {
@@ -647,7 +680,8 @@ async function resolvePassword(host: Host): Promise<string> {
  * 后端经独立 exec 通道把脚本静默写入远端 /tmp 唯一临时文件，PTY 开启后
  * 立即经写队列注入 source 命令（tty 缓冲暂存，shell 就绪即执行）；
  * 初始化期间的 PTY 输出被后端 hold 住，直到脚本末尾输出不可见 OSC marker
- * 才放行——回显行、ANSI 清行、着色 PS1 在同一渲染帧到达 xterm，
+ * 才放行——注入命令的回显行由后端按内容从这段缓冲里剥掉（不发清行序列，
+ * 那会连服务器自己的 profile 告警一起抹掉），着色 PS1 与 marker 同帧到达 xterm，
  * 用户看到的第一个画面就是最终态，无任何闪烁/切换。
  * /tmp 不可写或 3s 未见 marker 时后端自动降级为直通。
  *
@@ -701,6 +735,9 @@ async function connectBackend(
   try {
     // 密钥认证：keyPath 存在时跳过密码询问，凭据由一键连接门禁阶段收集并暂存在 host 上
     const keyPath = s.host.keyPath
+    // 外部连接（堡垒机链接）：只保留业务真正需要的那一条通道——MOTD、彩色提示符、
+    // init 脚本环境变量全部关闭（它们各自要开一条 exec 子通道并写远端 /tmp）
+    const external = s.host.external
     const res = await invoke<ConnectResult>('connect_ssh', {
       payload: {
         host: s.host.ip,
@@ -711,16 +748,16 @@ async function connectBackend(
         passphrase: keyPath ? s.host.keyPassphrase : undefined,
         cols,
         rows,
-        // 连接成功后由后端采集服务器状态并绘制 Rhost MOTD 欢迎面板；
+        // 连接成功后由后端采集服务器状态并绘制 MOTD 状态面板；
         // 开启时后端同时走 exec 路径抑制 sshd 原生 MOTD/Last login
-        motd: savedSettings.motd,
-        // 自定义 MOTD ASCII LOGO：开关关闭（或文本为空）传空串，后端显示内置 LOGO
-        motdLogo: savedSettings.motdLogoOn ? savedSettings.motdLogo : '',
+        motd: external ? false : savedSettings.motd,
+        // 自定义 MOTD ASCII LOGO：开关关闭（或文本为空）传空串，面板不绘制 LOGO 段
+        motdLogo: external || !savedSettings.motdLogoOn ? '' : savedSettings.motdLogo,
         // 彩色提示符：后端在 PTY 开启后自动注入并 hold 初始化输出至脚本完成，
         // 前端首帧即着色 PS1 的最终画面，无需任何时序编排
-        colorPrompt: savedSettings.colorPrompt,
+        colorPrompt: external ? false : savedSettings.colorPrompt,
         // 环境变量：随 init 脚本 export 注入远端 shell（绕过 sshd AcceptEnv 限制）
-        env: savedSettings.env.map(e => [e.key, e.value]),
+        env: external ? [] : savedSettings.env.map(e => [e.key, e.value]),
         // 传输层保活间隔（秒）：0 = 禁用，未配置走缺省 30s
         keepaliveSecs: s.host.keepalive ?? 30,
         // 主机密钥 TOFU 二阶段：重试时带用户确认的指纹（后端校验格式并比对本次握手）；
@@ -728,6 +765,9 @@ async function connectBackend(
         trustHostKey,
         trustFingerprint: trustFp,
         trustHostKeyPersist: trustPersist,
+        // 外部连接单通道 / 仅 SFTP（不申请 PTY），后端在开通道那一层落实取舍
+        singleChannel: !!external,
+        sftpOnly: external === 'sftp',
       },
       channel,
     })
@@ -816,7 +856,12 @@ export function attachTerminal(id: string, sink: TermSink, cols: number, rows: n
     pendingFrames.delete(id)
   }
   const s = sessions.value.find(x => x.id === id)
-  if (s && !s.backendId && s.state !== 'online') void connectBackend(s, cols, rows)
+  // sftp:// 外部连接没有 PTY：建连由 openExternalSession 直接发起，这里不再触发，
+  // 否则会用一个无意义的 PTY 请求多开一条通道；空白标签（新建窗口）同理，等
+  // openSession 双击主机转正后再连
+  if (s && !s.backendId && s.state !== 'online' && s.host.external !== 'sftp' && !isBlankSession(s)) {
+    void connectBackend(s, cols, rows)
+  }
 }
 
 /** 注销终端数据回调（组件卸载时调用，防止 sink 闭包持有已销毁的 xterm） */
@@ -1074,7 +1119,8 @@ async function runAutoReconnect(id: string) {
  *  终端缓冲不在此时清理——断线快照保留到新 PTY 建连成功（resetSeq 驱动 reset） */
 export async function reconnectBackend(id: string) {
   const s = sessions.value.find(x => x.id === id)
-  if (!s) return
+  // 空白标签无主机可连：重连/恢复入口一律静默忽略（UI 侧菜单项同步置灰）
+  if (!s || isBlankSession(s)) return
   // 用户手动接管：取消等待中的自动重连（立即执行本次）、清零计数与手动旗标
   clearReconnectTimer(id)
   reconnectAttemptMap.delete(id)
@@ -1100,11 +1146,16 @@ export async function reconnectBackend(id: string) {
 function persistSessions() {
   if (!isTauri) return
   patchUiState({
-    sessions: sessions.value.map(s => ({
-      sessionId: s.id,
-      hostId: s.host.id,
-      alias: s.alias,
-    })),
+    // 外部连接会话不落盘：重启后 restoreSessions 无从恢复（连密码也没有）
+  sessions: sessions.value
+    // 外部连接会话不落盘：重启后 restoreSessions 无从恢复（连密码也没有）；
+    // 空白标签（新建窗口）不落盘：占位主机无从恢复，也无需恢复
+    .filter(s => !isExternalSession(s) && !isBlankSession(s))
+      .map(s => ({
+        sessionId: s.id,
+        hostId: s.host.id,
+        alias: s.alias,
+      })),
   })
 }
 
@@ -1147,11 +1198,78 @@ export function restoreSessions() {
   appView.value = 'workbench'
 }
 
+/* ---- 新建终端窗口（FinalShell Ctrl+Shift+T 语义的空白标签） ----
+ * 空白标签 = 一条尚未选择主机的会话：占位 host 仅为满足 Session 结构，
+ * 永不发起连接；用户双击主机列表时由 openSession 把激活中的空白标签
+ * 原地「转正」为真实主机连接（复用同 id，已挂载的 xterm 实例与画面原样保留）。
+ * 空白标签不落盘（persistSessions 过滤），重启后无从恢复也无需恢复。 */
+
+/** 空白标签占位主机：仅满足 Session.host 类型；id 同时是标签标题 */
+const BLANK_HOST: Host = {
+  id: '新建窗口',
+  user: '',
+  ip: '',
+  port: 0,
+  os: '',
+  color: 'blue',
+  label: '',
+  tag: '',
+  status: 'idle',
+  lat: null,
+  cpu: '',
+  mem: '',
+  uptime: '',
+  group: '',
+}
+
+/** 空白标签会话 id 集合（不在 Host 上引入占位字段，从会话侧判定） */
+const blankSessionIds = new Set<string>()
+
+export function isBlankSession(s: Session | null | undefined): boolean {
+  return !!s && blankSessionIds.has(s.id)
+}
+
+/** 新建一个空白终端标签（快捷键 ⌘⇧T / 标签栏右键菜单入口），返回会话 id */
+export function openBlankSession() {
+  appView.value = 'workbench'
+  const id = crypto.randomUUID()
+  blankSessionIds.add(id)
+  sessions.value.push({
+    id,
+    host: BLANK_HOST,
+    state: 'idle',
+    startedAt: Date.now(),
+    disconnectReason: '',
+    retryAt: null,
+    resetSeq: 0,
+    alias: '',
+  })
+  activeSessionId.value = id
+  return id
+}
+
 export function openSession(hostId: string) {
   const host = hosts.value.find(h => h.id === hostId)
   if (!host) return
   if (host.status === 'offline') return
+  // FinalShell「新建终端窗口」语义：工作台内激活的空白窗口，双击主机直接连进该
+  // 窗口，而不是另开一个新标签（复用同 id，已挂载的 xterm 实例与终端画面原样保留）。
+  // 仅限本就在工作台的场景——从首页发起连接时用户目光不在那个空白窗口上，
+  // 走常规开标签逻辑
+  const fromWorkbench = appView.value === 'workbench'
   appView.value = 'workbench'
+  const blank = fromWorkbench ? sessions.value.find(s => s.id === activeSessionId.value) : undefined
+  if (blank && isBlankSession(blank)) {
+    blankSessionIds.delete(blank.id)
+    blank.host = host
+    blank.state = 'connecting'
+    blank.startedAt = Date.now()
+    blank.disconnectReason = ''
+    const size = termSizes.get(blank.id) ?? termSizeMap.get(blank.id) ?? { cols: 120, rows: 32 }
+    void connectBackend(blank, size.cols, size.rows)
+    persistSessions()
+    return
+  }
   // 同一主机复用已打开的会话，不重复建连
   const existing = sessions.value.find(s => s.host.id === hostId)
   if (existing) {
@@ -1175,16 +1293,97 @@ export function rehostSession(oldHostId: string, host: Host) {
   persistSessions()
 }
 
+/* ============================================================
+ * 堡垒机外部连接（ssh:// / sftp:// 链接拉起的不保存会话）
+ *
+ * 与常规会话的三点不同，全部由 host.external 单一标记驱动：
+ * 1. 主机不进 hosts store，因此不落盘、不出现在主机列表，也不会被
+ *    persistSessions 写进 ui_state（重启不恢复）；
+ * 2. 密码只存在于内存（host.password），既不读也不写系统钥匙串；
+ * 3. 后端只开一条通道（single_channel），MOTD / 初始化脚本 / 指标 /
+ *    端口转发等一切需要额外 exec 子通道的能力在前后端两侧同时关闭。
+ * ============================================================ */
+
+/** 后端 external::ExternalLink（camelCase）；password 仅在内存与 IPC 通道中流转 */
+export interface ExternalLinkInput {
+  sftp: boolean
+  user: string
+  host: string
+  port: number
+  password?: string | null
+  name?: string | null
+}
+
+/** 是否堡垒机拉起的外部连接：所有门禁判断的唯一入口 */
+export function isExternalSession(s: Session | null | undefined): boolean {
+  return !!s?.host.external
+}
+
+/** 打开一条外部连接：合成 Host 直接入 sessions（不经 hosts store 查找）。
+ *  标签显示 -newtab / /sessionname= 给的名称，缺省回落 user@host:port。 */
+export function openExternalSession(link: ExternalLinkInput): void {
+  const addr = `${link.user}@${link.host}:${link.port}`
+  const host: Host = {
+    id: addr,
+    user: link.user,
+    ip: link.host,
+    port: link.port,
+    os: '',
+    color: 'cyan',
+    // 徽标位（仅主机列表使用，外部连接不进列表）：取主机名首字母
+    label: link.host.slice(0, 2).toUpperCase(),
+    tag: '外部',
+    status: 'idle',
+    lat: null,
+    cpu: '—',
+    mem: '—',
+    uptime: '—',
+    group: '',
+    password: link.password ?? undefined,
+    external: link.sftp ? 'sftp' : 'terminal',
+  }
+  const id = crypto.randomUUID()
+  sessions.value.push({
+    id,
+    host,
+    state: 'connecting',
+    startedAt: Date.now(),
+    disconnectReason: '',
+    retryAt: null,
+    resetSeq: 0,
+    alias: link.name?.trim() ?? '',
+  })
+  appView.value = 'workbench'
+  activeSessionId.value = id
+  // sftp:// 没有 PTY，TerminalPane 挂载后不会发起建连——由这里直接连；
+  // 尺寸对 SFTP 无意义，用固定值（后端不申请 PTY）
+  if (host.external === 'sftp') {
+    openDock('sftp')
+    const s = sessions.value.find(x => x.id === id)
+    if (s) void connectBackend(s, 80, 24)
+  }
+}
+
+/** 关闭外部会话时抹掉内存里的凭据引用（标签关掉即彻底消失） */
+function wipeExternalSecrets(host: Host) {
+  if (!host.external) return
+  host.password = undefined
+  host.keyPassphrase = undefined
+}
+
 export function closeSession(id: string) {
   const idx = sessions.value.findIndex(s => s.id === id)
   if (idx === -1) return
   const s = sessions.value[idx]!
+  blankSessionIds.delete(id)
   // 关闭标签 = 停止自动重连 + 断开后端会话（触发取消令牌，后台任务退出）
   cancelAutoReconnect(id)
   manualClosed.delete(id)
   if (s.backendId && isTauri) {
     void invoke('disconnect_session', { sessionId: s.backendId }).catch(() => {})
   }
+  // 外部连接：关闭标签即抹掉内存中的凭据引用（不落盘、不写钥匙串）
+  wipeExternalSecrets(s.host)
   termSinks.delete(id)
   pendingFrames.delete(id)
   termSizes.delete(id)
@@ -1274,7 +1473,8 @@ export async function duplicateSession(sourceSessionId: string): Promise<string 
   const timer = setTimeout(() => duplicating.delete(sourceSessionId), DUPLICATE_TIMEOUT_MS)
   try {
     const source = sessions.value.find(s => s.id === sourceSessionId)
-    if (!source) return null
+    // 空白标签无主机可复制（菜单项已置灰，此处为绕过 UI 的调用兜底）
+    if (!source || isBlankSession(source)) return null
     const newId = crypto.randomUUID()
     sessions.value.push({
       id: newId,
@@ -1354,20 +1554,20 @@ export interface GpuMetricsData {
   power_limit: number
 }
 
-/* ---- 右侧栏动态指标采集（0x06）：可见性门控启停 + 心跳续约 ---- */
+/* ---- 左栏动态指标采集（0x06）：可见性门控启停 + 心跳续约 ---- */
 
 /** 心跳间隔；后端 9s TTL，5s 续约留足余量 */
 export const METRICS_HEARTBEAT_MS = 5000
 
 /** 当前主机指标采集间隔（毫秒）：读全局设置，夹取 1~10s，与后端 clamp 保持一致 */
 function metricsIntervalMs(): number {
-  const sec = Math.min(10, Math.max(1, Math.round(savedSettings.metricsInterval) || 3))
+  const sec = Math.min(10, Math.max(1, Math.round(savedSettings.metricsInterval) || 2))
   return sec * 1000
 }
 
 /** 启动指定后端会话的周期采集（幂等，后端重复 start 会先停旧任务）。
  *  iface 为默认路由网卡（0x05 已采集），网络计数优先取它；缺省后端汇总非 lo 网卡。
- *  intervalMs 由调用方（Inspector 门控）传入以便设置变更时热重启。 */
+ *  intervalMs 由调用方（监控面板门控）传入以便设置变更时热重启。 */
 export async function startMetrics(
   backendId: string,
   iface?: string | null,
@@ -1385,7 +1585,7 @@ export async function startMetrics(
   }
 }
 
-/** 停止周期采集（Inspector 隐藏/切换会话时即时释放 exec 通道） */
+/** 停止周期采集（监控面板隐藏/切换会话时即时释放 exec 通道） */
 export async function stopMetrics(backendId: string) {
   if (!isTauri) return
   try {

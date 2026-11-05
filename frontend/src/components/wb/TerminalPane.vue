@@ -2,6 +2,8 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { SearchAddon } from '@xterm/addon-search'
+import { WebglAddon } from '@xterm/addon-webgl'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager'
@@ -10,12 +12,14 @@ import AppLogo from '../AppLogo.vue'
 import ContextMenu, { type MenuItem } from './ContextMenu.vue'
 import { toast } from '../../composables/useToast'
 import { registerTerm, unregisterTerm } from '../../lib/termRegistry'
+import { termFindTick } from '../../lib/uiBus'
 import { addToAiChat } from '../../stores/aiQuote'
 import { hosts, showNewConn } from '../../stores/hosts'
-import { resolveTerminalFontFamily, savedSettings } from '../../stores/settings'
+import { clampBgImgBlur, clampBgImgOpacity, resolveTerminalFontFamily, savedSettings, termBgImageTint, termPalette } from '../../stores/settings'
+import { resolveTermBgImage } from '../../lib/termThemes'
 import {
   activeReconnectAttempt, activeSession, activeSessionId, attachTerminal,
-  autoReconnectDelayMs, detachTerminal, disconnectSession, openSession, reconnectBackend,
+  autoReconnectDelayMs, detachTerminal, disconnectSession, isBlankSession, openSession, reconnectBackend,
   reconnectTick, resizeTerminal, sendInput, sessions,
 } from '../../stores/session'
 import type { Session, SessionState } from '../../stores/session'
@@ -30,6 +34,9 @@ import type { HostStatus } from '../../types'
 interface TermInst {
   term: Terminal
   fit: FitAddon
+  search: SearchAddon
+  /** WebGL 渲染器实例；null 表示使用 xterm 内置（DOM）渲染 */
+  webgl: WebglAddon | null
   disposables: Array<{ dispose(): void }>
 }
 
@@ -226,30 +233,79 @@ function resolveLineHeight(percent: number): number {
   return Math.max(1, percent / 100)
 }
 
-/** xterm 主题：与项目配色（--status-ok 等设计令牌）对齐 */
-const XTERM_THEME = {
-  background: '#00000000', // 透明，透出 .terminal 的背景渐变
-  foreground: '#e6edf3',
-  cursor: '#3fb950',
-  cursorAccent: '#0d1117',
-  selectionBackground: 'rgba(88, 166, 255, .28)',
-  black: '#484f58',
-  red: '#ff7b72',
-  green: '#3fb950',
-  yellow: '#f0883e',
-  blue: '#58a6ff',
-  magenta: '#bc8cff',
-  cyan: '#39c5cf',
-  white: '#b1bac4',
-  brightBlack: '#6e7681',
-  brightRed: '#ffa198',
-  brightGreen: '#56d364',
-  brightYellow: '#e3b341',
-  brightBlue: '#79c0ff',
-  brightMagenta: '#d2a8ff',
-  brightCyan: '#56d4dd',
-  brightWhite: '#f0f6fc',
+/** xterm 主题对象：逐值取自「配色方案 × 背景颜色」解析出的当前配色
+ *  （lib/termThemes.ts，默认为 FinalShell 经典方案 + 深蓝底）。
+ *  background 恒为透明——底色由容器上的 --term-surface 提供，才能继续走
+ *  「背景不透明度」的玻璃混合；cursorAccent 与 black/brightBlack 已在各方案里
+ *  按其底色校准（方块光标下的字符、vim 状态栏、ls 目录色都要仍读得清）。
+ *  ⚠ 光靠这里透明不够：xterm 自带样式把 .xterm-viewport 写死成 #000，它盖在整块
+ *  终端区上，主题里的 background 只落到其子节点的内联样式。style.css 里那条
+ *  `.term-instance .xterm-viewport{background-color:transparent}` 才是底色生效的地方。 */
+function xtermTheme() {
+  const p = termPalette.value
+  return {
+    background: '#00000000',
+    foreground: p.foreground,
+    cursor: p.cursor,
+    cursorAccent: p.cursorAccent,
+    selectionBackground: p.selectionBackground,
+    ...p.ansi,
+  }
 }
+
+// 配色方案变更（含 auto 下界面主题切换）：批量热更新已挂载实例
+// （xterm options.theme 支持 readonly 覆写；未挂载实例在 mountTerminal 构造时取现值）
+watch(termPalette, () => {
+  for (const inst of termInsts.values()) inst.term.options.theme = xtermTheme()
+})
+
+/** 容器底色随配色走：--term-surface 挂在本组件根节点，向 .term-stage /
+ *  .term-instance 继承；未设置时 style.css 回退到 --term-bg（首帧与终端外表面）。
+ *  开背景图片时「背景颜色」不再掺进来（墨色另按图片亮度选深浅，见 termInkBg），
+ *  衬底改用图片自身的平均色（termBgImageTint）——垫窗口玻璃会把深蓝壁纸洗成灰膜；
+ *  测出前暂用透明。图片地址与浓度两个变量由 .term-bgimg 图层消费。 */
+const bgImageOn = computed(() => savedSettings.termBgImageOn && !!savedSettings.termBgImage)
+const termSurface = computed(() => {
+  const tint = termBgImageTint()
+  const s: Record<string, string> = { '--term-surface': bgImageOn.value ? tint ?? 'transparent' : termPalette.value.background }
+  if (bgImageOn.value) {
+    s['--term-bg-image'] = `url("${resolveTermBgImage(savedSettings.termBgImage)}")`
+    s['--term-bg-img-a'] = String(clampBgImgOpacity(savedSettings.termBgImageOpacity) / 100)
+    s['--term-bg-img-blur'] = `${clampBgImgBlur(savedSettings.termBgImageBlur)}px`
+  }
+  return s
+})
+
+/* ---- 渲染后端（设置 → 终端 → 渲染）----
+ * xterm 6 内置只有 DOM 渲染器，GPU 加速靠 @xterm/addon-webgl 挂载/卸载实现：
+ * gpuAccel 关闭 → 强制内置渲染（花屏兜底）；renderer=webgl 且未关加速 → 挂 WebGL。
+ * 老配置里的 webgpu/canvas 等值不在候选中，按内置渲染处理。 */
+function wantWebgl(): boolean {
+  return !!savedSettings.gpuAccel && savedSettings.renderer === 'webgl'
+}
+
+function applyRenderer(inst: TermInst) {
+  const want = wantWebgl()
+  if (want && !inst.webgl) {
+    const addon = new WebglAddon()
+    // WebGL 上下文丢失（休眠/驱动重置/显存不足）时主动卸载回退内置渲染，
+    // 否则 xterm 会停在黑屏；卸载后保持到下次改设置或新终端为止
+    addon.onContextLoss(() => {
+      addon.dispose()
+      inst.webgl = null
+    })
+    inst.term.loadAddon(addon)
+    inst.webgl = addon
+  } else if (!want && inst.webgl) {
+    inst.webgl.dispose()
+    inst.webgl = null
+  }
+}
+
+// 改设置即时生效于已开终端（term.dispose 会回收加载的 addon，无需单独清理）
+watch(() => `${savedSettings.gpuAccel}|${savedSettings.renderer}`, () => {
+  for (const inst of termInsts.values()) applyRenderer(inst)
+})
 
 /** v-for 容器 ref 收集 */
 function setTermEl(id: string, el: Element | null) {
@@ -280,10 +336,17 @@ function mountTerminal(id: string) {
     scrollback: Math.max(0, Math.trunc(savedSettings.scrollback) || 0),
     allowTransparency: true,
     macOptionIsMeta: false,
-    theme: XTERM_THEME,
+    theme: xtermTheme(),
   })
   const fit = new FitAddon()
   term.loadAddon(fit)
+  // 终端内查找（⌘F / 命令面板唤起）：每实例一个 SearchAddon，命中数只回送给
+  // 当前活动会话的查找条
+  const search = new SearchAddon()
+  term.loadAddon(search)
+  const resultsDisp = search.onDidChangeResults(e => {
+    if (activeSessionId.value === id) findResult.value = { index: e.resultIndex, count: e.resultCount }
+  })
   // 自动识别终端文本里的 http(s) 链接（hover 下划线，点击激活）。
   // handler 必须走 Tauri opener 调系统浏览器——插件默认的 window.open
   // 在 Tauri WebView 内不可靠；插件正则仅匹配 http(s) 且经 URL 校验。
@@ -347,14 +410,17 @@ function mountTerminal(id: string) {
   screenEl.addEventListener('contextmenu', onCtxMenu, true)
 
   termInsts.set(id, {
-    term, fit,
+    term, fit, search, webgl: null,
     disposables: [
+      resultsDisp,
       { dispose: () => screenEl.removeEventListener('copy', onCopy, true) },
       { dispose: () => screenEl.removeEventListener('paste', onPaste, true) },
       { dispose: () => screenEl.removeEventListener('contextmenu', onCtxMenu, true) },
     ],
   })
   safeFit(id)
+  // 按当前设置决定是否挂 GPU 渲染器（新实例创建时是内置渲染）
+  applyRenderer(termInsts.get(id)!)
 
   // 注册数据回调（sink）并触发后端 SSH 连接；connect 时带上当前终端尺寸
   attachTerminal(id, bytes => term.write(bytes), term.cols, term.rows)
@@ -629,6 +695,96 @@ const targetLabel = computed(() => {
   return `已选 ${n} / ${total} 台`
 })
 
+/* ============================================================
+ * 终端内查找（xterm SearchAddon）
+ *
+ * 唤起：设置里的「查找」快捷键（lib/shortcuts.ts）或命令面板，二者都 bump
+ * termFindTick；查找条为浮动层，随活动会话切换重新统计（各会话自带 addon）。
+ * ============================================================ */
+const findOpen = ref(false)
+const findQuery = ref('')
+const findCase = ref(false)
+const findWhole = ref(false)
+/** 当前命中序号（0 基）与总数；无检索词时为 null */
+const findResult = ref<{ index: number; count: number } | null>(null)
+const findInputEl = ref<HTMLInputElement | null>(null)
+
+function activeSearch(): SearchAddon | undefined {
+  return termInsts.get(activeSessionId.value ?? '')?.search
+}
+
+function findOpts() {
+  // decorations 仅接受 #RRGGBB（xterm SearchAddon 约束），故用配色方案里的实心色阶：
+  // 全部命中淡底、当前命中重底，标尺用方案强调色
+  const p = termPalette.value
+  return {
+    caseSensitive: findCase.value,
+    wholeWord: findWhole.value,
+    decorations: {
+      matchBackground: p.matchBackground,
+      activeMatchBackground: p.activeMatchBackground,
+      matchOverviewRuler: p.matchRuler,
+      activeMatchColorOverviewRuler: p.matchRuler,
+    },
+  }
+}
+
+/** 执行一次检索：dir=1 下一个 / -1 上一个；incremental 用于输入即时高亮 */
+function runSearch(dir: 1 | -1, incremental = false) {
+  const search = activeSearch()
+  if (!search) return
+  const q = findQuery.value
+  if (!q) {
+    findResult.value = null
+    search.clearDecorations()
+    return
+  }
+  const opts = { ...findOpts(), incremental }
+  if (dir === 1) search.findNext(q, opts)
+  else search.findPrevious(q, opts)
+}
+
+/** 开关查找条：关闭时清空高亮并交还终端焦点 */
+function toggleFind(force?: boolean) {
+  if ((force ?? !findOpen.value) === false) {
+    closeFind()
+    return
+  }
+  // 无活动会话时无终端可查，明确提示而不是弹出一个空条
+  if (!activeSessionId.value) {
+    toast('当前没有活动终端会话', 'info', 1600)
+    return
+  }
+  findOpen.value = true
+  nextTick(() => findInputEl.value?.select())
+}
+
+function closeFind() {
+  findOpen.value = false
+  findResult.value = null
+  activeSearch()?.clearDecorations()
+  const id = activeSessionId.value
+  if (id) termInsts.get(id)?.term.focus()
+}
+
+// 快捷键/命令面板唤起（再次按同一快捷键收起，与常见编辑器一致）
+watch(termFindTick, () => toggleFind())
+
+// 输入即增量高亮；勾选条件变化时重跑当前检索词
+watch([findQuery, findCase, findWhole], () => runSearch(1, true))
+
+// 切换标签：查找条保留打开状态，但计数按新会话重新算
+watch(activeSessionId, () => {
+  findResult.value = null
+  if (findOpen.value && findQuery.value) runSearch(1)
+})
+
+const findCountLabel = computed(() => {
+  const r = findResult.value
+  if (!findQuery.value || !r) return ''
+  return r.count ? `${r.index + 1}/${r.count}` : '无匹配'
+})
+
 function toggleBroadcast() {
   if (!bcastOpen.value) {
     if (!onlineTargets.value.length) {
@@ -728,7 +884,8 @@ function stateLabel(state: SessionState) {
     : '已断开'
 }
 
-/* ---- 全局快捷键（输入按键本身由 xterm 处理，这里只管命令类快捷键） ---- */
+/* ---- 组件内快捷键：仅保留与组件内部状态强绑定的广播条开关；
+   新建/关闭标签、查找、命令面板等设置可绑定的命令统一由 lib/shortcuts.ts 派发 ---- */
 function onKey(e: KeyboardEvent) {
   // xterm 聚焦时 e.target 是其内部辅助 textarea，不视为表单输入，快捷键照常生效
   const t = e.target as HTMLElement | null
@@ -739,13 +896,6 @@ function onKey(e: KeyboardEvent) {
       (t.tagName === 'TEXTAREA' && !t.classList.contains('xterm-helper-textarea')))
   if (inForm) return
 
-  // ⌘/Ctrl+T：新建连接（全局）
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 't') {
-    if (showNewConn.value) return
-    e.preventDefault()
-    showNewConn.value = true
-    return
-  }
   // ⌘/Ctrl+Shift+B：切换广播命令条
   if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'b') {
     e.preventDefault()
@@ -791,6 +941,9 @@ onUnmounted(() => {
 /* ---- 空态（关闭所有 Tab 后）：最近连接取主机列表前 3 台，在线优先 ---- */
 const hasSessions = computed(() => sessions.value.length > 0)
 
+/* ---- 空白终端窗口（新建窗口）：未连接主机时给一层可发现性提示 ---- */
+const activeBlank = computed(() => isBlankSession(activeSession.value))
+
 const recentHosts = computed(() =>
   [...hosts.value]
     .sort((a, b) => (a.status === 'online' ? 0 : 1) - (b.status === 'online' ? 0 : 1))
@@ -803,9 +956,15 @@ function dotClass(status: HostStatus) {
 </script>
 
 <template>
-  <div ref="wrapEl" class="terminal-wrap" :class="{ 'rc-banner-on': bannerOn && hasSessions }">
-    <!-- 工具栏：广播开启且高度不足以垂直共存时让位隐藏（Esc 关广播后恢复） -->
-    <div v-show="hasSessions && termSpaceEnough && (!bcastOpen || floatCoexistEnough)"
+  <div
+    ref="wrapEl"
+    class="terminal-wrap"
+    :class="{ 'rc-banner-on': bannerOn && hasSessions }"
+    :style="termSurface"
+  >
+    <!-- 工具栏：广播开启且高度不足以垂直共存时让位隐藏（Esc 关广播后恢复）；
+         查找条打开时同样让位，两个浮动条不叠在同一角落 -->
+    <div v-show="hasSessions && termSpaceEnough && (!bcastOpen || floatCoexistEnough) && !findOpen"
          class="term-tools" :class="{ pinned: bcastOpen }">
       <button title="滚动到顶部" @click="termScrollTop">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -841,8 +1000,43 @@ function dotClass(status: HostStatus) {
       </button>
     </div>
 
+    <!-- 终端内查找条：⌘F / 命令面板唤起；Enter 下一个、Shift+Enter 上一个、Esc 关闭 -->
+    <div v-show="findOpen" class="term-find">
+      <input
+        ref="findInputEl"
+        v-model="findQuery"
+        class="tf-input"
+        type="text"
+        placeholder="查找"
+        spellcheck="false"
+        @keydown.enter.exact.prevent="runSearch(1)"
+        @keydown.shift.enter.prevent="runSearch(-1)"
+        @keydown.esc.prevent="closeFind()"
+      >
+      <span class="tf-count">{{ findCountLabel }}</span>
+      <button class="tf-toggle" :class="{ on: findCase }" title="区分大小写" @click="findCase = !findCase">Aa</button>
+      <button class="tf-toggle" :class="{ on: findWhole }" title="全词匹配" @click="findWhole = !findWhole">全词</button>
+      <button title="上一个 (Shift+Enter)" @click="runSearch(-1)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="18 15 12 9 6 15"></polyline>
+        </svg>
+      </button>
+      <button title="下一个 (Enter)" @click="runSearch(1)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
+      </button>
+      <button title="关闭 (Esc)" @click="closeFind()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+      </button>
+    </div>
     <!-- 终端：每会话一个 xterm 容器，v-show 保持实例存活 -->
-    <div v-show="hasSessions" class="terminal" :class="{ 'bcast-on': bcastOpen }">
+    <div v-show="hasSessions" class="term-stage" :class="{ 'bcast-on': bcastOpen }">
+      <!-- 背景图片图层：铺在 .term-stage 的背景色之上、xterm 实例之下（见 style.css） -->
+      <div v-if="bgImageOn" class="term-bgimg" aria-hidden="true"></div>
       <div
         v-for="s in sessions"
         :key="s.id"
@@ -850,6 +1044,13 @@ function dotClass(status: HostStatus) {
         :ref="el => setTermEl(s.id, el as Element | null)"
         class="term-instance"
       ></div>
+
+      <!-- 空白终端窗口（新建窗口）提示：悬浮于空终端之上，不拦鼠标（不挡右键菜单） -->
+      <div v-if="activeBlank" class="blank-hint" aria-hidden="true">
+        <div class="bh-title">空白终端窗口</div>
+        <div class="bh-text">双击右侧主机列表中的主机，在此窗口建立连接</div>
+        <div class="bh-keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>T</kbd> 新建窗口</div>
+      </div>
     </div>
 
     <!-- ============ 连接/断线/重连/终态：统一用顶部状态条，全程不遮挡快照 ============ -->
@@ -934,7 +1135,7 @@ function dotClass(status: HostStatus) {
             </span>
             <span class="dot" :class="stateDotCls(s.state)"></span>
             <span class="bp-name">{{ s.host.id }}</span>
-            <span class="bp-addr">{{ s.host.user }}@{{ s.host.ip }}</span>
+            <span class="bp-addr">{{ s.host.ip ? `${s.host.user}@${s.host.ip}` : '未选择主机' }}</span>
             <span class="bp-state">{{ stateLabel(s.state) }}</span>
           </button>
           <div v-if="!sessions.length" class="bp-empty">暂无可选会话</div>
@@ -1027,6 +1228,7 @@ function dotClass(status: HostStatus) {
 
       <div class="hints">
         <span><kbd>⌘</kbd><kbd>T</kbd> 新建连接</span>
+        <span><kbd>⌘</kbd><kbd>⇧</kbd><kbd>T</kbd> 新建终端窗口</span>
         <span><kbd>⌘</kbd><kbd>K</kbd> 命令面板</span>
       </div>
     </div>
@@ -1200,6 +1402,42 @@ function dotClass(status: HostStatus) {
    banner 出现/消失后由 watch(bannerOn) 触发 safeFit 重算行列 */
 .rc-banner-on .term-instance{top:32px}
 .rc-banner-on .term-tools{top:36px}
+.rc-banner-on .term-find{top:36px}
+
+/* 终端内查找条：与 .term-tools 同一浮动语言，占同一角落（工具栏此时让位）。
+   底色取 --menu-bg（深浅两套已定义），信息层不参与玻璃透明，保证可读 */
+.term-find{
+    position:absolute;top:12px;right:18px;z-index:12;
+    display:flex;align-items:center;gap:4px;
+    padding:4px 6px;
+    background:var(--menu-bg);
+    border:1px solid var(--border);border-radius:8px;
+    box-shadow:0 12px 26px color-mix(in srgb, var(--shadow-color) 45%);
+    backdrop-filter:blur(10px);
+}
+.tf-input{
+    width:180px;height:24px;
+    padding:0 6px;
+    background:transparent;border:none;outline:none;
+    color:var(--text);font-family:var(--mono);font-size:12px;
+}
+.tf-input::placeholder{color:var(--muted-2)}
+.tf-count{
+    min-width:44px;
+    font-size:11px;color:var(--muted);text-align:right;
+}
+.term-find button{
+    height:24px;min-width:24px;padding:0 4px;
+    display:flex;align-items:center;justify-content:center;
+    background:transparent;border:none;border-radius:6px;
+    color:var(--muted);cursor:pointer;
+}
+.term-find button:hover{background:var(--hover);color:var(--text)}
+.term-find button svg{width:14px;height:14px}
+.tf-toggle{
+    font-size:11px;font-family:var(--mono);
+}
+.tf-toggle.on{color:var(--accent);background:var(--hover)}
 
 /* 粘贴保护弹窗：复用全局 .mask/.modal/.btn，仅补本组件专属尺寸与预览样式。
    height:auto 覆盖全局 .modal 的固定 640px——本弹窗内容自适应，避免大片空白；
@@ -1209,11 +1447,28 @@ function dotClass(status: HostStatus) {
 .tp-paste-modal .modal-foot{padding:10px 18px}
 .tp-paste-icon{color:#f0883e}
 .tp-paste-body{padding:10px 18px 12px}
-.tp-paste-label{font-size:12px;color:var(--text-dim,#8b949e);margin-bottom:6px}
+.tp-paste-label{font-size:12px;color:var(--muted);margin-bottom:6px}
 .tp-paste-preview{
   margin:0;max-height:200px;overflow:auto;white-space:pre-wrap;word-break:break-all;
-  background:rgba(110,118,129,.12);border:1px solid rgba(110,118,129,.25);
+  background:var(--veil);border:1px solid var(--border);
   border-radius:8px;padding:10px 12px;font-size:12px;line-height:1.55;
-  font-family:'JetBrains Mono','SF Mono',Menlo,Consolas,monospace;color:#e6edf3;
+  font-family:'JetBrains Mono','SF Mono',Menlo,Consolas,monospace;color:var(--text);
+}
+
+/* 空白终端窗口（新建窗口）提示：居中悬浮于空终端之上，pointer-events:none
+   不拦鼠标——右键菜单、后续终端交互都不受影响 */
+.blank-hint{
+  position:absolute;inset:0;z-index:2;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:6px;pointer-events:none;user-select:none;
+  color:var(--muted);text-align:center;padding-bottom:40px;
+}
+.blank-hint .bh-title{font-size:15px;font-weight:600;color:var(--text-soft);letter-spacing:.04em}
+.blank-hint .bh-text{font-size:12px}
+.blank-hint .bh-keys{margin-top:8px;font-size:11px;display:flex;align-items:center;gap:4px}
+.blank-hint .bh-keys kbd{
+  min-width:18px;height:18px;padding:0 5px;border-radius:4px;
+  border:1px solid var(--border);background:var(--veil);
+  display:inline-flex;align-items:center;justify-content:center;
+  font-size:10px;font-family:var(--mono);color:var(--muted);
 }
 </style>

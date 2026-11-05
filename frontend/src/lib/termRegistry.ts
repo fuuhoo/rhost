@@ -17,9 +17,13 @@ export function unregisterTerm(sessionId: string) {
   terms.delete(sessionId)
 }
 
+/** 取指定会话的 xterm 实例（未注册/已销毁返回 undefined）；供快捷键等跨组件操作终端本体 */
+export function getTerm(sessionId: string): Terminal | undefined {
+  return terms.get(sessionId)
+}
+
 /** 默认采集行数：约一屏，覆盖报错现场又不至于撑爆上下文 */
-const DEFAULT_LINES = 30
-/** 采集字符上限：防止全屏 TUI 残留/超长单行刷爆请求体（约 2k token） */
+const DEFAULT_LINES = 30/** 采集字符上限：防止全屏 TUI 残留/超长单行刷爆请求体（约 2k token） */
 const MAX_CHARS = 4000
 
 /**
