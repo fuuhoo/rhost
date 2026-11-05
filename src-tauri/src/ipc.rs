@@ -8,7 +8,7 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 
 use crate::ssh::session::connect_and_auth;
-use crate::ssh::sftp::TransferProgress;
+use crate::ssh::sftp::{TransferPolicy, TransferProgress};
 use crate::ssh::{AuthMethod, HostKeyCheck, HostKeyPolicy, SessionConfig, SessionManager};
 use crate::store::{self, StoredHost};
 
@@ -91,7 +91,7 @@ pub struct ConnectPayload {
     pub cols: u32,
     /// PTY 初始行数
     pub rows: u32,
-    /// 连接成功后绘制 Rhost MOTD 欢迎面板（缺省开启）；
+    /// 连接成功后绘制 MOTD 服务器状态面板（缺省开启）；
     /// 开启时同时抑制 sshd 原生 MOTD / Last login，避免双重横幅
     #[serde(default = "default_true")]
     pub motd: bool,
@@ -101,7 +101,7 @@ pub struct ConnectPayload {
     /// 登录后经 init 脚本 export 注入远端 shell 的环境变量（非法键值由后端过滤）
     #[serde(default)]
     pub env: Vec<(String, String)>,
-    /// 自定义 MOTD ASCII LOGO（多行文本）；空串使用内置 LOGO
+    /// 自定义 MOTD ASCII LOGO（多行文本）；空串不绘制 LOGO 段
     #[serde(default)]
     pub motd_logo: String,
     /// 主机密钥 TOFU 二阶段重试：用户已在 UI 确认信任（缺省 false）
@@ -118,6 +118,13 @@ pub struct ConnectPayload {
     /// 传输层保活间隔（秒）：缺省 30s，0 = 禁用；按主机配置
     #[serde(default)]
     pub keepalive_secs: Option<u64>,
+    /// 堡垒机外部连接：全程只开一条通道，不开 MOTD/初始化脚本/指标/AI 工具的
+    /// 辅助 exec 通道（缺省 false = 常规保存主机连接）
+    #[serde(default)]
+    pub single_channel: bool,
+    /// `sftp://` 链接：只开 SFTP 子系统通道，不申请 PTY（隐含 single_channel）
+    #[serde(default)]
+    pub sftp_only: bool,
 }
 
 /// 保活间隔解析：未指定 → 缺省 30s（保持现行行为）；0 → 禁用；其余 → 指定秒数
@@ -217,8 +224,8 @@ pub async fn connect_ssh(
     // 先记录目标地址并取出认证方式（下面 payload 字段被 move 进 cfg）
     let target = format!("{}:{}", payload.host, payload.port);
     let auth = payload.into_auth();
-    let motd = payload.motd;
-    let color_prompt = payload.color_prompt;
+    // sftp-only 必然单通道；通道的实际取舍在 session 层（开通道的那一层）落实
+    let single_channel = payload.single_channel || payload.sftp_only;
     let cfg = SessionConfig {
         host: payload.host,
         port: payload.port,
@@ -226,12 +233,14 @@ pub async fn connect_ssh(
         auth,
         cols: payload.cols,
         rows: payload.rows,
-        motd,
-        color_prompt,
+        motd: payload.motd,
+        color_prompt: payload.color_prompt,
         env: payload.env,
         motd_logo: payload.motd_logo,
         keepalive: resolve_keepalive(payload.keepalive_secs),
         host_key,
+        single_channel,
+        sftp_only: payload.sftp_only,
     };
     let (session_id, mut frame_rx) = manager.create(cfg).await.map_err(|e| {
         // 主机密钥协议错误（HOSTKEY_*:）原样透传：payload `algo|fp` 需被前端
@@ -319,6 +328,7 @@ pub async fn tunnel_start(
     port_conflict: String,
     dns_resolve: String,
     retry_count: u32,
+    idle_timeout_sec: u32,
     manager: State<'_, SessionManager>,
 ) -> Result<(), String> {
     slow_span!("tunnel_start");
@@ -327,6 +337,8 @@ pub async fn tunnel_start(
         dns_resolve: crate::ssh::tunnel::DnsResolve::parse(&dns_resolve),
         // 引擎约定 0–20，越界钳位（前端已是滑杆范围，此处兜底）
         retry_count: retry_count.min(20),
+        // 空闲断开：0 = 长活；上限 10 天，防手滑填成天文数字（同上兜底）
+        idle_timeout_sec: idle_timeout_sec.min(864_000),
     };
     let rule = crate::ssh::tunnel::TunnelRule {
         id: rule.id,
@@ -396,7 +408,73 @@ pub async fn sftp_mkdir(
     })
 }
 
-/// 上传单个文件。同名远端文件默认覆盖；进度经 IPC [`Channel`] 流式推送。
+/// SFTP 批量创建目录（mkdir -p 语义、去重后一轮往返）。拖拽上传整棵目录树时，
+/// 前端把本批所有目标目录一次传入，避免每个文件重复推导各级父目录。
+#[tauri::command]
+pub async fn sftp_mkdir_all(
+    session_id: &str,
+    paths: Vec<String>,
+    manager: State<'_, SessionManager>,
+) -> Result<(), String> {
+    slow_span!("sftp_mkdir_all");
+    manager.sftp_mkdir_all(session_id, paths).await.map_err(|e| {
+        log::error!("sftp_mkdir_all 失败 (session={session_id}): {e}");
+        e.to_string()
+    })
+}
+
+/// SFTP 远端路径元数据：编辑器自动回写前用来判断「远端是否已被别人改动」。
+/// 路径不存在不报错，返回 `exists=false`（删除同样属于「变了」，须提示而非静默写回）。
+#[tauri::command]
+pub async fn sftp_stat(
+    session_id: &str,
+    path: String,
+    manager: State<'_, SessionManager>,
+) -> Result<crate::ssh::sftp::RemoteStat, String> {
+    slow_span!("sftp_stat");
+    manager.sftp_stat(session_id, path).await.map_err(|e| {
+        log::error!("sftp_stat 失败 (session={session_id}): {e}");
+        e.to_string()
+    })
+}
+
+/// SFTP 递归枚举远端目录树：下载方向与 `local_walk`（上传）对称，
+/// 一次调用拿到整棵文件清单 + 目录骨架，前端据此建本地目录并逐文件入队。
+#[tauri::command]
+pub async fn sftp_walk(
+    session_id: String,
+    root: String,
+    max_files: Option<usize>,
+    manager: State<'_, SessionManager>,
+) -> Result<crate::ssh::sftp::RemoteWalkResult, String> {
+    slow_span!("sftp_walk");
+    manager.sftp_walk(&session_id, root, max_files).await.map_err(|e| {
+        log::error!("sftp_walk 失败 (session={session_id}): {e}");
+        e.to_string()
+    })
+}
+
+/// SFTP 取回编辑副本到本地路径（不经传输队列，因此没有覆盖策略/续传/哈希校验）。
+#[tauri::command]
+pub async fn sftp_fetch(
+    session_id: &str,
+    remote_path: String,
+    local_path: String,
+    manager: State<'_, SessionManager>,
+) -> Result<u64, String> {
+    slow_span!("sftp_fetch");
+    manager
+        .sftp_fetch(session_id, remote_path, local_path)
+        .await
+        .map_err(|e| {
+            log::error!("sftp_fetch 失败 (session={session_id}): {e}");
+            e.to_string()
+        })
+}
+
+/// 上传单个文件。行为策略（覆盖/临时文件/元数据/断点校验/哈希校验）由前端
+/// 全局设置组装成 [`TransferPolicy`] 传入；缺省保持旧行为（覆盖）。
+/// 进度经 IPC [`Channel`] 流式推送。
 #[tauri::command]
 pub async fn sftp_upload(
     session_id: &str,
@@ -406,6 +484,7 @@ pub async fn sftp_upload(
     chunk_kb: Option<u32>,
     resume: Option<bool>,
     max_bytes: Option<u64>,
+    policy: Option<TransferPolicy>,
     channel: Channel<TransferProgress>,
     manager: State<'_, SessionManager>,
 ) -> Result<(), String> {
@@ -420,6 +499,7 @@ pub async fn sftp_upload(
             chunk_kb,
             resume,
             max_bytes,
+            policy,
             channel,
         )
         .await
@@ -429,7 +509,8 @@ pub async fn sftp_upload(
         })
 }
 
-/// 下载单个文件。本地父目录不存在时自动创建；进度经 IPC [`Channel`] 流式推送。
+/// 下载单个文件。本地父目录不存在时自动创建；行为策略同 [`sftp_upload`]；
+/// 进度经 IPC [`Channel`] 流式推送。
 #[tauri::command]
 pub async fn sftp_download(
     session_id: &str,
@@ -439,6 +520,7 @@ pub async fn sftp_download(
     chunk_kb: Option<u32>,
     resume: Option<bool>,
     max_bytes: Option<u64>,
+    policy: Option<TransferPolicy>,
     channel: Channel<TransferProgress>,
     manager: State<'_, SessionManager>,
 ) -> Result<(), String> {
@@ -452,6 +534,7 @@ pub async fn sftp_download(
             chunk_kb,
             resume,
             max_bytes,
+            policy,
             channel,
         )
         .await
@@ -476,10 +559,25 @@ pub async fn sftp_sync_cwd(
         .map_err(|e| e.to_string())
 }
 
+/// 设定会话 SFTP 通道的空闲自动关闭阈值（秒，0 = 常驻不关）。
+/// 文件面板在会话激活时按全局设置调用；超时只回收 SFTP 子通道，终端会话不受影响，
+/// 后续文件操作会自动重建通道。
+#[tauri::command]
+pub async fn sftp_set_idle_timeout(
+    session_id: &str,
+    sec: u32,
+    manager: State<'_, SessionManager>,
+) -> Result<(), String> {
+    slow_span!("sftp_set_idle_timeout");
+    manager
+        .sftp_set_idle_timeout(session_id, sec)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// 暂停（paused=true）或继续（paused=false）指定传输任务
 #[tauri::command]
-pub async fn sftp_transfer_pause(
-    session_id: &str,
+pub async fn sftp_transfer_pause(    session_id: &str,
     task_id: u64,
     paused: bool,
     manager: State<'_, SessionManager>,
@@ -583,10 +681,32 @@ pub async fn sftp_readlink(
         .map_err(|e| e.to_string())
 }
 
-/// 默认动态指标采集间隔（毫秒）；Step 8 起由设置项覆盖
-const DEFAULT_METRICS_INTERVAL_MS: u64 = 3000;
+/// 修改远端权限（chmod）。`scope` 仅在 `recursive` 为真时生效：
+/// `all` 文件与目录、`files` 只文件、`dirs` 只目录。
+/// mode 在引擎侧取低 12 位（对话框只勾低 9 位），越界值钳制而非报错。
+#[tauri::command]
+pub async fn sftp_set_perm(
+    session_id: &str,
+    path: String,
+    mode: u32,
+    recursive: bool,
+    scope: String,
+    manager: State<'_, SessionManager>,
+) -> Result<(), String> {
+    slow_span!("sftp_set_perm");
+    manager
+        .sftp_set_perm(session_id, path, mode, recursive, scope)
+        .await
+        .map_err(|e| {
+            log::error!("sftp_set_perm 失败 (session={session_id}): {e}");
+            e.to_string()
+        })
+}
 
-/// 启动右侧栏动态指标采集（0x06 帧）。前端在 Inspector 可见且会话在线时调用，
+/// 默认动态指标采集间隔（毫秒）；前端始终按设置项显式传入，这里只是缺省兜底
+const DEFAULT_METRICS_INTERVAL_MS: u64 = 2000;
+
+/// 启动左栏动态指标采集（0x06 帧）。前端在监控面板可见且会话在线时调用，
 /// 之后每 5s 调一次 `metrics_heartbeat` 续约；隐藏/关闭后 9s 无心跳任务自停。
 /// `iface` 为 0x05 已采集的默认路由网卡名，网络计数优先取它；缺省汇总非 lo 网卡。
 #[tauri::command]
@@ -604,7 +724,7 @@ pub async fn start_metrics(
         .map_err(|e| e.to_string())
 }
 
-/// 显式停止动态指标采集（切换会话/Inspector 隐藏时调用，即时释放 exec 通道）
+/// 显式停止动态指标采集（切换会话/监控面板隐藏时调用，即时释放 exec 通道）
 #[tauri::command]
 pub async fn stop_metrics(
     session_id: &str,
@@ -667,6 +787,9 @@ pub async fn test_ssh_connection(
         // 测试连接短生命周期（10s 超时即断），保活无意义
         keepalive: None,
         host_key,
+        // 测试连接只握手与认证，不开任何通道
+        single_channel: true,
+        sftp_only: false,
     };
 
     let start = Instant::now();
@@ -810,6 +933,53 @@ pub fn reveal_log_dir() -> Result<(), String> {
         return Err("日志系统未初始化".to_string());
     };
     tauri_plugin_opener::open_path(hub.log_dir(), None::<&str>).map_err(|e| e.to_string())
+}
+
+/// 设置主窗口原生外观（设置 → 外观 → 界面主题）。
+/// theme 传设置原始值："dark"/"light" 锁定 NSAppearance（macOS 红绿灯配色/毛玻璃
+/// 底色联动，Windows 标题栏随之）；"auto"/其他/缺省传 None 交还系统跟随。
+/// 仅影响原生装饰层，WebView 内 CSS 主题由前端 data-theme 自行切换。
+#[tauri::command]
+pub fn set_window_theme(app: AppHandle, theme: Option<String>) -> Result<(), String> {
+    let resolved = match theme.as_deref() {
+        Some("dark") => Some(tauri::Theme::Dark),
+        Some("light") => Some(tauri::Theme::Light),
+        _ => None,
+    };
+    match app.get_webview_window("main") {
+        Some(win) => win.set_theme(resolved).map_err(|e| e.to_string()),
+        None => Ok(()), // 窗口未就绪：启动时 builder.theme 已按配置设置，此处幂等跳过
+    }
+}
+
+/// 设置主窗口玻璃底色材质（设置 → 外观 → 背景不透明度）。
+/// opacity ≥ 100 时撤除原生模糊（前端 CSS 表面已完全不透明，模糊视图只是白搭合成开销）；
+/// < 100 时在窗口底层挂 macOS「桌面内容模糊」材质，配合前端 `--glass-a` 的透明底
+/// 得到毛玻璃效果。非 macOS 平台窗口本就不透明（lib.rs 仅在 macOS 开 transparent），
+/// 透明度只由前端 CSS 表达，此处幂等跳过。
+#[tauri::command]
+pub fn set_window_glass(app: AppHandle, opacity: u32) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::utils::config::WindowEffectsConfig;
+        use tauri::window::{Effect, EffectState};
+        if let Some(win) = app.get_webview_window("main") {
+            let effects = if opacity >= 100 {
+                None
+            } else {
+                Some(WindowEffectsConfig {
+                    effects: vec![Effect::UnderWindowBackground],
+                    state: Some(EffectState::Active),
+                    radius: Some(16.0),
+                    ..Default::default()
+                })
+            };
+            win.set_effects(effects).map_err(|e| e.to_string())?;
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, opacity);
+    Ok(())
 }
 
 /// 系统文件管理器打开设置面板中配置的日志存储路径，返回实际打开的绝对路径。

@@ -128,6 +128,17 @@ pub(crate) struct EnvVarSection {
     value: String,
 }
 
+/// 命令模板条目（settings.commandTemplates 元素）。与 env 一样只做持久化：
+/// 执行发生在前端（「执行命令…」面板把 command 写入终端），Rust 侧不消费。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CommandTemplateSection {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    command: String,
+}
+
 /// `settings` 节强类型表示。字段与前端 `AppSettings` 对齐（不含 log* 字段——
 /// 日志配置的权威存储是 `logs` 节）；字段缺失补默认、**类型不符即反序列化失败**
 /// （写前校验拒绝）；未知字段经 `extra` 保留（前向兼容）。
@@ -159,6 +170,8 @@ pub(crate) struct SettingsSection {
     auto_reconnect: bool,
     auto_reconnect_max_attempts: i64,
     env: Vec<EnvVarSection>,
+    /// 「执行命令…」面板里的自定义命令条目（全局一份）
+    command_templates: Vec<CommandTemplateSection>,
     // 快捷键（键名含点，serde 按磁盘 camelCase 名显式 rename）
     #[serde(rename = "key.newTab")]
     key_new_tab: String,
@@ -201,6 +214,11 @@ pub(crate) struct SettingsSection {
     sftp_verify_hash: bool,
     sftp_blacklist: String,
     sftp_show_hidden: bool,
+    /// SFTP 面板是否显示「本地」文件栏（关闭后只剩远端一栏，纯前端布局开关）
+    sftp_show_local_pane: bool,
+    /// 外部编辑器命令（空串=自动探测 code/codium/cursor）。仅由前端 invoke 传给
+    /// localfs::open_in_editor，Rust 侧只负责持久化，不读它决定行为
+    sftp_editor_command: String,
     // 关于
     auto_update: bool,
     update_channel: String,
@@ -221,8 +239,8 @@ impl Default for SettingsSection {
             splash_transparent: true,
 
             font_family: "JetBrains Mono".into(),
-            font_size: 13,
-            line_height: 145,
+            font_size: 14,
+            line_height: 125,
             font_weight: "400".into(),
 
             color_prompt: true,
@@ -233,7 +251,7 @@ impl Default for SettingsSection {
             trim_on_copy: true,
             paste_guard: false,
             right_click: "menu".into(),
-            cursor_style: "bar".into(),
+            cursor_style: "block".into(),
             cursor_blink: true,
             auto_reconnect: true,
             auto_reconnect_max_attempts: 5,
@@ -248,6 +266,9 @@ impl Default for SettingsSection {
                 },
             ],
 
+            // 默认不预置命令模板：与前端 DEFAULT_SETTINGS 一致（自定义命令直接写入远端执行）
+            command_templates: Vec::new(),
+
             key_new_tab: "⌘+T".into(),
             key_close_tab: "⌘+W".into(),
             key_split_v: "⌘+D".into(),
@@ -261,7 +282,7 @@ impl Default for SettingsSection {
             renderer: "auto".into(),
 
             mem_interval: 2,
-            metrics_interval: 3,
+            metrics_interval: 2,
             mem_pause_hidden: true,
             mem_alert_mb: 300,
 
@@ -281,7 +302,8 @@ impl Default for SettingsSection {
             sftp_verify_hash: false,
             sftp_blacklist: ".DS_Store\nThumbs.db".into(),
             sftp_show_hidden: false,
-
+            sftp_show_local_pane: false,
+            sftp_editor_command: String::new(),
             auto_update: true,
             update_channel: "stable".into(),
 

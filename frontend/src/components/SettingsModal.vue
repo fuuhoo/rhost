@@ -6,11 +6,20 @@ import { relaunch } from '@tauri-apps/plugin-process'
 import AppLogo from './AppLogo.vue'
 import { toast } from '../composables/useToast'
 import {
-  resolveTerminalFontFamily, savedSettings, saveSettings, showSettings,
+  pickTermPalette, resolveTerminalFontFamily, savedSettings, saveSettings, showSettings,
+  termBgImageTint, termInkBg,
+  clampBgImgBlur, clampBgImgOpacity,
   type AppSettings,
 } from '../stores/settings'
 import { revealLogStorageDir, syncLogConfig } from '../stores/applog'
-import { isTauri } from '../lib/tauri'
+import {
+  TERM_SCHEMES, TERM_SCHEME_IDS,
+  TERM_BG_BUILTINS, TERM_BG_BUILTIN_PREFIX,
+  resolveTermBgImage, termBgBuiltinKey, termBgBuiltinThumb, termBgImageLabel,
+} from '../lib/termThemes'
+import { isTauri, detectPlatform } from '../lib/tauri'
+import { settingsFocusPanel } from '../lib/uiBus'
+import { pathBaseName, readFileFromPath } from '../lib/localFile'
 import { aiClearMemories, aiGetApiKey, aiListMemories, aiListPromptAssets, aiRevealPromptDir, aiSaveMemories, aiSetApiKey, aiTestConnection, AI_MEMORY_CONTENT_MAX_CHARS, type AiMemoryItem, type AiPromptAsset, type AiPromptAssets } from '../lib/ai'
 import { promptPassword } from '../composables/usePasswordPrompt'
 import { confirmDialog } from '../composables/useConfirm'
@@ -30,7 +39,7 @@ import {
 type CtrlKind =
   | 'segmented' | 'switch' | 'select' | 'range' | 'text' | 'color'
   | 'keys' | 'buttons' | 'numberUnit' | 'number' | 'textarea' | 'list' | 'exportOptions'
-  | 'assetList' | 'memoryList' | 'memoryAdd' | 'password'
+  | 'assetList' | 'memoryList' | 'memoryAdd' | 'password' | 'editor' | 'bgimage'
 
 interface Opt { v: string; t: string }
 interface RowDef {
@@ -54,6 +63,8 @@ interface RowDef {
   disabled?: boolean
   /** 行内附带开关的设置项：开关渲染在标题行内（如 MOTD 自定义 LOGO 开关+文本域同 row） */
   switchKey?: keyof AppSettings
+  /** 本行还会写入、但没有独立行的设置项（如背景图片行里的选图写 termBgImage），一并参与脏检测 */
+  dirtyKeys?: (keyof AppSettings)[]
   unit?: string
   width?: number
   placeholder?: string
@@ -74,7 +85,7 @@ interface RowDef {
 interface GroupDef {
   label: string
   rows: RowDef[]
-  extra?: 'envEditor' | 'preview'
+  extra?: 'envEditor' | 'cmdEditor' | 'preview'
 }
 interface PanelDef {
   id: string
@@ -95,6 +106,7 @@ const ICONS: Record<string, string> = {
   monitor: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 12 7 12 10 5 14 19 17 12 21 12"/></svg>',
   sftp: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/><path d="M12 8v6"/><path d="M9.5 11.5L12 14l2.5-2.5"/></svg>',
   tunnel: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="8" r="2"/><circle cx="12" cy="8" r="2"/><path d="M6 8h4"/></svg>',
+  commands: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h11M4 12h8M4 18h10"/><path d="M15.5 16.5l2 2 4-4.5"/></svg>',
   ai: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/></svg>',
   about: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="11" x2="12" y2="16"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>',
 }
@@ -108,8 +120,21 @@ const ACCENTS = [
   { v: '#4fd6e0', t: '青' },
 ]
 
-/** 可选等宽字体（monospace 之外的具名字体，安装态需检测） */
-const FONT_CHOICES = ['JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', 'Menlo'] as const
+/** 可选等宽字体（monospace 之外的具名字体，安装态需检测）
+ *  v 存进设置并作为 CSS 首选族名，必须是字体文件里的真实族名；t 是下拉里的显示名。
+ *  Cascadia Code（微软 Windows Terminal 字体）按要求只显示「Monospace」。 */
+const FONT_CHOICES = [
+  { v: 'DejaVu Sans Mono', t: 'DejaVu Sans Mono' },
+  { v: 'Liberation Mono', t: 'Liberation Mono' },
+  { v: 'JetBrains Mono', t: 'JetBrains Mono' },
+  { v: 'Cascadia Code', t: 'Monospace' },
+  { v: 'SF Mono', t: 'SF Mono' },
+  { v: 'Fira Code', t: 'Fira Code' },
+  { v: 'Menlo', t: 'Menlo' },
+] as const
+
+/** 随包发布的字体（@fontsource woff2 或 public/fonts 下 TTF，不依赖系统安装）：跳过安装态检测，避免误标「未安装」 */
+const EMBEDDED_FONTS = new Set(['DejaVu Sans Mono', 'Liberation Mono', 'JetBrains Mono', 'Cascadia Code'])
 
 /* ---- 字体安装态检测 ----
  * WebView 内 canvas 测量 / document.fonts.check 对本地字体判定不可靠
@@ -120,14 +145,110 @@ const fontAvail = reactive<Record<string, boolean>>({})
 async function refreshFontAvail() {
   // 浏览器 dev 模式无 Tauri IPC：字体安装态不可检测，留空即可（下拉不显示「未安装」）
   if (!isTauri) return
+  const checkable = FONT_CHOICES.map((c) => c.v).filter((v) => !EMBEDDED_FONTS.has(v))
   try {
-    const res = await invoke<Record<string, boolean>>('check_fonts', { names: [...FONT_CHOICES] })
-    for (const name of FONT_CHOICES) fontAvail[name] = res[name] === true
+    const res = await invoke<Record<string, boolean>>('check_fonts', { names: [...checkable] })
+    for (const name of checkable) fontAvail[name] = res[name] === true
   } catch (err) {
     console.error('[fonts] check_fonts failed', err)
   }
 }
 void refreshFontAvail()
+
+/* ---- 外部编辑器候选 ----
+ * 系统里可打开文本文件的程序由后端探测（PATH 命令 / .app 包 / .desktop 入口 /
+ * Windows App Paths）。每个候选的 command 都是能直接写进 sftpEditorCommand 的合法值：
+ * 选中只是替用户填这张表，启动仍走同一个 open_in_editor，与手填行为完全一致。 */
+interface EditorCandidate {
+  label: string
+  command: string
+  program: string
+  source: 'auto' | 'cli' | 'app' | 'reg' | 'system'
+}
+const editorCandidates = ref<EditorCandidate[]>([])
+const editorLoading = ref(false)
+const editorProbeErr = ref('')
+const editorPickerOpen = ref(false)
+const editorPopUp = ref(false)
+const editorFilter = ref('')
+
+const EDITOR_SOURCE_LABELS: Record<EditorCandidate['source'], string> = {
+  auto: '自动', cli: '命令', app: '应用', reg: '注册表', system: '默认',
+}
+
+async function refreshEditorCandidates() {
+  if (!isTauri || editorLoading.value) return
+  editorLoading.value = true
+  editorProbeErr.value = ''
+  try {
+    editorCandidates.value = await invoke<EditorCandidate[]>('list_text_editors')
+  } catch (err) {
+    editorProbeErr.value = String((err as { message?: string })?.message ?? err)
+  } finally {
+    editorLoading.value = false
+  }
+}
+
+/** 首项固定为「自动探测」：留空时后端按 code → codium → cursor → 系统默认的顺序兜底 */
+const editorChoices = computed<EditorCandidate[]>(() => [
+  { label: '自动探测（推荐顺序）', command: '', program: '', source: 'auto' },
+  ...editorCandidates.value,
+])
+const editorFiltered = computed(() => {
+  const q = editorFilter.value.trim().toLowerCase()
+  if (!q) return editorChoices.value
+  return editorChoices.value.filter(e => `${e.label} ${e.command}`.toLowerCase().includes(q))
+})
+/** 输入框里的值命中哪个候选：命中则列表打「当前」标记；命中不了也不影响保存 */
+const editorMatched = computed(() => {
+  const cur = String(draft.sftpEditorCommand ?? '').trim()
+  return editorChoices.value.find(e => e.command === cur)?.command ?? null
+})
+
+function pickEditor(c: EditorCandidate) {
+  setVal('sftpEditorCommand', c.command)
+  editorPickerOpen.value = false
+  editorFilter.value = ''
+}
+
+async function toggleEditorPicker() {
+  editorPickerOpen.value = !editorPickerOpen.value
+  if (!editorPickerOpen.value) return
+  editorFilter.value = ''
+  // 打开即取一次候选：设置面板开时已刷过，这里只兜住首次没刷到的情况
+  if (!editorCandidates.value.length && !editorLoading.value) void refreshEditorCandidates()
+  await nextTick()
+  // 控件在 v-for 的行里，模板 ref 拿不到稳定实例，按类名取面板内唯一的那个搜索框
+  const filter = document.querySelector<HTMLInputElement>('.st-editor-filter')
+  if (!filter) return
+  filter.focus()
+  // 行贴近面板底部时向下展开会溢出滚动区（绝对定位撑不出滚动条），改为向上
+  const box = filter.closest('.st-editor')?.getBoundingClientRect()
+  editorPopUp.value = !!box && box.bottom + 268 > window.innerHeight
+}
+
+/** 参数含空格/引号时要成组，规则与后端 split_command_line 的解析对偶 */
+function cmdQuoteArg(p: string): string {
+  return /[\s"\\]/.test(p) ? `"${p.replace(/(["\\])/g, '\\$1')}"` : p
+}
+
+/** 按路径选择：macOS 选到 .app 包时转成 `open -a <包>`（与自动探测同一套拉起方式），
+ *  选到 Contents/MacOS 里的可执行文件则直接用该路径 */
+async function browseEditor() {
+  const picked = await open({
+    title: '选择编辑器程序',
+    multiple: false,
+    directory: false,
+    defaultPath: detectPlatform() === 'macos' ? '/Applications' : undefined,
+  })
+  if (typeof picked !== 'string' || !picked) return
+  const cmd = detectPlatform() === 'macos' && picked.endsWith('.app')
+    ? `open -a ${cmdQuoteArg(picked)}`
+    : cmdQuoteArg(picked)
+  setVal('sftpEditorCommand', cmd)
+  editorPickerOpen.value = false
+  editorFilter.value = ''
+}
 
 const PANELS: PanelDef[] = [
   {
@@ -137,10 +258,10 @@ const PANELS: PanelDef[] = [
       {
         label: '界面',
         rows: [
-          { key: 'uiTheme', title: '界面主题', desc: '跟随系统时随系统外观自动切换', kind: 'segmented', keywords: '界面 主题 明暗 深色 浅色 跟随系统 TODO', todo: '仅持久化，主题切换未生效',
+          { key: 'uiTheme', title: '界面主题', desc: '跟随系统时随系统外观自动切换', kind: 'segmented', keywords: '界面 主题 明暗 深色 浅色 跟随系统',
             options: [{ v: 'dark', t: '深色' }, { v: 'light', t: '浅色' }, { v: 'auto', t: '跟随系统' }] },
           { key: 'accent', title: '强调色', desc: '用于按钮、选中态与焦点环', kind: 'color', keywords: '强调色 主题色 accent 颜色' },
-          { key: 'opacity', title: '背景不透明度', desc: '降低数值可获得毛玻璃效果', kind: 'range', min: 60, max: 100, unit: '%', keywords: '透明度 不透明 opacity 毛玻璃 模糊 blur TODO', todo: '仅持久化，未接入窗口透明度' },
+          { key: 'opacity', title: '背景不透明度', desc: '降低数值可获得毛玻璃效果', kind: 'range', min: 60, max: 100, unit: '%', keywords: '透明度 不透明 opacity 毛玻璃 模糊 blur' },
         ],
       },
       {
@@ -159,15 +280,36 @@ const PANELS: PanelDef[] = [
       {
         label: '字体',
         rows: [
-          { key: 'fontFamily', title: '等宽字体', desc: '需要系统已安装该字体，未安装时自动回退到系统等宽', kind: 'select', width: 190, keywords: '字体 等宽 font family 字形 安装',
-            options: () => [...FONT_CHOICES, 'monospace'].map(v => ({
-              v,
-              t: v === 'monospace' ? '系统等宽' : `${v}${fontAvail[v] === false ? '（未安装）' : ''}`,
-            })) },
+          { key: 'fontFamily', title: '等宽字体', desc: '默认 DejaVu Sans Mono（FinalShell 终端的默认字体）。DejaVu Sans Mono / Liberation Mono / JetBrains Mono / Monospace（即 Cascadia Code，微软终端字体）四款已随包发布，任何系统都能拿到同一套字形；其余候选需系统安装，缺失时逐级回退到系统等宽与中文等宽', kind: 'select', width: 190, keywords: '字体 等宽 font family 字形 安装 jetbrains mono dejavu liberation cascadia monospace 中文',
+            options: () => [
+              ...FONT_CHOICES.map((c) => ({ v: c.v as string, t: `${c.t}${fontAvail[c.v] === false ? '（未安装）' : ''}` })),
+              { v: 'monospace', t: '系统等宽' },
+            ] },
           { key: 'fontSize', title: '字号', kind: 'range', min: 10, max: 20, unit: 'px', keywords: '字号 大小 font size' },
           { key: 'lineHeight', title: '行高', kind: 'range', min: 100, max: 200, unit: '%', keywords: '行高 行距 line height' },
           { key: 'fontWeight', title: '字重', kind: 'select', width: 120, keywords: '字重 粗细 weight',
-            options: [{ v: '300', t: '细体' }, { v: '400', t: '常规' }, { v: '500', t: '中等' }, { v: '700', t: '粗体' }] },
+            options: [{ v: '300', t: '细体' }, { v: '400', t: '常规' }, { v: '500', t: '中等' }, { v: '700', t: '粗体' }],
+            desc: '内置字体里只有 JetBrains Mono 备齐 300/400/500/700 四档真字形；DejaVu Sans Mono、Liberation Mono、Monospace 只发布常规与粗体，选细体/中等会取最近的一档，不足部分由浏览器合成描边' },
+        ],
+      },
+      {
+        label: '终端配色',
+        rows: [
+          { key: 'termTheme', title: '配色方案', desc: '决定终端正文与 16 色 ANSI、光标/选区、状态面板文字与查找高亮。底色由「背景颜色」单独决定，本方案只管前景与色板；标「无浅底」的方案没有浅色变体，浅色背景下自动回落墨蓝浅底（白前景在浅底不可读）', kind: 'select', width: 210, keywords: '终端 配色 主题 方案 前景 颜色 color scheme 深蓝 墨蓝 finalshell solarized gruvbox catppuccin tokyo nord dracula 看不清 可读',
+            options: () => TERM_SCHEME_IDS.map((id) => ({
+              v: id,
+              t: TERM_SCHEMES[id].label + (TERM_SCHEMES[id].light ? '' : '（无浅底）'),
+            })) },
+          { key: 'termBg', title: '背景颜色', desc: '终端底色，独立于配色方案。「跟随界面」随界面主题深浅切换；「蓝色」为 FinalShell 默认深蓝 (#002945)。开启背景图片时本项不参与：衬底只剩图片本身，墨色改按图片明暗自动选深/浅', kind: 'segmented', keywords: '终端 背景 颜色 深色 浅色 蓝色 深蓝 跟随 界面 theme background dark light blue finalshell',
+            options: [
+              { v: 'follow', t: '跟随界面' },
+              { v: 'dark', t: '深色' },
+              { v: 'light', t: '浅色' },
+              { v: 'blue', t: '蓝色' },
+            ] },
+          { key: 'termBgImageOn', title: '背景图片', desc: '开启后图片即终端背景（「背景颜色」不再掺进来，文字始终在图片之上），可从随包内置壁纸里点选，或用「本地图片…」取本机文件；正文字色按图片平均亮度自动取深色或浅色变体', kind: 'bgimage', dirtyKeys: ['termBgImage'], keywords: '终端 背景 图片 壁纸 image picture 内置 本地 图床 自定义 wallpaper 浓度 透明度' },
+          { key: 'termBgImageOpacity', title: '图片浓度', desc: '图片层不透明度：100% 即完全以图片为背景（FinalShell 观感），调低向图片自身的主色压平（不是透出玻璃把壁纸洗成灰膜）', kind: 'range', min: 20, max: 100, unit: '%', disabledKey: 'termBgImageOn', keywords: '终端 背景 图片 浓度 透明度 opacity 淡' },
+          { key: 'termBgImageBlur', title: '图片模糊', desc: '只模糊图片层，文字始终清晰：图上有细节或文字时调高，避免与终端内容抢注意力', kind: 'range', min: 0, max: 10, unit: 'px', disabledKey: 'termBgImageOn', keywords: '终端 背景 图片 模糊 虚化 blur 清晰 干扰' },
         ],
       },
       {
@@ -177,8 +319,8 @@ const PANELS: PanelDef[] = [
       {
         label: 'MOTD横幅',
         rows: [
-          { key: 'motd', title: '登录欢迎面板', desc: '连接成功后采集服务器负载、内存、磁盘、IP 等状态，在终端绘制 Rhost MOTD 欢迎横幅；开启时自动屏蔽 sshd 原生 MOTD 与 Last login 避免重复', kind: 'switch', keywords: 'motd 欢迎 面板 横幅 banner 登录 系统状态 负载 内存 磁盘 屏蔽 抑制 原生 last login' },
-          { key: 'motdLogo', title: '自定义 LOGO', switchKey: 'motdLogoOn', desc: '开启开关后用下方文本域中的 ASCII art 替换内置 Rhost LOGO；关闭恢复显示内置 LOGO，已粘贴的内容保留。复用终端字体与配色，最多 30 行、每行 200 字符（超出自动截断）', kind: 'textarea', rows: 10, placeholder: '在此粘贴 ASCII art', disabledKey: ['motdLogoOn', 'motd'], keywords: 'motd logo ascii 横幅 自定义 开关 字符画 art 粘贴' },
+          { key: 'motd', title: '登录欢迎面板', desc: '连接成功后采集服务器负载、内存、磁盘、IP 等状态，在终端绘制服务器状态面板；开启时自动屏蔽 sshd 原生 MOTD 与 Last login 避免重复', kind: 'switch', keywords: 'motd 欢迎 面板 横幅 banner 登录 系统状态 负载 内存 磁盘 屏蔽 抑制 原生 last login' },
+          { key: 'motdLogo', title: '自定义 LOGO', switchKey: 'motdLogoOn', desc: '开启开关后在状态面板首段绘制下方文本域中的 ASCII art；关闭则不绘制 LOGO，已粘贴的内容保留。复用终端字体与配色，最多 30 行、每行 200 字符（超出自动截断）', kind: 'textarea', rows: 10, placeholder: '在此粘贴 ASCII art', disabledKey: ['motdLogoOn', 'motd'], keywords: 'motd logo ascii 横幅 自定义 开关 字符画 art 粘贴' },
         ],
       },
       {
@@ -218,22 +360,22 @@ const PANELS: PanelDef[] = [
         rows: [
           { key: 'sftpChunkKb', title: '传输块大小', desc: '单次读写的数据量；大块吞吐更高，小块进度更细腻、弱网下重试成本更低', kind: 'select', num: true, width: 150, keywords: 'sftp 传输 块 分块 缓冲 chunk 大小 吞吐 速度',
             options: [32, 64, 128, 256, 512, 1024].map(v => ({ v: String(v), t: v >= 1024 ? '1 MB' : `${v} KB${v === 64 ? '（默认）' : ''}` })) },
-          { key: 'sftpOverwritePolicy', title: '文件覆盖策略', desc: '上传或下载时，如果目标位置已存在同名文件，执行对应的处理规则', kind: 'select', width: 230, keywords: 'sftp 覆盖 策略 同名 冲突 overwrite skip 跳过 询问 更新 mtime TODO', todo: '后端未消费',
+          { key: 'sftpOverwritePolicy', title: '文件覆盖策略', desc: '目标位置已存在同名文件（且无法续传）时的处置：仅源文件 mtime 更新才覆盖，取不到 mtime 则比大小；跳过＝任务标记「已跳过」，目标与源文件都不动；询问＝每次冲突弹窗，只有「覆盖 / 跳过」两个按钮，选择仅作用于本次任务', kind: 'select', width: 230, keywords: 'sftp 覆盖 策略 同名 冲突 overwrite skip 跳过 询问 更新 mtime',
             options: [
               { v: 'newer', t: '仅源文件更新时覆盖（默认）' },
               { v: 'skip', t: '不覆盖，跳过文件' },
               { v: 'overwrite', t: '直接覆盖全部' },
               { v: 'ask', t: '每次冲突询问' },
             ] },
-          { key: 'sftpUploadTemp', title: '上传临时文件机制', desc: '上传先写入临时文件，传输完成后原子重命名，避免远端产生损坏文件', kind: 'switch', keywords: 'sftp 上传 临时文件 原子 重命名 temp atomic rename 损坏 TODO', todo: '后端未消费' },
-          { key: 'sftpPreserveMeta', title: '保留文件元数据', desc: '传输文件时同步保留文件修改时间与权限属性，备份场景推荐开启；受服务器账号权限限制', kind: 'switch', keywords: 'sftp 元数据 保留 修改时间 权限 preserve mtime chmod 备份 TODO', todo: '后端未消费' },
+          { key: 'sftpUploadTemp', title: '上传临时文件机制', desc: '仅上传生效：字节先写「远端路径.rhost-tmp」，传完原子重命名落位，中断或取消不会在远端留下半截文件。下载不启用此机制——本地半截文件本身就是续传断点，重命名会顶掉你可能正在其它程序打开的本地文件', kind: 'switch', keywords: 'sftp 上传 临时文件 原子 重命名 temp atomic rename 损坏' },
+          { key: 'sftpPreserveMeta', title: '保留文件元数据', desc: '传完后把源文件的修改时间与权限位写到目标（上传走 SFTP SETSTAT，下载写到本地）。上传时先设属性再重命名；服务器普遍禁止非属主改属性，失败仅记告警、不影响传输结果', kind: 'switch', keywords: 'sftp 元数据 保留 修改时间 权限 preserve mtime chmod 备份' },
         ],
       },
       {
         label: '断点续传',
         rows: [
           { key: 'sftpResume', title: '启用断点续传', desc: '传输中断后再次发起任务，可以从已传输完成位置继续传输，无需从头重传。关闭后所有文件每次都完整从头传输', kind: 'switch', keywords: 'sftp 断点续传 续传 resume 中断 重传 偏移' },
-          { key: 'sftpResumeCheck', title: '断点校验方式', desc: '续传前校验已存在的半截文件，确认未被改动后从偏移位置续传；仅判断能否续传，与传输完成后的完整性校验相互独立', kind: 'select', width: 200, disabledKey: 'sftpResume', keywords: 'sftp 断点 校验 大小 mtime sha256 哈希 续传 半截 TODO', todo: '后端未消费',
+          { key: 'sftpResumeCheck', title: '断点校验方式', desc: '续传前判断已有半截文件能否作断点。大小：等大即续（推荐）。大小+mtime：还要求半截文件是 24 小时内写的，过旧一律整文件重传。SHA256：比对半截内容与源文件前缀哈希，一致才续；不一致或取不到哈希则整文件重传，并在传完后强制做一次整文件 SHA256 校验（无需再开启完整性校验项）', kind: 'select', width: 200, disabledKey: 'sftpResume', keywords: 'sftp 断点 校验 大小 mtime sha256 哈希 续传 半截',
             options: [
               { v: 'size', t: '文件大小（推荐）' },
               { v: 'sizeMtime', t: '文件大小 + mtime' },
@@ -244,26 +386,28 @@ const PANELS: PanelDef[] = [
       {
         label: '并发与限速',
         rows: [
-          { key: 'sftpGlobalConcurrency', title: '全局最大并发传输任务', desc: '整个客户端所有主机同时运行的上传与下载任务总数上限，超出上限的任务进入排队', kind: 'number', width: 100, min: 1, max: 20, step: 1, unit: ' 个', keywords: 'sftp 全局 并发 任务 上传 下载 排队 上限 TODO', todo: '后端未消费' },
-          { key: 'sftpHostConcurrency', title: '单主机最大并发传输任务', desc: '同一台服务器同时运行的上传、下载任务上限，防止单台服务器并发过高导致连接卡顿', kind: 'number', width: 100, min: 1, max: 10, step: 1, unit: ' 个', keywords: 'sftp 单主机 服务器 并发 任务 卡顿 上限 TODO', todo: '后端未消费' },
-          { key: 'sftpGlobalRateKb', title: '全局带宽限速', desc: '全部传输任务合计的总带宽上限，填写 0 代表不限制带宽', kind: 'number', width: 130, min: 0, step: 64, unit: ' KB/s', keywords: 'sftp 全局 带宽 限速 速率 限流 总带宽 KB TODO', todo: '后端未消费' },
-          { key: 'sftpTaskRateKb', title: '单任务带宽限速', desc: '单个文件传输任务的最大带宽上限，填写 0 代表不限制带宽', kind: 'number', width: 130, min: 0, step: 64, unit: ' KB/s', keywords: 'sftp 单任务 带宽 限速 速率 限流 KB TODO', todo: '后端未消费' },
-          { key: 'sftpRetryCount', title: '失败重试次数', desc: '遇到网络抖动、临时超时等可恢复错误时自动重试的最大次数，达到次数后任务标记失败', kind: 'number', width: 100, min: 0, max: 20, step: 1, unit: ' 次', keywords: 'sftp 失败 重试 次数 网络抖动 超时 错误 TODO', todo: '后端未消费' },
-          { key: 'sftpRetryIntervalMs', title: '重试间隔', desc: '单次传输失败后等待指定毫秒再发起下一次重试，避免短时间密集请求冲击服务器', kind: 'number', width: 130, min: 0, step: 100, unit: ' ms', keywords: 'sftp 重试 间隔 等待 毫秒 退避 backoff TODO', todo: '后端未消费' },
+          { key: 'sftpGlobalConcurrency', title: '全局最大并发传输任务', desc: '整个客户端所有主机同时运行的上传与下载任务总数上限，超出上限的任务进入排队。跨所有工作台标签页统计（在飞台账见 frontend/src/lib/transferLedger.ts），每个标签页各自的面板不会各跑一份上限', kind: 'number', width: 100, min: 1, max: 20, step: 1, unit: ' 个', keywords: 'sftp 全局 并发 任务 上传 下载 排队 上限' },
+          { key: 'sftpHostConcurrency', title: '单主机最大并发传输任务', desc: '同一条 SFTP 通道（同一会话标签）同时运行的上传、下载任务上限，防止单台服务器并发过高导致连接卡顿；建议保持 1，多个标签页连同一台主机时各自独立计数', kind: 'number', width: 100, min: 1, max: 10, step: 1, unit: ' 个', keywords: 'sftp 单主机 服务器 并发 任务 卡顿 上限' },
+          { key: 'sftpGlobalRateKb', title: '全局带宽限速', desc: '全部传输任务合计的总带宽上限，填写 0 代表不限制带宽。同一台主机（host:port + 登录用户）下的所有任务共用一个桶，跨标签页也共享', kind: 'number', width: 130, min: 0, step: 64, unit: ' KB/s', keywords: 'sftp 全局 带宽 限速 速率 限流 总带宽 KB' },
+          { key: 'sftpTaskRateKb', title: '单任务带宽限速', desc: '单个文件传输任务的最大带宽上限，填写 0 代表不限制带宽。与全局限速同时生效时，取两者中更慢的节奏', kind: 'number', width: 130, min: 0, step: 64, unit: ' KB/s', keywords: 'sftp 单任务 带宽 限速 速率 限流 KB' },
+          { key: 'sftpRetryCount', title: '失败重试次数', desc: '遇到网络抖动、临时超时等可恢复错误时自动重试的最大次数，达到次数后任务标记失败。取消、覆盖策略跳过/冲突、完整性校验失败、未建立 SSH 连接等业务错误不重试', kind: 'number', width: 100, min: 0, max: 20, step: 1, unit: ' 次', keywords: 'sftp 失败 重试 次数 网络抖动 超时 错误' },
+          { key: 'sftpRetryIntervalMs', title: '重试间隔', desc: '单次传输失败后等待指定毫秒再发起下一次重试，避免短时间密集请求冲击服务器；填 0 立即重试', kind: 'number', width: 130, min: 0, step: 100, unit: ' ms', keywords: 'sftp 重试 间隔 等待 毫秒 退避 backoff' },
         ],
       },
       {
         label: '安全与完整性校验',
         rows: [
-          { key: 'sftpIdleTimeoutSec', title: 'SFTP 会话空闲超时', desc: 'SFTP 子通道长时间没有文件操作时自动关闭释放资源，不会断开 SSH 终端会话，后续传输会自动重建通道；填 0 表示不自动关闭', kind: 'number', width: 130, min: 0, step: 10, unit: ' 秒', keywords: 'sftp 会话 空闲 超时 自动关闭 释放 通道 重建 TODO', todo: '后端未消费' },
-          { key: 'sftpVerifyHash', title: '传输完成后完整性 Hash 校验', desc: '文件完整传输结束后，对整个文件计算 SHA256 哈希做完整性校验，校验失败标记任务异常；开启会增加 CPU 与 IO 开销', kind: 'switch', keywords: 'sftp 完整性 hash sha256 校验 哈希 完成 异常 cpu io TODO', todo: '后端未消费' },
-          { key: 'sftpBlacklist', title: '文件黑名单 glob 过滤列表', desc: '上传文件时，文件名匹配黑名单规则将自动跳过，不创建上传任务，一行一条 glob 表达式', kind: 'textarea', placeholder: '例如：*.tmp', keywords: 'sftp 黑名单 过滤 glob 跳过 上传 DS_Store Thumbs.db 排除 ignore TODO', todo: '前后端均未消费' },
+          { key: 'sftpIdleTimeoutSec', title: 'SFTP 会话空闲超时', desc: 'SFTP 子通道长时间没有文件操作时自动关闭释放资源，不会断开 SSH 终端会话，后续传输会自动重建通道；填 0 表示不自动关闭。切换该设置立即作用于当前活动会话，其余标签页在下次激活时生效', kind: 'number', width: 130, min: 0, step: 10, unit: ' 秒', keywords: 'sftp 会话 空闲 超时 自动关闭 释放 通道 重建' },
+          { key: 'sftpVerifyHash', title: '传输完成后完整性 Hash 校验', desc: '文件完整传完后，对两侧整文件各算一次 SHA256 比对：不一致任务判「校验失败」并记录失败日志（目标文件保持已写入内容，不自动删除）；0 字节文件跳过校验；断点校验方式选 SHA256 时本项自动强制开启。开启会增加 CPU 与 IO 开销', kind: 'switch', keywords: 'sftp 完整性 hash sha256 校验 哈希 完成 异常 cpu io' },
+          { key: 'sftpBlacklist', title: '文件黑名单 glob 过滤列表', desc: '上传文件时，文件名匹配黑名单规则将自动跳过，不创建上传任务，一行一条 glob 表达式；仅支持 * 与 ? 通配，按文件名（不含目录）大小写不敏感匹配，只作用于上传方向', kind: 'textarea', placeholder: '例如：*.tmp', keywords: 'sftp 黑名单 过滤 glob 跳过 上传 DS_Store Thumbs.db 排除 ignore' },
         ],
       },
       {
         label: '浏览',
         rows: [
           { key: 'sftpShowHidden', title: '显示隐藏文件', desc: '在本地与远端文件树中显示以 . 开头的文件', kind: 'switch', keywords: 'sftp 隐藏文件 点文件 hidden dotfile 显示' },
+          { key: 'sftpShowLocalPane', title: '显示本机文件栏', desc: '关闭后 SFTP 只保留远端一栏：本机侧的新建、重命名、删除与双栏宽度分隔线一并隐藏；上传改为把文件或文件夹直接拖进文件区，下载目录用文件区顶栏的「保存到」选择。重新打开即恢复双栏', kind: 'switch', keywords: 'sftp 本机 本地 文件栏 双栏 面板 显示 隐藏 local pane' },
+          { key: 'sftpEditorCommand', title: '编辑器命令', desc: '远端文件右键「用编辑器打开」时拉起的程序。可从系统探测到的文本程序里选，也能按路径选择，或自己写命令加参数（按空格拆分，支持引号与反斜杠转义）；留空按 code → codium → cursor → 系统默认顺序自动探测。文件路径由程序追加在参数末尾，不会经过 shell 展开。保存后自动回写远端，远端在此期间被改动会先弹窗询问', kind: 'editor', width: 300, placeholder: '留空自动探测，例如：code --wait', keywords: 'sftp 编辑器 editor vscode code codium cursor 打开 编辑 命令 回写 保存 路径 选择 程序' },
         ],
       },
     ],
@@ -290,7 +434,7 @@ const PANELS: PanelDef[] = [
         rows: [
           { key: 'tunnelReconnect', title: '通道断开自动重建', desc: 'SSH 断线重连成功后，按断开前的运行状态自动恢复端口转发规则', kind: 'switch', keywords: '隧道 通道 断开 重连 重建 tunnel reconnect' },
           { key: 'tunnelKeepaliveSec', title: '通道保活间隔', desc: '定期发送 SSH 层保活消息防止空闲链路被掐断；当前未启用——主连接保活（RTT 心跳）已覆盖该作用', kind: 'number', width: 130, min: 0, step: 5, unit: ' 秒', keywords: '隧道 通道 保活 keepalive 空闲 心跳 TODO', todo: '主连接保活已覆盖' },
-          { key: 'tunnelIdleTimeoutSec', title: '空闲自动断开', desc: '通道持续无流量超过该时长后自动关闭释放资源，下次转发时重建；0 表示不断开', kind: 'number', width: 130, min: 0, step: 10, unit: ' 秒', keywords: '隧道 通道 空闲 超时 断开 释放 idle timeout TODO', todo: '端口转发引擎未实现' },
+          { key: 'tunnelIdleTimeoutSec', title: '空闲自动断开', desc: '单条转发连接双向都无流量超过该时长后自动关闭并释放通道，客户端下次访问时重新建立；0 表示不断开。改动只作用于之后新建的转发连接，已在传的连接不断', kind: 'number', width: 130, min: 0, step: 10, unit: ' 秒', keywords: '隧道 通道 空闲 超时 断开 释放 idle timeout' },
           { key: 'tunnelDnsResolve', title: 'SOCKS 域名解析位置', desc: '动态转发（SOCKS 代理）中域名在哪一侧解析：本地解析后传 IP，或域名透传由服务器解析；选「本地解析」时本机 DNS/hosts/VPN 与远端解析结果可能不一致，排错困难', kind: 'segmented', keywords: '隧道 socks 动态 转发 域名 解析 dns 本地 远端',
             options: [{ v: 'local', t: '本地解析' }, { v: 'remote', t: '远端解析' }] },
         ],
@@ -334,20 +478,34 @@ const PANELS: PanelDef[] = [
       {
         label: '会话',
         rows: [
-          { key: 'key.newTab', title: '新建标签页', kind: 'keys', keywords: '新建 标签页 new tab 快捷键 TODO', todo: '未绑定键盘事件' },
-          { key: 'key.closeTab', title: '关闭标签页', kind: 'keys', keywords: '关闭 标签页 close tab 快捷键 TODO', todo: '未绑定键盘事件' },
-          { key: 'key.splitV', title: '垂直分屏', kind: 'keys', keywords: '分屏 垂直 split 快捷键 TODO', todo: '未绑定键盘事件' },
-          { key: 'key.splitH', title: '水平分屏', kind: 'keys', keywords: '水平 分屏 split 快捷键 TODO', todo: '未绑定键盘事件' },
+          { key: 'key.newTab', title: '新建标签页', kind: 'keys', keywords: '新建 标签页 连接 new tab 快捷键', desc: '打开新建连接弹窗' },
+          { key: 'key.newWindow', title: '新建终端窗口', kind: 'keys', keywords: '新建 终端 窗口 空白 new window finalshell 快捷键', desc: '新建一个未连接的空白终端标签（与 FinalShell 同款），双击主机列表即连进该窗口' },
+          { key: 'key.closeTab', title: '关闭标签页', kind: 'keys', keywords: '关闭 标签页 close tab 快捷键' },
+          { key: 'key.splitV', title: '垂直分屏', kind: 'keys', keywords: '分屏 垂直 split 快捷键 TODO', todo: '分屏功能未实现' },
+          { key: 'key.splitH', title: '水平分屏', kind: 'keys', keywords: '水平 分屏 split 快捷键 TODO', todo: '分屏功能未实现' },
         ],
       },
       {
         label: '操作',
         rows: [
-          { key: 'key.clear', title: '清空屏幕', kind: 'keys', keywords: '清空 屏幕 clear 快捷键 TODO', todo: '未绑定键盘事件' },
-          { key: 'key.palette', title: '命令面板', kind: 'keys', keywords: '命令 面板 command palette 快捷键 TODO', todo: '未绑定键盘事件' },
-          { key: 'key.find', title: '查找', kind: 'keys', keywords: '搜索 查找 find 快捷键 TODO', todo: '未绑定键盘事件' },
-          { key: 'key.settings', title: '打开设置', kind: 'keys', keywords: '设置 偏好 preferences 快捷键 TODO', todo: '未绑定键盘事件' },
+          { key: 'key.clear', title: '清空屏幕', kind: 'keys', keywords: '清空 屏幕 clear 快捷键' },
+          { key: 'key.palette', title: '命令面板', kind: 'keys', keywords: '命令 面板 command palette 快捷键' },
+          { key: 'key.find', title: '查找', kind: 'keys', keywords: '搜索 查找 find 快捷键' },
+          { key: 'key.settings', title: '打开设置', kind: 'keys', keywords: '设置 偏好 preferences 快捷键' },
         ],
+      },
+    ],
+  },
+  {
+    id: 'commands', label: '命令模板', glyph: 'commands',
+    title: '命令模板', sub: '自定义常用命令，在「执行命令…」面板（⌘K）里选中即写入当前活动终端并回车执行',
+    groups: [
+      {
+        label: '命令列表',
+        rows: [
+          { key: 'commandTemplates', title: '自定义命令', desc: '列表顺序即面板顺序。命令随选中直接写入终端并回车，不经二次确认，请只放可直接执行的命令；名称留空时面板里显示命令原文', keywords: '命令 模板 自定义 常用 shell snippet 执行命令 面板 command palette 快捷 终端 写入' },
+        ],
+        extra: 'cmdEditor',
       },
     ],
   },
@@ -360,8 +518,8 @@ const PANELS: PanelDef[] = [
         rows: [
           { key: 'memInterval', title: '内存采集间隔', desc: '采集 Rhost 主进程驻留内存 (RSS) 用于底部状态栏监控；间隔越短折线越实时，IPC 开销越高', kind: 'select', num: true, width: 150, keywords: '监控 内存 采集 间隔 频率 interval 轮询 秒 性能',
             options: [1, 2, 3, 5, 10, 30, 60].map(v => ({ v: String(v), t: `${v} 秒${v === 2 ? '（默认）' : ''}` })) },
-          { key: 'metricsInterval', title: '主机指标采集间隔', desc: '采集远端服务器的 CPU/内存/网络/磁盘/进程/GPU 并刷新右侧监控面板；间隔越短越实时，对远端与本机开销越高。允许 1~10 秒', kind: 'select', num: true, width: 150, keywords: '监控 主机 服务器 指标 cpu 内存 网络 磁盘 进程 gpu 采集 间隔 频率 轮询 秒 性能 ssh',
-            options: [1, 2, 3, 5, 10].map(v => ({ v: String(v), t: `${v} 秒${v === 3 ? '（默认）' : ''}` })) },
+          { key: 'metricsInterval', title: '主机指标采集间隔', desc: '采集远端服务器的 CPU/内存/网络/磁盘/进程/GPU 并刷新监控面板；间隔越短越实时，对远端与本机开销越高。允许 1~10 秒，默认 2 秒（与 FinalShell 一致）', kind: 'select', num: true, width: 150, keywords: '监控 主机 服务器 指标 cpu 内存 网络 磁盘 进程 gpu 采集 间隔 频率 轮询 秒 性能 ssh',
+            options: [1, 2, 3, 5, 10].map(v => ({ v: String(v), t: `${v} 秒${v === 2 ? '（默认）' : ''}` })) },
           { key: 'memPauseHidden', title: '不可见时暂停采集', desc: '回到首页或窗口最小化时停止内存采集以降低后台开销；关闭后无论面板是否可见均持续采集', kind: 'switch', keywords: '暂停 后台 隐藏 最小化 不可见 pause 采集 cpu 开销' },
         ],
       },
@@ -380,9 +538,9 @@ const PANELS: PanelDef[] = [
       {
         label: '渲染',
         rows: [
-          { key: 'gpuAccel', title: 'GPU 加速', desc: '关闭后使用软件渲染，可解决花屏问题', kind: 'switch', keywords: 'gpu 加速 硬件 渲染 acceleration 性能 TODO', todo: '仅持久化，渲染层未消费' },
-          { key: 'renderer', title: '渲染后端', kind: 'select', width: 140, keywords: '渲染器 后端 renderer webgl webgpu TODO', todo: '仅持久化，渲染层未消费',
-            options: [{ v: 'auto', t: '自动' }, { v: 'webgl', t: 'WebGL' }, { v: 'webgpu', t: 'WebGPU' }, { v: 'canvas', t: 'Canvas' }] },
+          { key: 'gpuAccel', title: 'GPU 加速', desc: '关闭后使用软件渲染，可解决花屏问题', kind: 'switch', keywords: 'gpu 加速 硬件 渲染 acceleration 性能' },
+          { key: 'renderer', title: '渲染后端', kind: 'select', width: 140, keywords: '渲染器 后端 renderer webgl',
+            options: [{ v: 'auto', t: '自动（内置）' }, { v: 'webgl', t: 'WebGL' }] },
         ],
       },
       {
@@ -512,12 +670,16 @@ watch(showSettings, v => {
   if (!v) return
   Object.assign(draft, JSON.parse(JSON.stringify(savedSettings)))
   query.value = ''
-  activePanelId.value = 'appearance'
+  // 其他入口（命令面板空态行）指定过页签就去那一页，消费后清空避免下次打开还停在原地
+  activePanelId.value = settingsFocusPanel.value ?? 'appearance'
+  settingsFocusPanel.value = null
   recordingKey.value = null
   alertUnit.value = 'MB'
   syncAlertRaw()
   // 刷新字体安装态：面板打开期间新装/卸载字体重开面板即反映
   void refreshFontAvail()
+  // 编辑器候选同理：装/删编辑器后重开设置即更新
+  void refreshEditorCandidates()
   nextTick(() => searchEl.value?.focus())
 })
 
@@ -531,6 +693,7 @@ watch(activePanelId, id => {
 
 function close() {
   showSettings.value = false
+  editorPickerOpen.value = false
 }
 
 const activePanel = computed(() => PANELS.find(p => p.id === activePanelId.value) ?? PANELS[0])
@@ -563,8 +726,17 @@ function isDirty(key: keyof AppSettings): boolean {
   }
   return JSON.stringify(draft[key]) !== JSON.stringify(savedSettings[key])
 }
+/** 本行涉及的全部设置项：主键 + 行内开关 + 行内其它写入（脏检测按这些算，
+ *  否则「只换图片、只推行内开关」这类改动数不出变化，保存按钮一直禁用） */
+function rowKeys(r: RowDef): (keyof AppSettings)[] {
+  const keys: (keyof AppSettings)[] = []
+  if (r.key) keys.push(r.key)
+  if (r.switchKey) keys.push(r.switchKey)
+  if (r.dirtyKeys) keys.push(...r.dirtyKeys)
+  return keys
+}
 function groupDirty(g: GroupDef): boolean {
-  return g.rows.some(r => r.key && isDirty(r.key)) ||
+  return g.rows.some(r => rowKeys(r).some(isDirty)) ||
     (g.extra === 'envEditor' && g.rows.length === 0 && isDirty('env'))
 }
 function panelDirty(p: PanelDef): boolean {
@@ -736,6 +908,21 @@ function delEnv(i: number) {
 function setEnvKey(i: number, v: string) { draft.env[i]!.key = v }
 function setEnvValue(i: number, v: string) { draft.env[i]!.value = v }
 
+/* ---- 命令模板 ---- */
+function addCmdTpl() {
+  draft.commandTemplates.push({ name: '', command: '' })
+  nextTick(() => {
+    // 新行的命令框比名称框更常填，直接聚焦命令
+    const inputs = modalEl.value?.querySelectorAll('.st-cmd-row:last-child input')
+    ;(inputs?.[1] as HTMLElement | null)?.focus()
+  })
+}
+function delCmdTpl(i: number) {
+  draft.commandTemplates.splice(i, 1)
+}
+function setTplName(i: number, v: string) { draft.commandTemplates[i]!.name = v }
+function setTplCommand(i: number, v: string) { draft.commandTemplates[i]!.command = v }
+
 /* ---- 快捷键录制 ---- */
 const recordingKey = ref<keyof AppSettings | null>(null)
 const keyLabels = ['Control', 'Meta', 'Alt', 'Shift', 'Escape']
@@ -798,6 +985,11 @@ async function save() {
     const cleaned = strVal(k).split('\n').map(l => l.trim()).filter(l => l !== '').join('\n')
     if (cleaned !== strVal(k)) setVal(k, cleaned)
   }
+  // 命令模板同理：去首尾空白，命令为空的行不保存（面板本来就会跳过这类行）
+  const tpls = draft.commandTemplates
+    .map(t => ({ name: t.name.trim(), command: t.command.trim() }))
+    .filter(t => t.command !== '')
+  if (JSON.stringify(tpls) !== JSON.stringify(draft.commandTemplates)) setVal('commandTemplates', tpls)
   // API 密钥：与钥匙串回显值一致 → 不动；改动/新增 → 写入钥匙串后保持回显；
   // 留空 = 不修改（清空仅影响本次输入，不删除钥匙串），配置文件中不保留明文
   const apiKey = draft.aiApiKey.trim()
@@ -873,7 +1065,7 @@ function jsonFilter() {
 
 function ensureDesktop(): boolean {
   if (!isTauri) {
-    toast('配置文件功能请在桌面端使用', 'info', 2200)
+    toast('需在桌面端使用（浏览器模式不能读写本地文件）', 'info', 2200)
     return false
   }
   return true
@@ -1210,14 +1402,118 @@ async function openLogDir() {
   }
 }
 
-/* ---- 字体预览 ---- */
-const previewStyle = computed(() => ({
-  fontFamily: resolveTerminalFontFamily(draft.fontFamily),
-  fontSize: draft.fontSize + 'px',
-  lineHeight: (draft.lineHeight / 100).toFixed(2),
-  fontWeight: draft.fontWeight,
-}))
-const previewAccent = 'var(--blue)'
+/* ---- 背景图片（设置 → 终端 → 背景图片）----
+ * 两种来源：随包内置壁纸存 `builtin:<文件名>` 引用（图在 public/bg/，不进配置），
+ * 本机图片整段以 dataURL 存进 settings 节（配置导入/导出自带壁纸，换机即恢复）。
+ * 后者的代价是 app_config.json 每次保存都重写这串字符，所以读入时按最长边缩放并重编码
+ * JPEG，压到 ~1.2MB 以内（背景图在文字之下，压缩痕迹不可见）。
+ * 选本地图走原生对话框，和配置导入、编辑器路径、下载目录用的是同一套：`<input type=file>`
+ * 在 WKWebView 里本就不可靠，且它嵌在设置行的 v-for 里时 Vue 会把模板 ref 收集成数组，
+ * `.click()` 直接抛 TypeError——点「选择图片」看似毫无反应。 */
+const BG_IMG_MAX_EDGE = 1920
+const BG_IMG_MIN_EDGE = 960
+const BG_IMG_MAX_DATA_BYTES = 1_200_000
+
+/** 对话框过滤的扩展名，及其 → MIME：读回的字节要包成 Blob 才交给 createImageBitmap */
+const BG_IMG_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tif', 'tiff']
+const BG_IMG_MIME: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+  webp: 'image/webp', bmp: 'image/bmp', tif: 'image/tiff', tiff: 'image/tiff',
+}
+
+/** 解码 → 缩放 → JPEG 重编码；超预算就再降一档分辨率+质量，直到 960 边长为止 */
+async function encodeBgImage(source: Blob): Promise<string> {
+  const bmp = await createImageBitmap(source)
+  try {
+    let edge = BG_IMG_MAX_EDGE
+    let quality = 0.82
+    for (;;) {
+      const scale = Math.min(1, edge / Math.max(bmp.width, bmp.height))
+      const w = Math.max(1, Math.round(bmp.width * scale))
+      const h = Math.max(1, Math.round(bmp.height * scale))
+      const canvas = document.createElement('canvas')
+      canvas.width = w
+      canvas.height = h
+      const ctx = canvas.getContext('2d')
+      if (!ctx) throw new Error('canvas 不可用')
+      // JPEG 没有 alpha 通道：透明像素直接编码会变纯黑块，先铺白底再画
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(0, 0, w, h)
+      ctx.drawImage(bmp, 0, 0, w, h)
+      const url = canvas.toDataURL('image/jpeg', quality)
+      // base64 每 4 字符承载 3 字节
+      if (url.length * 0.75 <= BG_IMG_MAX_DATA_BYTES || edge <= BG_IMG_MIN_EDGE) return url
+      edge = Math.max(BG_IMG_MIN_EDGE, Math.round(edge * 0.72))
+      quality = Math.max(0.6, quality - 0.08)
+    }
+  } finally {
+    bmp.close()
+  }
+}
+
+const bgImgBusy = ref(false)
+
+/** 当前值是内置壁纸还是本机图：内置只存 `builtin:<文件名>`，本地图存 dataURL */
+const bgImgIsLocal = computed(() => !!draft.termBgImage && !draft.termBgImage.startsWith(TERM_BG_BUILTIN_PREFIX))
+
+/** 点选内置壁纸：只写引用（原图随包发布，不进配置），开关关着时顺手打开 */
+function chooseBuiltinBg(name: string) {
+  setVal('termBgImage', termBgBuiltinKey(name))
+  if (!boolVal('termBgImageOn')) setVal('termBgImageOn', true)
+}
+
+/** 原生对话框选图 → 后端按路径读回字节 → 缩放重编码。图片上限 20MB 由后端把关 */
+async function pickBgImage() {
+  if (!ensureDesktop() || bgImgBusy.value) return
+  const picked = await open({
+    title: '选择背景图片',
+    multiple: false,
+    directory: false,
+    filters: [{ name: '图片', extensions: BG_IMG_EXTS }],
+  })
+  if (typeof picked !== 'string' || !picked) return
+  bgImgBusy.value = true
+  try {
+    const name = pathBaseName(picked)
+    const ext = name.slice(name.lastIndexOf('.') + 1).toLowerCase()
+    const file = await readFileFromPath(picked, BG_IMG_MIME[ext] ?? 'image/png')
+    setVal('termBgImage', await encodeBgImage(file))
+    if (!boolVal('termBgImageOn')) setVal('termBgImageOn', true)
+    toast('背景图片已载入，保存设置后生效', 'ok', 2400)
+  } catch (e) {
+    toast(`读取图片失败：${e instanceof Error ? e.message : e}`, 'err', 3200)
+  } finally {
+    bgImgBusy.value = false
+  }
+}
+
+/* ---- 字体预览 ----
+ * 配色跟随「终端配色」的方案 + 背景颜色（未保存的草稿即时生效），字体走 draft 的字体设置；
+ * 背景图片开关与图也一并反映，选完图就能在这里看到最终观感——口径与终端一致：
+ * 开图时底色透明、墨色按图片亮度选深/浅（termInkBg）。 */
+const previewStyle = computed(() => {
+  const imgOn = draft.termBgImageOn && !!draft.termBgImage
+  const p = pickTermPalette(draft.termTheme, termInkBg(draft.termTheme, draft.termBg, draft.termBgImageOn, draft.termBgImage))
+  const style: Record<string, string> = {
+    fontFamily: resolveTerminalFontFamily(draft.fontFamily),
+    fontSize: draft.fontSize + 'px',
+    lineHeight: (draft.lineHeight / 100).toFixed(2),
+    fontWeight: draft.fontWeight,
+    '--pv-bg': imgOn ? termBgImageTint(draft.termBgImage, draft.termBgImageOn) ?? 'transparent' : p.background,
+    '--pv-fg': p.foreground,
+    '--pv-blue': p.ansi.blue,
+    '--pv-green': p.ansi.green,
+    '--pv-yellow': p.ansi.yellow,
+    '--pv-dim': p.dim,
+  }
+  if (imgOn) {
+    style['--pv-bg-image'] = `url("${resolveTermBgImage(draft.termBgImage)}")`
+    style['--pv-bg-img-a'] = String(clampBgImgOpacity(draft.termBgImageOpacity) / 100)
+    style['--pv-bg-img-blur'] = `${clampBgImgBlur(draft.termBgImageBlur)}px`
+  }
+  return style
+})
+const previewBgImage = computed(() => draft.termBgImageOn && !!draft.termBgImage)
 
 /* ---- 控件辅助 ---- */
 function segActive(key: keyof AppSettings, v: string): boolean {
@@ -1331,7 +1627,7 @@ function optionList(r: RowDef): Opt[] {
                   v-for="r in g.rows"
                   :key="r.title"
                   class="st-row"
-                  :class="{ modified: r.key && isDirty(r.key), stack: r.kind === 'textarea' || r.kind === 'list' || r.kind === 'assetList' || r.kind === 'memoryList' || r.kind === 'memoryAdd' }"
+                  :class="{ modified: rowKeys(r).some(isDirty), stack: r.kind === 'textarea' || r.kind === 'list' || r.kind === 'assetList' || r.kind === 'memoryList' || r.kind === 'memoryAdd' || r.kind === 'editor' }"
                 >
                   <div class="st-row-main">
                     <div class="st-row-title" :class="{ 'has-tail-switch': !!r.switchKey }">
@@ -1366,6 +1662,49 @@ function optionList(r: RowDef): Opt[] {
                         @change="setVal(r.key!, ($event.target as HTMLInputElement).checked)"
                       >
                     </label>
+
+                    <!-- 背景图片：开关 + 当前 + 内置壁纸点选 + 本地图片 + 清除（FinalShell 的「图片列表」形态） -->
+                    <div v-else-if="r.kind === 'bgimage'" class="st-bgimg">
+                      <label class="st-switch">
+                        <input
+                          type="checkbox"
+                          :checked="boolVal('termBgImageOn')"
+                          :disabled="rowDisabled(r)"
+                          @change="setVal('termBgImageOn', ($event.target as HTMLInputElement).checked)"
+                        >
+                      </label>
+                      <span v-if="draft.termBgImage" class="st-bgimg-cur">{{ termBgImageLabel(draft.termBgImage) }}</span>
+                      <div class="st-bgimg-list">
+                        <button
+                          v-for="b in TERM_BG_BUILTINS"
+                          :key="b"
+                          type="button"
+                          class="st-bgimg-item"
+                          :class="{ on: draft.termBgImage === termBgBuiltinKey(b) }"
+                          :title="`内置 ${b}`"
+                          @click="chooseBuiltinBg(b)"
+                        ><img :src="termBgBuiltinThumb(b)" :alt="`内置 ${b}`"></button>
+                        <button
+                          v-if="bgImgIsLocal"
+                          type="button"
+                          class="st-bgimg-item on"
+                          title="本地图片（点击换一张）"
+                          @click="pickBgImage"
+                        ><img :src="draft.termBgImage" alt="本地图片"></button>
+                      </div>
+                      <button
+                        type="button"
+                        class="st-editor-btn"
+                        :disabled="bgImgBusy"
+                        @click="pickBgImage"
+                      >{{ bgImgBusy ? '读取中…' : '本地图片…' }}</button>
+                      <button
+                        v-if="draft.termBgImage"
+                        type="button"
+                        class="st-editor-btn"
+                        @click="setVal('termBgImage', '')"
+                      >清除</button>
+                    </div>
 
                     <!-- 分段 -->
                     <div v-else-if="r.kind === 'segmented'" class="segmented">
@@ -1452,6 +1791,73 @@ function optionList(r: RowDef): Opt[] {
                         <svg v-if="revealedKeys.has(r.key!)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19"/><path d="M14.12 14.12a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
                         <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                       </button>
+                    </div>
+
+                    <!-- 外部编辑器：命令输入 + 系统探测候选（可搜索）+ 按路径选择 -->
+                    <div v-else-if="r.kind === 'editor'" class="st-editor">
+                      <div class="st-editor-line">
+                        <input
+                          class="st-input"
+                          type="text"
+                          :style="{ width: (r.width ?? 260) + 'px' }"
+                          :value="strVal(r.key)"
+                          :placeholder="rowPlaceholder(r)"
+                          :disabled="rowDisabled(r)"
+                          spellcheck="false"
+                          autocomplete="off"
+                          @input="setVal(r.key!, ($event.target as HTMLInputElement).value)"
+                        >
+                        <button
+                          type="button"
+                          class="st-editor-btn"
+                          :disabled="rowDisabled(r)"
+                          title="从系统探测到的文本程序中选择"
+                          @click="toggleEditorPicker"
+                        >选择程序</button>
+                        <button
+                          type="button"
+                          class="st-editor-btn"
+                          :disabled="rowDisabled(r)"
+                          @click="browseEditor"
+                        >按路径选择…</button>
+                      </div>
+                      <div class="st-ctl-hint">
+                        <template v-if="editorLoading">正在探测系统中的文本程序…</template>
+                        <template v-else-if="editorProbeErr">探测失败：{{ editorProbeErr }}（仍可直接填写命令）</template>
+                        <template v-else-if="!String(draft.sftpEditorCommand ?? '').trim()">留空即自动探测：code → codium → cursor → 系统默认</template>
+                        <template v-else-if="editorMatched === null">当前值不在候选里：可能是自定义参数组合，也可能是程序没装（打开时会报「启动编辑器失败」）</template>
+                        <template v-else>已选定 {{ editorChoices.find(e => e.command === editorMatched)?.label }}</template>
+                      </div>
+                      <template v-if="editorPickerOpen">
+                        <div class="st-editor-mask" @click="editorPickerOpen = false"></div>
+                        <div class="st-editor-pop" :class="{ up: editorPopUp }">
+                          <input
+                            class="st-input st-editor-filter"
+                            type="text"
+                            placeholder="搜索程序名或命令…"
+                            spellcheck="false"
+                            autocomplete="off"
+                            @keydown.esc.stop="editorPickerOpen = false"
+                            v-model="editorFilter"
+                          >
+                          <div class="st-editor-list">
+                            <button
+                              v-for="(e, i) in editorFiltered"
+                              :key="i"
+                              type="button"
+                              class="st-editor-opt"
+                              :class="{ active: editorMatched === e.command }"
+                              @click="pickEditor(e)"
+                            >
+                              <span class="st-editor-name">{{ e.label }}</span>
+                              <code class="st-editor-cmd">{{ e.command || '（留空）' }}</code>
+                              <span v-if="editorMatched === e.command" class="st-editor-cur">当前</span>
+                              <span v-else class="st-editor-src">{{ EDITOR_SOURCE_LABELS[e.source] }}</span>
+                            </button>
+                            <div v-if="!editorFiltered.length" class="st-editor-empty">没有匹配的程序，可直接填写命令或按路径选择</div>
+                          </div>
+                        </div>
+                      </template>
                     </div>
 
                     <!-- 文本 -->
@@ -1652,9 +2058,31 @@ function optionList(r: RowDef): Opt[] {
                 <button class="st-btn-ghost" @click="addEnv">＋ 添加变量</button>
               </template>
 
+              <!-- 命令模板编辑（同名结构复用环境变量行样式） -->
+              <template v-if="g.extra === 'cmdEditor' && !p.searching">
+                <div class="st-env-list">
+                  <div v-for="(t, i) in draft.commandTemplates" :key="i" class="st-env-row st-cmd-row">
+                    <input class="st-input name" type="text" :value="t.name" placeholder="名称"
+                           spellcheck="false" autocomplete="off" @input="setTplName(i, ($event.target as HTMLInputElement).value)">
+                    <input class="st-input mono" type="text" :value="t.command" placeholder="写入终端并回车的命令，如 systemctl status nginx"
+                           spellcheck="false" autocomplete="off" @input="setTplCommand(i, ($event.target as HTMLInputElement).value)">
+                    <button class="st-env-del" title="删除" @click="delCmdTpl(i)">✕</button>
+                  </div>
+                </div>
+                <button class="st-btn-ghost" @click="addCmdTpl">＋ 添加命令</button>
+                <div v-if="!draft.commandTemplates.length" class="st-cmd-empty">
+                  还没有命令模板。添加后用 ⌘K 打开「执行命令…」即可看到，选中即执行。
+                </div>
+              </template>
+
               <!-- 字体实时预览 -->
-              <div v-if="g.extra === 'preview' && !p.searching" class="st-preview" :style="previewStyle">
-                <div class="ln"><span class="u" :style="{ color: previewAccent }">root@localhost</span>:<span class="u" :style="{ color: previewAccent }">~/projects</span>$ npm run build</div>
+              <div
+                v-if="g.extra === 'preview' && !p.searching"
+                class="st-preview"
+                :class="{ 'pv-bgimg': previewBgImage }"
+                :style="previewStyle"
+              >
+                <div class="ln"><span class="u">root@localhost</span>:<span class="u">~/projects</span>$ npm run build</div>
                 <div class="ln gap"></div>
                 <div class="ln"><span class="g">✔</span> 编译完成，用时 1.24s</div>
                 <div class="ln"><span class="y">⚠</span> 2 个依赖已过时</div>

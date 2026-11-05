@@ -3,8 +3,10 @@ mod ai;
 mod config_crypto;
 mod config_io;
 mod config_migrate;
+mod external;
 mod fonts;
 mod ipc;
+mod keygen;
 mod known_hosts;
 mod localfs;
 mod metrics;
@@ -41,6 +43,14 @@ pub fn run() {
     let _ = BOOT_INSTANT.set(std::time::Instant::now());
 
     tauri::Builder::default()
+        // 单实例守卫必须是第一个注册的插件（官方要求）：堡垒机反复点开链接时，
+        // 第二个进程交出 argv 即退出，链接由运行中的实例打开
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            external::handle_command_line(app, &args, external::Source::SecondInstance);
+        }))
+        // ssh:// / sftp:// 协议声明与系统 URL 事件（协议清单见 tauri.conf.json
+        // plugins.deep-link.desktop.schemes 与 src-tauri/Info.plist）
+        .plugin(tauri_plugin_deep_link::init())
         // 终端内 http(s) 链接点击后交系统默认浏览器打开（WebView 内 window.open 不可靠）
         .plugin(tauri_plugin_opener::init())
         // 终端复制/粘贴的剪贴板读写（WKWebView 对 Web Clipboard API 读取有限制）
@@ -54,6 +64,8 @@ pub fn run() {
         // 全局配置写锁：串行化 app_config.json + connections.json 的所有写操作
         // （节写穿 / 连接增删 / 导入 / 重置），必须在 setup 与命令注册前挂载
         .manage(applog::persisted::ConfigWriteLock::new())
+        // 堡垒机外部链接队列：冷启动链接在前端监听器就绪前先入队，挂载后领取
+        .manage(external::PendingLinks::default())
         .setup(|app| {
             // 后端整体配置文件（前端 localStorage 已下线，此文件为唯一真相源）：
             // logStoragePath 重启生效的唯一载体，同时为整体配置导入导出与首帧注入提供数据；
@@ -77,6 +89,21 @@ pub fn run() {
                 .get("splashTransparent")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
+            // 界面主题（dark/light/auto）：index.html 头部脚本据此在首帧前挂
+            // html[data-theme]，避免浅色用户看到深色底闪一下；auto 由前端
+            // matchMedia 解析。此处传原始字符串，缺失时不注入（前端视为 auto）
+            let ui_theme = app_cfg
+                .settings
+                .get("uiTheme")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            // 背景不透明度（60–100）：index.html 头部脚本据此在首帧前挂 --glass-a，
+            // 避免透明窗口先实心再变玻璃的跳变；缺失/非法由前端回退默认 96
+            let opacity = app_cfg
+                .settings
+                .get("opacity")
+                .and_then(|v| v.as_u64())
+                .map(|v| v.min(100) as u32);
             let boot_script = format!(
                 "window.__RHOST_BOOT__={};",
                 serde_json::json!({
@@ -84,6 +111,8 @@ pub fn run() {
                     // 同步注入运行平台（前端据此切换标题栏安全区与窗口控件渲染），
                     // 取 std::env::consts::OS：macos / windows / linux
                     "platform": std::env::consts::OS,
+                    "uiTheme": ui_theme,
+                    "opacity": opacity,
                 })
             );
             // 属性与原静态窗口定义保持一致；label 固定 "main"（capabilities/default.json 按此授权）
@@ -109,11 +138,20 @@ pub fn run() {
             .resizable(true)
             .decorations(cfg!(target_os = "macos"))
             .transparent(cfg!(target_os = "macos"))
-            // 关闭 Tauri 的拖放处理器：Tauri 默认拦截 OS 文件拖放并改发自身事件，
-            // 使 webview 收不到携带 File 的 HTML5 drop 事件。AI 输入区依赖 HTML5 拖放
-            // 采集图片附件，故放开由 webview 原生处理（前端无 Tauri 拖放事件消费方）
-            .disable_drag_drop_handler()
+            // 保持 Tauri 的拖放处理器开启：SFTP 拖拽上传必须要它——HTML5 的 drop 事件
+            // 在 webview 里拿不到被拖入项的真实路径，只有这里的 Tauri 事件给出 paths。
+            // 代价是 webview 收不到携带 File 的 drop，AI 附件区改为同样订阅 Tauri 事件、
+            // 按路径读回字节重组 File（见 AiChatPanel 的 addPaths）
             .initialization_script(&boot_script);
+
+            // 界面主题同步原生窗口外观：显式 dark/light 锁定 NSAppearance（红绿灯
+            // 配色/毛玻璃底色联动）；auto/缺失不设置——原生默认即跟随系统，
+            // 系统切换由 WebView 侧 matchMedia 监听同步 CSS
+            match ui_theme.as_deref() {
+                Some("dark") => window_builder = window_builder.theme(Some(tauri::Theme::Dark)),
+                Some("light") => window_builder = window_builder.theme(Some(tauri::Theme::Light)),
+                _ => {}
+            }
 
             #[cfg(target_os = "macos")]
             {
@@ -122,6 +160,84 @@ pub fn run() {
                     .hidden_title(true)
                     // 红绿灯位置：x 左边距，y 顶部偏移（逻辑像素）；y=0 紧贴顶部，越大越往下
                     .traffic_light_position(tauri::LogicalPosition::new(12.0, 24.0));
+            }
+
+            // macOS 默认菜单栏（Tauri 自动安装）含「关闭窗口 ⌘W」，而原生 accelerator
+            // 早于 WebView 的 keydown 消费按键，会让设置里的「关闭标签页 ⌘W」直接关掉整个
+            // 窗口。这里用同构菜单替换、仅去掉 close_window：⌘Q 退出、⌘H 隐藏、编辑板报贴、
+            // 最小化/全屏等标准项与快捷键全部保持一致。
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
+                let pkg_name = app.package_info().name.clone();
+                let about = AboutMetadata {
+                    name: Some(pkg_name.clone()),
+                    version: Some(app.package_info().version.to_string()),
+                    copyright: app.config().bundle.copyright.clone(),
+                    authors: app.config().bundle.publisher.clone().map(|p| vec![p]),
+                    ..Default::default()
+                };
+                let h = app.handle();
+                let menu = Menu::with_items(
+                    h,
+                    &[
+                        &Submenu::with_items(
+                            h,
+                            pkg_name,
+                            true,
+                            &[
+                                &PredefinedMenuItem::about(h, None, Some(about))?,
+                                &PredefinedMenuItem::separator(h)?,
+                                &PredefinedMenuItem::services(h, None)?,
+                                &PredefinedMenuItem::separator(h)?,
+                                &PredefinedMenuItem::hide(h, None)?,
+                                &PredefinedMenuItem::hide_others(h, None)?,
+                                &PredefinedMenuItem::separator(h)?,
+                                &PredefinedMenuItem::quit(h, None)?,
+                            ],
+                        )?,
+                        // Edit 子菜单保留 ⌘C/⌘V/⌘A/⌘X 标准文本操作快捷键
+                        &Submenu::with_items(
+                            h,
+                            "Edit",
+                            true,
+                            &[
+                                &PredefinedMenuItem::undo(h, None)?,
+                                &PredefinedMenuItem::redo(h, None)?,
+                                &PredefinedMenuItem::separator(h)?,
+                                &PredefinedMenuItem::cut(h, None)?,
+                                &PredefinedMenuItem::copy(h, None)?,
+                                &PredefinedMenuItem::paste(h, None)?,
+                                &PredefinedMenuItem::select_all(h, None)?,
+                            ],
+                        )?,
+                        &Submenu::with_items(
+                            h,
+                            "View",
+                            true,
+                            &[&PredefinedMenuItem::fullscreen(h, None)?],
+                        )?,
+                        // 与 Tauri 默认同名同 id：macOS 会把窗口列表挂进 Window 菜单
+                        &Submenu::with_id_and_items(
+                            h,
+                            tauri::menu::WINDOW_SUBMENU_ID,
+                            "Window",
+                            true,
+                            &[
+                                &PredefinedMenuItem::minimize(h, None)?,
+                                &PredefinedMenuItem::maximize(h, None)?,
+                            ],
+                        )?,
+                        &Submenu::with_id_and_items(
+                            h,
+                            tauri::menu::HELP_SUBMENU_ID,
+                            "Help",
+                            true,
+                            &[],
+                        )?,
+                    ],
+                )?;
+                app.set_menu(menu)?;
             }
 
             window_builder.build()?;
@@ -209,6 +325,31 @@ pub fn run() {
                 })),
             );
 
+            // 堡垒机外部连接：命令行里的 ssh:// / sftp:// 链接先入队（前端监听器尚未
+            // 挂载，由挂载后 take_external_links 领取），再订阅系统 URL 事件
+            external::handle_command_line(
+                app.handle(),
+                &std::env::args().collect::<Vec<String>>(),
+                external::Source::Cli,
+            );
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                // macOS 由打包时写入 Info.plist 的 CFBundleURLTypes 声明协议，链接经
+                // RunEvent::Opened 送达；Windows/Linux 需在运行时注册协议（仅写当前用户
+                // 作用域的注册表 / xdg-mime 默认值），注册结果只落 debug
+                #[cfg(any(target_os = "windows", target_os = "linux"))]
+                if let Err(e) = app.deep_link().register_all() {
+                    log::debug!("ssh:// / sftp:// 协议注册失败（不影响堡垒机命令行拉起）: {e}");
+                }
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    external::handle_urls(
+                        &handle,
+                        event.urls().iter().map(ToString::to_string).collect(),
+                    );
+                });
+            }
+
             Ok(())
         })
         // 会话池注入全局状态，供命令按 session_id 查找
@@ -217,6 +358,7 @@ pub fn run() {
         .manage(ai::AiState::default())
         .invoke_handler(tauri::generate_handler![
             ipc::connect_ssh,
+            external::take_external_links,
             ipc::write_terminal,
             ipc::resize_terminal,
             ipc::tunnel_start,
@@ -224,7 +366,12 @@ pub fn run() {
             ipc::disconnect_session,
             ipc::sftp_list_dir,
             ipc::sftp_mkdir,
+            ipc::sftp_mkdir_all,
             ipc::sftp_sync_cwd,
+            ipc::sftp_set_idle_timeout,
+            ipc::sftp_stat,
+            ipc::sftp_walk,
+            ipc::sftp_fetch,
             ipc::sftp_upload,
             ipc::sftp_download,
             ipc::sftp_transfer_pause,
@@ -234,6 +381,7 @@ pub fn run() {
             ipc::sftp_create_file,
             ipc::sftp_copy,
             ipc::sftp_readlink,
+            ipc::sftp_set_perm,
             ipc::start_metrics,
             ipc::stop_metrics,
             ipc::metrics_heartbeat,
@@ -243,12 +391,16 @@ pub fn run() {
             ipc::delete_connection,
             ipc::save_connection_password,
             ipc::get_connection_password,
+            keygen::ssh_keygen,
+            keygen::ssh_key_import,
             ipc::get_app_memory,
             ipc::subscribe_app_logs,
             ipc::report_app_log,
             ipc::clear_app_log_buffer,
             ipc::reveal_log_dir,
             ipc::reveal_log_storage_dir,
+            ipc::set_window_theme,
+            ipc::set_window_glass,
             ipc::set_log_config,
             ipc::load_app_config,
             ipc::set_app_config_section,
@@ -260,11 +412,17 @@ pub fn run() {
             fonts::check_fonts,
             localfs::list_local_dir,
             localfs::mkdir,
+            localfs::local_mkdir_all,
             localfs::local_remove,
             localfs::local_rename,
             localfs::local_create_file,
             localfs::local_copy,
             localfs::local_open_terminal,
+            localfs::local_walk,
+            localfs::local_files_meta,
+            localfs::read_local_file_base64,
+            localfs::open_in_editor,
+            localfs::list_text_editors,
             ai::ai_chat_stream,
             ai::ai_stop_chat,
             ai::ai_test_connection,
