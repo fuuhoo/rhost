@@ -7,6 +7,8 @@ import { toast } from '../composables/useToast'
 import { matchHighRisk } from '../lib/aiRisk'
 import { writeText } from '@tauri-apps/plugin-clipboard-manager'
 import { isTauri } from '../lib/tauri'
+import { watchFileDrop } from '../lib/fileDrop'
+import { pathBaseName, readFileFromPath } from '../lib/localFile'
 import { Channel, invoke } from '@tauri-apps/api/core'
 import AppLogo from './AppLogo.vue'
 import AiMarkdown from './AiMarkdown.vue'
@@ -2845,6 +2847,11 @@ const IMAGE_MAX_COUNT = 4
 /** 单条消息附件合计上限 */
 const IMAGE_TOTAL_MAX_BYTES = 6 * 1024 * 1024
 
+/** 拖拽入口给的是路径，MIME 只能按扩展名判定（与 IMAGE_ALLOWED_TYPES 同集合） */
+const DROP_IMAGE_MIME: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif',
+}
+
 /** 允许的文本/代码文件扩展名（小写含点，如 '.ts'） */
 const FILE_ALLOWED_EXTS = [
   // 文本 / 文档
@@ -2957,9 +2964,9 @@ function fileExt(name: string): string {
   return i >= 0 ? name.slice(i).toLowerCase() : ''
 }
 
-/** 是否属于白名单文本/代码文件（按扩展名或整名判定） */
-function isAllowedTextFile(file: File): boolean {
-  const lower = file.name.toLowerCase()
+/** 是否属于白名单文本/代码文件（按扩展名或整名判定；入参是文件名或路径的末段） */
+function isAllowedTextName(name: string): boolean {
+  const lower = name.toLowerCase()
   if (FILE_ALLOWED_NAMES.includes(lower)) return true
   return FILE_ALLOWED_EXTS.includes(fileExt(lower))
 }
@@ -2971,7 +2978,7 @@ function looksBinary(text: string): boolean {
 
 /** 采集单个文本/代码文件：白名单 → 原始大小 → UTF-8 读取 → 二进制守卫 → 入列 */
 async function addTextFile(file: File) {
-  if (!isAllowedTextFile(file)) {
+  if (!isAllowedTextName(file.name)) {
     toast(`不支持的文本/代码文件：${file.name}`, 'warn', 3000)
     return
   }
@@ -3064,10 +3071,41 @@ function onPaste(e: ClipboardEvent) {
   }
 }
 
-/** 入口三：拖拽（dragover 进出需计数，避免子元素间抖动导致高亮闪烁） */
+/** 入口三：拖拽。
+ *  桌面端（Tauri 开启拖放处理器后）webview 收不到携带 File 的 drop，只能订阅 webview 级
+ *  拖放事件拿绝对路径，再按路径读回字节重组 File 复用 addFiles 的全套校验；
+ *  落点按输入区矩形判定，与文件栏的「拖入即上传」互不劫持。
+ *  浏览器预览模式没有这条通道，故保留下面的 HTML5 拖放（dragover 进出需计数，
+ *  避免子元素间抖动导致高亮闪烁）。 */
+const composerEl = ref<HTMLElement | null>(null)
+let dropStop: (() => void) | null = null
+
+/** 拖入项按扩展名定类型：图片给真实 MIME，文本仅在白名单内给 text/plain，其余不收 */
+function dropMimeType(name: string): string {
+  const img = DROP_IMAGE_MIME[fileExt(name).slice(1)]
+  if (img) return img
+  return isAllowedTextName(name) ? 'text/plain' : ''
+}
+
+async function addDroppedPaths(paths: string[]) {
+  const files: File[] = []
+  for (const p of paths) {
+    const name = pathBaseName(p)
+    const type = dropMimeType(name.toLowerCase())
+    // 目录与非白名单项静默忽略（拖拽常混入无关文件），与 HTML5 通道的取舍一致
+    if (!type) continue
+    try {
+      files.push(await readFileFromPath(p, type))
+    } catch (e) {
+      toast(`读取拖入的文件失败：${name}（${String(e)}）`, 'warn', 3200)
+    }
+  }
+  if (files.length) await addFiles(files)
+}
+
 let dragDepth = 0
 function onDragEnter(e: DragEvent) {
-  if (!e.dataTransfer?.types?.includes('Files')) return
+  if (isTauri || !e.dataTransfer?.types?.includes('Files')) return
   dragDepth++
   dragActive.value = true
 }
@@ -3081,12 +3119,25 @@ function onDragOver(e: DragEvent) {
 function onDrop(e: DragEvent) {
   dragDepth = 0
   dragActive.value = false
-  // 只收图片与白名单文本/代码文件，其余静默忽略（拖拽常混入无关文件）
+  if (isTauri) return
+  // 只收图片与白名单文本/代码文件，其余静默忽略
   const files = Array.from(e.dataTransfer?.files ?? []).filter(
-    f => f.type.startsWith('image/') || isAllowedTextFile(f),
+    f => f.type.startsWith('image/') || isAllowedTextName(f.name),
   )
   if (files.length) void addFiles(files)
 }
+
+onMounted(() => {
+  dropStop = watchFileDrop(
+    () => composerEl.value,
+    inside => { dragActive.value = inside },
+    paths => { void addDroppedPaths(paths) },
+  )
+})
+onUnmounted(() => {
+  dropStop?.()
+  dropStop = null
+})
 
 /** 多行文本域自增高（1~6 行，超出内部滚动） */
 function autoGrow() {
@@ -3112,8 +3163,8 @@ const configHint = computed(() => {
 
 <template>
   <div class="ai-panel">
-    <!-- 操作按钮注入 RightPanel 头部 -->
-    <Teleport v-if="rightPanelTab === 'ai'" to="#rp-head-actions">
+    <!-- 操作按钮注入 RightPanel 头部；defer 同 MonitorPane：挂载瞬间目标仍在未插入文档的子树内 -->
+    <Teleport v-if="rightPanelTab === 'ai'" defer to="#rp-head-actions">
       <button class="ai-action-btn" title="清空对话" :disabled="messages.length === 0" @click="clearChat">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -3690,6 +3741,7 @@ const configHint = computed(() => {
     <!-- 输入区（composer）：大圆角容器；顶部上下文 chip 行 + 多行文本域 + 底部工具行。
          粘贴 / 拖拽附件在此容器内捕获 -->
     <div
+      ref="composerEl"
       class="composer"
       :class="{ focus: composerFocused, dragging: dragActive }"
       @paste="onPaste"

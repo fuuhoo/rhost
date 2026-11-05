@@ -213,48 +213,48 @@ async function onClick(e: MouseEvent) {
   font-family: var(--mono);
 }
 
-/* highlight.js token 配色（One Dark 系，适配暗色主题） */
+/* highlight.js token 配色：消费 style.css 主题变量（深色 One Dark / 浅色 GitHub Light） */
 .md :deep(.hljs-keyword),
 .md :deep(.hljs-selector-tag),
 .md :deep(.hljs-literal),
 .md :deep(.hljs-section) {
-  color: #c678dd;
+  color: var(--hljs-kw);
 }
 .md :deep(.hljs-string),
 .md :deep(.hljs-regexp),
 .md :deep(.hljs-addition) {
-  color: #98c379;
+  color: var(--hljs-str);
 }
 .md :deep(.hljs-number),
 .md :deep(.hljs-symbol),
 .md :deep(.hljs-bullet),
 .md :deep(.hljs-deletion) {
-  color: #d19a66;
+  color: var(--hljs-num);
 }
 .md :deep(.hljs-comment),
 .md :deep(.hljs-quote) {
-  color: #5f6b7d;
+  color: var(--hljs-cmt);
   font-style: italic;
 }
 .md :deep(.hljs-title),
 .md :deep(.hljs-function),
 .md :deep(.hljs-name) {
-  color: #61afef;
+  color: var(--hljs-title);
 }
 .md :deep(.hljs-type),
 .md :deep(.hljs-built_in),
 .md :deep(.hljs-class .hljs-title) {
-  color: #e5c07b;
+  color: var(--hljs-type);
 }
 .md :deep(.hljs-attr),
 .md :deep(.hljs-attribute),
 .md :deep(.hljs-variable),
 .md :deep(.hljs-template-variable) {
-  color: #e06c75;
+  color: var(--hljs-attr);
 }
 .md :deep(.hljs-meta),
 .md :deep(.hljs-link) {
-  color: #56b6c2;
+  color: var(--hljs-meta);
 }
 .md :deep(.hljs-emphasis) {
   font-style: italic;
