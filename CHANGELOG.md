@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 [中文](./CHANGELOG.zh-CN.md) · **English**
 
+## [2.2.0] - 2026-11-05
+
+### Added
+
+- Per-host SSH connect timeout (covers TCP connect + handshake + auth; default 30s, 0 = unlimited)
+- Preset command templates: "内存" / "CPU" docker stats read-only queries
+- Disk table paths can be drag-panned horizontally, show the full path on hover, and copy on click
+
+### Changed
+
+- Files pane: light theme white canvas / grey header strip / zebra rows / light-blue selection / 3D golden folder icons (FinalShell look)
+- Left monitor pane: green CPU and peach memory/swap bars, blue process header with blue-grey zebra, orange/green network curves, mint available-space disk bars
+- Window tab bar: light-grey strip with white rounded tab pills and a blue active underline
+
 ## [2.1.1] - 2026-11-05
 
 ### Fixed
