@@ -80,11 +80,23 @@ pub const SFTP_TRANSFER_FAILED: &str = "sftp.transfer.failed";
 pub const SFTP_TRANSFER_CANCEL: &str = "sftp.transfer.cancel";
 pub const SFTP_TRANSFER_PAUSE: &str = "sftp.transfer.pause";
 pub const SFTP_TRANSFER_RESUME: &str = "sftp.transfer.resume";
+/// 上传/下载入队前被规则拦下（黑名单命中、目标已存在的 skip 策略等）：未创建任务、零字节传输
+pub const SFTP_TRANSFER_BLOCKED: &str = "sftp.transfer.blocked";
+/// 瞬时错误后的自动重试（前端按 sftpRetryCount/sftpRetryIntervalMs 发起）
+pub const SFTP_TRANSFER_RETRY: &str = "sftp.transfer.retry";
 pub const SFTP_TRANSFER_VERIFY_FAILED: &str = "sftp.transfer.verify_failed";
 pub const SFTP_MANAGE_REMOVE: &str = "sftp.manage.remove";
 pub const SFTP_MANAGE_RENAME: &str = "sftp.manage.rename";
 pub const SFTP_MANAGE_MKDIR: &str = "sftp.manage.mkdir";
 pub const SFTP_MANAGE_COPY: &str = "sftp.manage.copy";
+/// 修改远端权限（chmod，含递归）：kv 带 path/mode/recursive/scope，不记文件内容
+pub const SFTP_MANAGE_CHMOD: &str = "sftp.manage.chmod";
+/// 远端文件取回临时副本并拉起外部编辑器（批量时逐文件一条）
+pub const SFTP_EDIT_OPEN: &str = "sftp.edit.open";
+/// 编辑器保存后本地副本回写远端完成
+pub const SFTP_EDIT_SYNC: &str = "sftp.edit.sync";
+/// 回写前发现远端已被他人改动：弹窗让用户裁决，不静默覆盖
+pub const SFTP_EDIT_CONFLICT: &str = "sftp.edit.conflict";
 
 /* ---- 指标 / IPC / 前端 / 第三方 crate ---- */
 pub const METRICS_COLLECT_START: &str = "metrics.collect.start";
@@ -95,6 +107,10 @@ pub const WEB_IPC_ERROR: &str = "web.ipc.error";
 pub const WEB_UNHANDLED_ERROR: &str = "web.unhandled_error";
 /// 第三方 crate 日志统一事件：原始 target 放 kv.crate_target
 pub const EXTERNAL_RAW_LOG: &str = "external.raw_log";
+/// 堡垒机拉起：解析出 ssh:// / sftp:// 链接并入队交给前端（kv 只含地址，绝不含密码）
+pub const EXTERNAL_LINK_OPEN: &str = "external.link_open";
+/// 堡垒机拉起：链接格式非法被拒（原因同时送前端 toast）
+pub const EXTERNAL_LINK_REJECTED: &str = "external.link_rejected";
 
 /* ---- AI 助手（target: ai） ---- */
 /// 流式对话开始（ai_chat_stream 入口，scope 级）
@@ -259,11 +275,14 @@ mod tests {
             SFTP_TRANSFER_CANCEL,
             SFTP_TRANSFER_PAUSE,
             SFTP_TRANSFER_RESUME,
+            SFTP_TRANSFER_BLOCKED,
+            SFTP_TRANSFER_RETRY,
             SFTP_TRANSFER_VERIFY_FAILED,
             SFTP_MANAGE_REMOVE,
             SFTP_MANAGE_RENAME,
             SFTP_MANAGE_MKDIR,
             SFTP_MANAGE_COPY,
+            SFTP_MANAGE_CHMOD,
             METRICS_COLLECT_START,
             METRICS_COLLECT_STOP,
             METRICS_COLLECT_DEGRADED,
@@ -271,6 +290,8 @@ mod tests {
             WEB_IPC_ERROR,
             WEB_UNHANDLED_ERROR,
             EXTERNAL_RAW_LOG,
+            EXTERNAL_LINK_OPEN,
+            EXTERNAL_LINK_REJECTED,
             TUNNEL_START,
             TUNNEL_START_FAILED,
             TUNNEL_STOP,
