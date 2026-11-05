@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 [中文](./CHANGELOG.zh-CN.md) · **English**
 
+## [2.1.1] - 2026-11-05
+
+### Fixed
+
+- SFTP upload/download no longer fails to build on Windows: the local file mtime and permissions are now resolved in a cross-platform way (MetadataExt on Unix, SystemTime on Windows), and Windows no longer writes back POSIX permission bits
+
 ## [2.1.0] - 2026-11-05
 
 This release completes the remote host workbench: the Files (SFTP) pane, server monitoring and the host list are fully built out, the terminal look (palette / fonts / background image) is fully customizable, and a global command palette with user-defined command templates is added.

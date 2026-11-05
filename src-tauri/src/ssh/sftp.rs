@@ -1120,8 +1120,23 @@ impl SshSession {
                     )
                 })?;
             let total = meta.len();
-            use std::os::unix::fs::MetadataExt;
-            let src_mtime = Some(meta.mtime().max(0));
+            // 跨平台取本地 mtime（与下方 download 的写法一致）：Unix 用 MetadataExt，
+            // Windows 走 SystemTime，这样两边即使系统时间被回拨比较结果也一致
+            let src_mtime = {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    Some(meta.mtime().max(0))
+                }
+                #[cfg(not(unix))]
+                {
+                    meta.modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as i64)
+                        .filter(|v| *v >= 0)
+                }
+            };
 
             // 体积上限预检：在打开远端文件写入前拒绝，避免生成残留的远端空/截断文件
             if let Some(max) = max_bytes {
@@ -1353,7 +1368,6 @@ impl SshSession {
         wrote: bool,
         total: u64,
     ) -> Result<(), SshError> {
-        use std::os::unix::fs::MetadataExt;
         // 校验对象 = 本次实际写入的文件；提前完成路径写入未发生，校验最终路径
         let verify_target = if wrote { write_path } else { remote_path };
         if verify_required(pol) && total > 0 {
@@ -1377,11 +1391,25 @@ impl SshSession {
         }
         if pol.preserve_meta {
             if let Ok(meta) = tokio::fs::metadata(local).await {
-                let mtime = meta.mtime().max(0) as u32;
+                // 本地 mtime 跨平台取（与上传的 src_mtime 同一口径）；Windows 无 POSIX
+                // 权限位，按 ACL 处理，不回写 mode
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as u32)
+                    .unwrap_or(0);
+                #[cfg(unix)]
+                let perms = Some({
+                    use std::os::unix::fs::MetadataExt;
+                    meta.mode() & 0o7777
+                });
+                #[cfg(not(unix))]
+                let perms = None;
                 let attrs = FileAttributes {
                     mtime: Some(mtime),
                     atime: Some(mtime),
-                    permissions: Some(meta.mode() & 0o7777),
+                    permissions: perms,
                     ..Default::default()
                 };
                 // 属性写在实际落盘的那份文件上：temp 模式必须在 rename **之前** setstat
@@ -1677,7 +1705,6 @@ impl SshSession {
         local: &str,
         total: u64,
     ) -> Result<(), SshError> {
-        use std::os::unix::fs::PermissionsExt;
         if verify_required(pol) && total > 0 {
             let a = remote_sha256_prefix(sftp, remote_path, u64::MAX).await?;
             let b = local_sha256_prefix(local, u64::MAX).await?;
@@ -1714,10 +1741,14 @@ impl SshSession {
                         Err(e) => log::warn!("SFTP 保留元数据打开本地文件失败（不影响传输结果）{local}: {e}"),
                     }
                 }
+                // Windows 无 POSIX 权限位，不回写本地文件 mode
+                #[cfg(unix)]
                 if let Some(p) = a.permissions {
-                    if let Err(e) =
-                        std::fs::set_permissions(local, std::fs::Permissions::from_mode(p & 0o7777))
-                    {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Err(e) = std::fs::set_permissions(
+                        local,
+                        std::fs::Permissions::from_mode(p & 0o7777),
+                    ) {
                         log::warn!("SFTP 保留元数据写本地权限失败（不影响传输结果）{local}: {e}");
                     }
                 }

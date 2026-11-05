@@ -6,6 +6,12 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.1.1] - 2026-11-05
+
+### 修复
+
+- SFTP 上传/下载在 Windows 上无法编译：本地文件时间戳与权限改用跨平台取法（Unix 走 MetadataExt，Windows 走 SystemTime），Windows 不再回写 POSIX 权限位
+
 ## [2.1.0] - 2026-11-05
 
 本版本把 Rhost 从「SSH 终端 + AI 助手」补齐为可日常替代 FinalShell 的远程主机工作台：文件（SFTP）面板、监控面板与主机列表全面落地，终端观感（配色 / 字体 / 背景图）可完整定制，并新增全局命令面板与自定义命令模板。
