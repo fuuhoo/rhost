@@ -132,6 +132,7 @@ fn remote_registry_insert_lookup_remove() {
     let entry = Arc::new(TunnelEntry::new(
         rule("r1", TunnelType::Remote, 9090, Some(("localhost", 3000))),
         &CancellationToken::new(),
+        0, // idle_sec：0 = 不因空闲关闭
     ));
     reg.insert(
         "127.0.0.1",
@@ -166,6 +167,7 @@ fn status_serializes_camel_case() {
     let entry = TunnelEntry::new(
         rule("t1", TunnelType::Dynamic, 1080, None),
         &CancellationToken::new(),
+        0, // idle_sec：0 = 不因空闲关闭
     );
     entry.set_state(TunnelState::Active, None);
     entry.bound_port.store(1080, Ordering::Relaxed);
@@ -200,6 +202,7 @@ fn status_serializes_camel_case() {
     let entry2 = TunnelEntry::new(
         rule("t2", TunnelType::Local, 8080, Some(("localhost", 80))),
         &CancellationToken::new(),
+        0, // idle_sec：0 = 不因空闲关闭
     );
     let json2 = serde_json::to_value(entry2.status()).unwrap();
     assert_eq!(json2["targetHost"], "localhost");
@@ -213,6 +216,7 @@ fn entry_state_transitions() {
     let entry = TunnelEntry::new(
         rule("s1", TunnelType::Local, 8080, Some(("localhost", 80))),
         &CancellationToken::new(),
+        0, // idle_sec：0 = 不因空闲关闭
     );
     assert_eq!(entry.current_state(), TunnelState::Stopped);
     entry.set_state(TunnelState::Starting, None);

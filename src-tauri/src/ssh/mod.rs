@@ -37,9 +37,9 @@ pub struct SessionConfig {
     pub cols: u32,
     /// PTY 初始行数（终端高度）
     pub rows: u32,
-    /// 连接成功后是否绘制 Rhost MOTD 欢迎面板（本地采集服务器状态并注入终端）。
+    /// 连接成功后是否绘制 MOTD 服务器状态面板（本地采集服务器状态并注入终端）。
     /// 开启时同时抑制 sshd 原生 MOTD 与 Last Login（以 exec 路径启动登录 shell，
-    /// sshd 在该路径通常不打印原生横幅），避免与 Rhost MOTD 双重横幅；
+    /// sshd 在该路径通常不打印原生横幅），避免与本地面板双重横幅；
     /// 关闭时走标准 shell 请求，放行并叠加服务器原生输出。
     pub motd: bool,
     /// 开启彩色提示符注入（后端自动注入，无需前端 gate）。
@@ -48,7 +48,7 @@ pub struct SessionConfig {
     /// source 在当前 shell 执行，export 直接生效，且不受 sshd AcceptEnv
     /// 默认限制（AcceptEnv 只放行 LANG/LC_*，SSH env 请求方式会被静默拒绝）。
     pub env: Vec<(String, String)>,
-    /// 用户自定义 MOTD ASCII LOGO（多行文本）；空串使用内置 LOGO
+    /// 用户自定义 MOTD ASCII LOGO（多行文本）；空串不绘制 LOGO 段
     pub motd_logo: String,
     /// 传输层保活间隔（按主机配置）：`None` = 禁用（表单 0）；
     /// 未配置时由 ipc 层解析为缺省 30s，本字段不携带缺省语义。
@@ -57,6 +57,13 @@ pub struct SessionConfig {
     /// 非 `Option`：`None` 的缺省语义即「跳过校验」，属危险默认；
     /// 枚举强制显式选择、漏填即编译错误，生产路径恒为 `Verify`。
     pub host_key: HostKeyPolicy,
+    /// 单通道会话（堡垒机「外部连接」）：全程只开业务真正需要的那一条通道。
+    /// 开启后不再为 MOTD 采集、初始化脚本注入、指标采集、AI 只读工具、端口转发
+    /// 额外打开 exec / 子系统通道——多数堡垒机在同一条连接上开第二条通道即断会话。
+    pub single_channel: bool,
+    /// 仅 SFTP 会话（`sftp://` 链接）：不申请 PTY，也不启动读写/合并任务，
+    /// 整条连接只有 SFTP 子系统这一个通道。隐含 [`Self::single_channel`]。
+    pub sftp_only: bool,
 }
 
 /// `check_server_key` 回调的校验输入（ipc 层构造，session 层消费）
@@ -112,6 +119,12 @@ pub enum SshError {
     /// 传输因业务规则被拒绝（如超出体积上限），payload 直接透传给前端展示
     #[error("{0}")]
     TransferRejected(String),
+    /// 传输后整文件 SHA256 校验不一致（policy verifyHash 或 resumeCheck=sha256 强制）：
+    /// payload 格式 `{源摘要} {目标摘要}`。前缀 SFTP_VERIFY_FAILED 是前后端约定的
+    /// 协议标记，前端据此把任务判失败并提示「校验失败」（区别于普通传输错误），
+    /// 不得改为普通文案
+    #[error("SFTP_VERIFY_FAILED: {0}")]
+    SftpVerifyFailed(String),
     /// 端口转发错误：payload 携带前后端约定的协议前缀（`TUNNEL_RUNNING:` /
     /// `TUNNEL_BAD_RULE:` / `TUNNEL_PORT_IN_USE:` / `TUNNEL_REMOTE_DENIED:` /
     /// `TUNNEL_LIMIT:`），前端据此分流 toast 文案与批量策略，不得改为普通文案
@@ -126,4 +139,15 @@ pub enum SshError {
     /// 前缀 HOSTKEY_MISMATCH 前端据此弹红色警告弹窗，不得改为普通文案
     #[error("HOSTKEY_MISMATCH: {0}")]
     HostKeyMismatch(String),
+    /// SFTP 目标文件冲突（覆盖策略 ask 且未注入裁决）：payload 格式
+    /// `{目标路径}|{远端文件大小}|{本地文件大小}`。前缀 SFTP_CONFLICT 是
+    /// 前后端约定的协议标记，前端据此弹冲突确认后带 policy.resolve 重投同一任务，
+    /// 不得改为普通文案
+    #[error("SFTP_CONFLICT: {0}")]
+    SftpConflict(String),
+    /// SFTP 文件按覆盖策略跳过（policy skip，或 ask 询问后用户选择跳过）：
+    /// 目标保持原样、零字节传输。前缀 SFTP_SKIPPED 前端据此把任务标记为
+    /// 「已跳过的完成」而非失败
+    #[error("SFTP_SKIPPED: {0}")]
+    SftpSkipped(String),
 }

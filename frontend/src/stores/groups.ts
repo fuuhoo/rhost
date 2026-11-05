@@ -124,11 +124,15 @@ export function closeGroupModal() {
   editingGroup.value = null
 }
 
+/** 最近一次成功创建的分组名；供「就地新建分组」场景（如新建连接弹窗）回填选择，消费后置回 null */
+export const lastAddedGroup = ref<string | null>(null)
+
 /** 新建分组；名称为空或重名时返回 false */
 export function addGroup(name: string, color?: HostColor): boolean {
   const n = name.trim()
   if (!n || nameTaken(n)) return false
   groups.value.push({ name: n, color: color ?? pickColor(groups.value.length) })
+  lastAddedGroup.value = n
   return true
 }
 

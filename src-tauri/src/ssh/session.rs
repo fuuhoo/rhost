@@ -212,8 +212,9 @@ fi";
 ///   `color_prompt=false` 时为纯文本，避免远端默认提示符（如 `\\h:\\w\\$`）缺用户名；
 /// - PS1 内嵌 ESC 字节（远端 printf 现场生成），\[ \] 标记非打印区间，
 ///   保证 readline 行宽计算正确；
-/// - printf 清行必须在脚本**第一行**：回显行在 readline 接受命令（\r）的瞬间
-///   已完整上屏，脚本越早清它，回显在屏幕上的存在时间越短；
+/// - 脚本刻意**不**发清行序列抹回显：回显行由后端在放行 hold 前按内容剥掉
+///   （见 [`late_gate`]）。按游标相对位置清行在 profile 输出与注入交错时
+///   会吃错行——要么回显留在屏上，要么把服务器自己的告警行一起抹掉；
 /// - 末尾 rm -f 自删临时文件（fd 已打开，删路径不影响 source 读完）。
 fn init_script(path: &str, color_prompt: bool, env: &[(String, String)]) -> String {
     // path 由后端生成（/tmp/.ri-<uuid8>），不含单引号/空格，无注入面
@@ -266,7 +267,6 @@ unset _rh_l _rh_c
 
     format!(
         "\
-printf '\\033[1A\\r\\033[2K'
 {locale_block}{env_block}{color_block}# CWD 上报钩子：每次提示符刷新前输出不可见 OSC 6667 序列（内含 $PWD），
 # 后端 merge_task 解析后同步 SFTP 文件树到同一目录。
 # bash 用 PROMPT_COMMAND，zsh 用 precmd_functions；前置注入不覆盖用户已有钩子。
@@ -329,8 +329,8 @@ async fn try_upload_script(
 /// 前端要发送的 source 命令：行首空格配合常见 HISTCONTROL=ignorespace 不进 history。
 /// 命令刻意压到最短（删除临时文件由脚本末尾自删完成）：
 /// 「PS1 + 本命令」典型宽度 ≈ 21+31 = 52 列，50 列以下终端才可能折行，
-/// 单行清除才能精确抹掉回显。该命令由后端在 PTY 开启后立即注入（tty 缓冲暂存，
-/// shell 就绪即执行），前端不参与时序。
+/// 折了行的回显剥不干净（见 [`late_gate`]）。该命令由后端在 shell 就绪后
+/// 注入（tty 缓冲暂存），前端不参与时序。
 fn source_cmd(path: &str) -> String {
     format!(" . \"{path}\" 2>/dev/null")
 }
@@ -347,15 +347,22 @@ const CWD_MARKER_PREFIX: &[u8] = b"\x1b]6667;";
 const OSC_TERMINATOR: u8 = 0x07;
 
 /// 判定「shell 就绪」的输出静默阈值：PS1 刷完后 shell 阻塞读输入、不再输出，
-/// 此时注入的命令回显必然紧跟 PS1（同一行），脚本单行清行才能精确命中。
-/// 略大于攒包窗口（5ms），保证 PS1 批次完整刷完。
+/// 此刻注入的回显行才完整。略大于攒包窗口（5ms），保证 PS1 批次完整刷完。
 const SHELL_QUIET: Duration = Duration::from_millis(120);
 
+/// 回显剥离窗口的存活时长：hold 放行时注入命令的回显字节未必已到（3s 超时兜底
+/// 更是必然未到），故放行后仍按内容继续剥。窗口**不因命中而提前关闭**——同一条
+/// 注入命令会被回显两次（内核一次、readline 一次，见 [`late_gate`]）。窗口只在会话
+/// 开头存在，且 probe 是本次会话独有的随机路径，不会误伤正常输出。
+const LATE_ECHO_TTL: Duration = Duration::from_secs(10);
+
 /// 初始化 hold 状态：PTY 输出先攒在 buf 不上屏；cmd 为 Some 表示等静默注入，
-/// None 表示已注入、等脚本末尾 marker
+/// None 表示已注入、等脚本末尾 marker。`probe` 是注入命令里的临时文件路径，
+/// 用于在攒下的字节里定位并剥掉那一行回显（见 [`late_gate`]）。
 struct InitHold {
     buf: BytesMut,
     cmd: Option<Vec<u8>>,
+    probe: Vec<u8>,
     tx: mpsc::Sender<WriteReq>,
 }
 
@@ -626,13 +633,27 @@ fn locale_login_cmd(shell: &str) -> String {
     // 复用 init 脚本同一套候选探测（UTF8_LOCALE_PICK_SH）：命中则带
     // LC_ALL=<实测可用名> exec；`_rh_l` 为空（已是 UTF-8，或无可用候选的
     // 极瘦镜像）则裸 exec，保持与改动前一致、绝不塞无效 locale。
+    //
+    // shell 路径先经 `[ -x ]` 校验再 exec：探测值来自远端 passwd，可能被
+    // shell 启动告警污染或指向容器内不存在的解释器，直接 exec 会得到 127
+    // 且会话在数十毫秒内退出（用户侧表现为「连上就断」）。回退顺序：
+    // 探测值 → $SHELL → 常见 shell → 裸 request_shell 语义交给 sshd。
     format!(
         "\
+_rh_s='{q}'
+if [ ! -x \"$_rh_s\" ]; then
+  _rh_s=\"${{SHELL:-}}\"
+fi
+if [ ! -x \"$_rh_s\" ]; then
+  for _rh_sc in /bin/bash /bin/sh /usr/bin/bash /usr/bin/sh /bin/zsh; do
+    if [ -x \"$_rh_sc\" ]; then _rh_s=\"$_rh_sc\"; break; fi
+  done
+fi
 {pick}
 if [ -n \"$_rh_l\" ]; then
-  LC_ALL=\"$_rh_l\" exec '{q}' -l
+  LC_ALL=\"$_rh_l\" exec \"$_rh_s\" -l
 else
-  exec '{q}' -l
+  exec \"$_rh_s\" -l
 fi",
         pick = UTF8_LOCALE_PICK_SH,
         q = q,
@@ -688,22 +709,41 @@ async fn open_interactive(
                 Ok(()) => {
                     debug!("已以 exec(login shell -l) 启动，抑制服务端原生 MOTD: {shell}");
                     applog::emit(
-                        log::Level::Debug,
+                        log::Level::Info,
                         "ssh",
                         ev::SSH_SESSION_SHELL,
                         Some(sid),
                         "shell 已启动",
                         Some(serde_json::json!({
                             "shell": shell,
+                            "via": "exec_login",
                             "init_injected": init_injected,
                         })),
                     );
                     return Ok(channel);
                 }
-                Err(e) => warn!("exec 登录 shell 被拒，重开 PTY 回退标准 shell: {e}"),
+                Err(e) => {
+                    warn!("exec 登录 shell 被拒，重开 PTY 回退标准 shell: {e}");
+                    applog::emit(
+                        log::Level::Warn,
+                        "ssh",
+                        ev::SSH_SESSION_SHELL,
+                        Some(sid),
+                        "exec 登录 shell 被拒，回退标准 shell 请求",
+                        Some(serde_json::json!({ "via": "exec_rejected", "err": e.to_string() })),
+                    );
+                }
             }
         } else {
             debug!("未探测到登录 shell 路径，抑制原生 MOTD 回退为标准 shell 请求");
+            applog::emit(
+                log::Level::Warn,
+                "ssh",
+                ev::SSH_SESSION_SHELL,
+                Some(sid),
+                "未探测到登录 shell，回退标准 shell 请求",
+                Some(serde_json::json!({ "via": "shell_undetected" })),
+            );
         }
         // 回退路径：丢弃当前通道，重新申请 PTY + 标准 shell
         let _ = channel.close().await;
@@ -745,7 +785,7 @@ async fn open_interactive(
         SshError::Channel(e.to_string())
     })?;
     applog::emit(
-        log::Level::Debug,
+        log::Level::Info,
         "ssh",
         ev::SSH_SESSION_SHELL,
         Some(sid),
@@ -753,6 +793,7 @@ async fn open_interactive(
         Some(serde_json::json!({
             // 标准路径由 sshd 决定登录 shell，本地未探测
             "shell": "default",
+            "via": "request_shell",
             "init_injected": init_injected,
         })),
     );
@@ -818,6 +859,12 @@ pub struct SshSession {
     /// 初始化脚本远端路径（/tmp/.ri-<uuid8>）：shutdown 时主动清理，
     /// 避免会话中断导致残留
     init_script_path: Option<String>,
+    /// 单通道会话（堡垒机外部连接）：指标采集与 AI 只读工具的 exec 通道一律拒绝，
+    /// 这些主机在同一条连接上开第二条通道就会断开整个会话
+    single_channel: bool,
+    /// `sftp://` 外部连接：本会话没有 PTY，那条唯一通道就是 SFTP 子系统。
+    /// 据此放行 SFTP（否则会被 single_channel 误拦）、并让 PTY 相关调用静默空转
+    sftp_only: bool,
 }
 
 /// 展开路径开头的 ~ 为当前用户家目录（不引入 shellexpand 依赖）
@@ -1160,7 +1207,7 @@ impl Drop for InflightGuard {
 
 impl SshSession {
     /// 建立连接并完成密码认证；严格按「认证 → exec 采集 → MOTD 首帧 → 开启 PTY」
-    /// 的顺序编排，保证 Rhost MOTD 始终先于远端 PS1 提示符出现。
+    /// 的顺序编排，保证 MOTD 状态面板始终先于远端 PS1 提示符出现。
     ///
     /// 返回 (会话句柄, 帧输出接收端)；帧接收端交给 ipc 层转发给前端 Channel。
     /// 初始化脚本（始终含 CWD 钩子，cfg.color_prompt 开启时含彩色提示符）已在
@@ -1200,7 +1247,8 @@ impl SshSession {
         // 2.【阶段 A/B】PTY 尚未打开：独立 exec 子通道并行采集服务器状态，
         //    本地组装 MOTD 渲染指令数组（不碰 PTY、不经键盘、不解析 shell 输出）。
         //    3s 超时/失败/取消均静默降级为 None，绝不阻塞主连接。
-        let motd_outcome = if cfg.motd {
+        //    单通道会话跳过：这条 exec 通道正是堡垒机会掐断的第二条通道。
+        let motd_outcome = if cfg.motd && !cfg.single_channel {
             let mut h = handle.lock().await;
             crate::motd::collect_and_build(&mut h, &cancel, &cfg.motd_logo).await
         } else {
@@ -1212,30 +1260,36 @@ impl SshSession {
         // Shell→SFTP 目录同步；locale 保底覆盖 vim 等子进程；彩色部分仅在
         // cfg.color_prompt 开启时生效。落盘失败（/tmp 不可写、exec 受限等）
         // 以 warn 记录后降级——init_cmd 为 None，这些自动配置将缺席。
-        let tag = &Uuid::new_v4().simple().to_string()[..8];
-        let tmp_path = format!("/tmp/.ri-{tag}");
-        let init_cmd = {
-            let mut h = handle.lock().await;
-            match try_upload_script(&mut h, &tmp_path, cfg.color_prompt, &cfg.env).await {
-                Ok(()) => Some(source_cmd(&tmp_path)),
-                Err(e) => {
-                    applog::emit(
-                        log::Level::Warn,
-                        "ssh",
-                        ev::SSH_SESSION_INIT_SCRIPT_FAILED,
-                        Some(sid),
-                        format!(
-                            "会话初始化脚本上传失败，CWD 同步/提示符/UTF-8 locale 自动配置跳过: {e}"
-                        ),
-                        None,
-                    );
-                    None
+        // 单通道会话跳过：脚本落盘本身就要开一条 exec 通道。
+        let (init_cmd, init_script_path) = if cfg.single_channel {
+            (None, None)
+        } else {
+            let tag = &Uuid::new_v4().simple().to_string()[..8];
+            let tmp_path = format!("/tmp/.ri-{tag}");
+            let cmd = {
+                let mut h = handle.lock().await;
+                match try_upload_script(&mut h, &tmp_path, cfg.color_prompt, &cfg.env).await {
+                    Ok(()) => Some(source_cmd(&tmp_path)),
+                    Err(e) => {
+                        applog::emit(
+                            log::Level::Warn,
+                            "ssh",
+                            ev::SSH_SESSION_INIT_SCRIPT_FAILED,
+                            Some(sid),
+                            format!(
+                                "会话初始化脚本上传失败，CWD 同步/提示符/UTF-8 locale 自动配置跳过: {e}"
+                            ),
+                            None,
+                        );
+                        None
+                    }
                 }
-            }
+            };
+            // 记录成功上传的脚本路径，供 shutdown 时主动清理（source 自删仅在
+            // 脚本成功执行后生效；会话在 source 前断开会导致残留）
+            let path = if cmd.is_some() { Some(tmp_path) } else { None };
+            (cmd, path)
         };
-        // 记录成功上传的脚本路径，供 shutdown 时主动清理（source 自删仅在
-        // 脚本成功执行后生效；会话在 source 前断开会导致残留）
-        let init_script_path = if init_cmd.is_some() { Some(tmp_path) } else { None };
 
         // 3. 建立帧 / 事件 / 输入通道；合并任务先待命（此时没有任何 PTY 事件）
         let (event_tx, event_rx) = mpsc::channel::<PtyEvent>(EVENT_QUEUE);
@@ -1286,72 +1340,91 @@ impl SshSession {
             warn!("帧通道已关闭，放弃 Algo 帧");
         }
 
-        // 5/6.【阶段 D】打开 PTY 并启动交互式 shell（抑制开关决定走 exec 还是 shell 请求）。
-        //    MOTD 首帧已在帧队列中，PTY 输出无论多快都排在其后。
-        applog::emit(
-            log::Level::Debug,
-            "ssh",
-            ev::SSH_SESSION_CREATE,
-            Some(sid),
-            "创建会话",
-            Some(serde_json::json!({
-                "term": TERM_TYPE,
-                "cols": cfg.cols,
-                "rows": cfg.rows,
-                "enc": TERM_ENCODING,
-            })),
-        );
-        let login_shell = motd_outcome.as_ref().and_then(|o| o.login_shell.clone());
-        let channel = {
-            let mut h = handle.lock().await;
-            // motd 开启即走 exec 路径抑制 sshd 原生横幅，关闭走标准 shell
-            open_interactive(&mut h, &cfg, cfg.motd, login_shell, sid, init_cmd.is_some()).await?
-        };
-
-        // 7. 拆分读写半通道，启动双向转发；PTY 输出从此刻起进入帧队列（恒在 MOTD 之后）
-        let (read_half, write_half) = channel.split();
-        // 留一个帧发送口给动态指标采集器（0x06），与 PTY 帧共用 FIFO 保序
-        let metrics_frame_tx = frame_tx.clone();
-
-        // 提示符注入交给 merge_task 的静默门：等 shell 启动输出静默（PS1 刷完、
-        // readline 阻塞）后才经写队列注入——回显紧跟 PS1 同行，脚本单行清行精确
-        // 命中；注入全过程的 PTY 输出被 hold 至脚本末尾 marker，前端零感知。
-        let init_inject = init_cmd.map(|cmd| {
-            let mut bytes = cmd.into_bytes();
-            bytes.push(b'\r');
-            (bytes, write_tx.clone())
-        });
-
-        // 断开日志状态：read_task 的 EOF 分支（异常断开）与 shutdown（主动关闭）
-        // 竞争记录 `ssh.disconnect`，原子 swap 保证只记一条
+        // 5~7.【阶段 D】交互式 PTY：打开会话通道、启动登录 shell，并挂上读/合并/写
+        //    三个后台任务。MOTD 首帧已在帧队列中，PTY 输出无论多快都排在其后。
+        //    sftp-only 会话（`sftp://` 链接）整段跳过：不申请 PTY，整条连接只保留
+        //    SFTP 子系统这一条通道；write_rx 随分支释放，误发的键盘输入直接失败。
+        //
+        //    断开日志状态：read_task 的 EOF 分支（异常断开）与 shutdown（主动关闭）
+        //    竞争记录 `ssh.disconnect`，原子 swap 保证只记一条
         let dc_state = Arc::new(DisconnectState {
             sid: sid.to_string(),
             connected_at: connect_start,
             logged: AtomicBool::new(false),
         });
-        tokio::spawn(read_task(
-            read_half,
-            event_tx.clone(),
-            cancel.clone(),
-            dc_state.clone(),
-        ));
         let cwd = Arc::new(Mutex::new(None));
-        tokio::spawn(merge_task(
-            event_rx,
-            frame_tx,
-            cancel.clone(),
-            init_inject,
-            cwd.clone(),
-        ));
-        tokio::spawn(write_task(write_half, write_rx, cancel.clone()));
+
+        let metrics_frame_tx = if cfg.sftp_only {
+            drop(event_tx);
+            drop(event_rx);
+            drop(write_rx);
+            frame_tx
+        } else {
+            applog::emit(
+                log::Level::Debug,
+                "ssh",
+                ev::SSH_SESSION_CREATE,
+                Some(sid),
+                "创建会话",
+                Some(serde_json::json!({
+                    "term": TERM_TYPE,
+                    "cols": cfg.cols,
+                    "rows": cfg.rows,
+                    "enc": TERM_ENCODING,
+                })),
+            );
+            let login_shell = motd_outcome.as_ref().and_then(|o| o.login_shell.clone());
+            let channel = {
+                let mut h = handle.lock().await;
+                // motd 开启即走 exec 路径抑制 sshd 原生横幅，关闭走标准 shell
+                let suppress_native = cfg.motd && !cfg.single_channel;
+                open_interactive(&mut h, &cfg, suppress_native, login_shell, sid, init_cmd.is_some())
+                    .await?
+            };
+
+            // 7. 拆分读写半通道，启动双向转发；PTY 输出从此刻起进入帧队列（恒在 MOTD 之后）
+            let (read_half, write_half) = channel.split();
+            // 留一个帧发送口给动态指标采集器（0x06），与 PTY 帧共用 FIFO 保序
+            let metrics_frame_tx = frame_tx.clone();
+
+            // 提示符注入交给 merge_task 的静默门：等 shell 启动输出静默（PS1 刷完、
+            // readline 阻塞）后才经写队列注入；注入全过程的 PTY 输出被 hold 至脚本
+            // 末尾 marker，放行前按内容剥掉回显行，前端零感知。probe 用临时脚本路径
+            // ——它在本次会话内唯一，只可能出现在回显里。
+            let init_inject = init_cmd.map(|cmd| {
+                let mut bytes = cmd.into_bytes();
+                bytes.push(b'\r');
+                let probe = init_script_path.clone().unwrap_or_default().into_bytes();
+                (bytes, probe, write_tx.clone())
+            });
+
+            tokio::spawn(read_task(
+                read_half,
+                event_tx,
+                cancel.clone(),
+                dc_state.clone(),
+            ));
+            tokio::spawn(merge_task(
+                event_rx,
+                frame_tx,
+                cancel.clone(),
+                init_inject,
+                cwd.clone(),
+            ));
+            tokio::spawn(write_task(write_half, write_rx, cancel.clone()));
+            metrics_frame_tx
+        };
 
         // 7.1 RTT 探测任务（0x07 帧）：独立于 MetricsCollector 运行——
-        //     状态栏常显，不能随 Inspector 隐藏而停更；挂在会话 cancel 上随断连退出
-        tokio::spawn(rtt_task(
-            handle.clone(),
-            metrics_frame_tx.clone(),
-            cancel.clone(),
-        ));
+        //     状态栏常显，不能随监控面板隐藏而停更；挂在会话 cancel 上随断连退出。
+        //     sftp-only 会话不发：堡垒机对全局请求同样可能拒绝，且没有终端可显示
+        if !cfg.sftp_only {
+            tokio::spawn(rtt_task(
+                handle.clone(),
+                metrics_frame_tx.clone(),
+                cancel.clone(),
+            ));
+        }
 
         // 8. handle（Arc<Mutex>）随 SshSession 保留：供连接建立后的独立 exec
         //    指标采集通道使用（主机指标 0x05/0x06 帧），与 PTY 半通道共同维持连接。
@@ -1377,6 +1450,14 @@ impl SshSession {
             remote,
             global_conns,
         );
+        // SFTP 子系统状态：空闲看门狗挂在本会话取消令牌上（断连即退出）；
+        // 全局限速键含端口——同主机不同端口算不同链路，各自独立限速
+        let sftp = SftpState::new(
+            sid,
+            &format!("{}:{}", cfg.host, cfg.port),
+            &cfg.username,
+            &cancel,
+        );
         Ok((
             Self {
                 cancel,
@@ -1384,11 +1465,13 @@ impl SshSession {
                 handle,
                 frame_tx: metrics_frame_tx,
                 metrics: StdMutex::new(None),
-                sftp: SftpState::new(sid),
+                sftp,
                 cwd,
                 tunnel,
                 dc_state,
                 init_script_path,
+                single_channel: cfg.single_channel,
+                sftp_only: cfg.sftp_only,
             },
             frame_rx,
         ))
@@ -1396,6 +1479,10 @@ impl SshSession {
 
     /// 将前端原始输入写入 PTY（异步排队，不阻塞调用方）
     pub async fn write(&self, data: Vec<u8>) -> Result<(), SshError> {
+        // sftp:// 外部连接没有 PTY：输入无处可去，静默空转而不是报错
+        if self.sftp_only {
+            return Ok(());
+        }
         self.write_tx
             .send(WriteReq::Data(data))
             .await
@@ -1406,6 +1493,9 @@ impl SshSession {
     pub async fn resize(&self, cols: u32, rows: u32) -> Result<(), SshError> {
         if cols == 0 || rows == 0 {
             // 容器不可见时 fit 可能得出 0，不能把远端 PTY 缩成 0x0
+            return Ok(());
+        }
+        if self.sftp_only {
             return Ok(());
         }
         self.write_tx
@@ -1420,12 +1510,24 @@ impl SshSession {
     /// 随后 init_script 注入的 CWD 钩子会上报新路径，形成闭环。路径含单引号
     /// 时按 shell 规则转义（`'` → `'\''`），避免注入。
     pub(crate) async fn sync_shell_cd(&self, path: &str) -> Result<(), SshError> {
+        // 没有 PTY 就没有 shell 可同步（SFTP 面板会忽略本返回值）
+        if self.sftp_only {
+            return Ok(());
+        }
         let quoted = format!("'{}'", path.replace('\'', "'\\''"));
         let cmd = format!("cd {quoted}\n");
         self.write_tx
             .send(WriteReq::Data(cmd.into_bytes()))
             .await
             .map_err(|_| SshError::Closed)
+    }
+
+    /// 外部连接是否允许打开 SFTP 子系统通道：
+    /// 常规会话允许；`sftp://` 链接允许（SFTP 正是它唯一的那条通道）；
+    /// `ssh://` 链接的唯一通道是 PTY，再开 SFTP 就是第二条通道，
+    /// 不允许多开通道的堡垒机会因此断开整个会话——由 sftp 层拒绝并给出做法
+    pub(super) fn sftp_allowed(&self) -> bool {
+        !self.single_channel || self.sftp_only
     }
 
     /// 取当前跟踪的 Shell CWD（由 OSC 6667 钩子上报，merge_task 更新）
@@ -1452,6 +1554,14 @@ impl SshSession {
         script_body: &str,
         timeout: Duration,
     ) -> Result<ExecOutput, SshError> {
+        // 单通道会话（堡垒机外部连接）：只允许业务真正需要的那条通道，
+        // 采集类 exec 通道一律拒绝——前端已按外部会话屏蔽监控与 AI 工具，
+        // 这里兜底防止任何调用方误开第二条通道导致堡垒机掐断整个会话
+        if self.single_channel {
+            return Err(SshError::Channel(
+                "EXTERNAL_SINGLE_CHANNEL: 外部连接不开放额外采集通道".into(),
+            ));
+        }
         let wrapped = format!("/bin/sh -c '{}'", script_body.replace('\'', "'\\''"));
         let deadline = Instant::now() + timeout;
 
@@ -1534,7 +1644,18 @@ impl SshSession {
     /// 启动动态指标采集（0x06）。幂等：已在采集则先停旧任务再以新间隔启动。
     /// `interval_ms` 夹在 1s~10s，防异常参数打爆远端；
     /// `iface` 为默认路由网卡名，网络计数优先取它，None/缺失时汇总非 lo 网卡。
-    pub fn start_metrics(self: Arc<Self>, interval_ms: u64, iface: Option<String>) {
+    ///
+    /// 单通道会话（堡垒机外部连接）拒绝启动：采集每轮都要开一条 exec 通道。
+    pub fn start_metrics(
+        self: Arc<Self>,
+        interval_ms: u64,
+        iface: Option<String>,
+    ) -> Result<(), SshError> {
+        if self.single_channel {
+            return Err(SshError::Channel(
+                "EXTERNAL_SINGLE_CHANNEL: 外部连接不开放指标采集通道".into(),
+            ));
+        }
         let interval = Duration::from_millis(interval_ms.clamp(1000, 10_000));
         let mut guard = self.metrics.lock().unwrap();
         if let Some(old) = guard.take() {
@@ -1548,6 +1669,7 @@ impl SshSession {
             iface,
         );
         *guard = Some(handle);
+        Ok(())
     }
 
     /// 停止动态指标采集（心跳超时由任务自行退出，此处为前端显式停/切换会话）
@@ -1662,7 +1784,7 @@ async fn read_task(
     cancel: CancellationToken,
     dc_state: Arc<DisconnectState>,
 ) {
-    fn try_log_disconnect(dc_state: &DisconnectState, reason: &str) {
+    fn try_log_disconnect(dc_state: &DisconnectState, reason: &str, exit_code: Option<u32>) {
         if !dc_state.logged.swap(true, Ordering::Relaxed) {
             applog::emit(
                 log::Level::Warn,
@@ -1672,6 +1794,7 @@ async fn read_task(
                 "连接已断开",
                 Some(serde_json::json!({
                     "reason": reason,
+                    "exit_code": exit_code,
                     "uptime_s": dc_state.connected_at.elapsed().as_secs(),
                 })),
             );
@@ -1683,11 +1806,12 @@ async fn read_task(
     // 因此退出状态只记录、不收尾，统一在通道关闭处按记录是否存在决定 lost。
     let mut exit_reason: Option<String> = None;
     let mut exit_log_reason = "eof";
+    let mut exit_code: Option<u32> = None;
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
                 // 取消令牌触发（shutdown）：发送 EOF 通知前端连接已断开
-                try_log_disconnect(&dc_state, "cancelled");
+                try_log_disconnect(&dc_state, "cancelled", None);
                 let _ = event_tx
                     .send(PtyEvent::Eof {
                         reason: None,
@@ -1712,6 +1836,7 @@ async fn read_task(
                     // 记录退出状态，继续排空到 Eof/Close/None（消息可能乱序先至）
                     Some(ChannelMsg::ExitStatus { exit_status }) => {
                         exit_log_reason = "exit_status";
+                        exit_code = Some(exit_status);
                         exit_reason = Some(format!("进程退出，状态码 {exit_status}"));
                     }
                     Some(ChannelMsg::ExitSignal { signal_name, error_message, .. }) => {
@@ -1723,7 +1848,7 @@ async fn read_task(
                     // 无退出状态时继续等 Close/None——异常断开紧接着就会到，
                     // 若退出状态在乱序队列后面也在此兜住
                     Some(ChannelMsg::Eof) if exit_reason.is_some() => {
-                        try_log_disconnect(&dc_state, exit_log_reason);
+                        try_log_disconnect(&dc_state, exit_log_reason, exit_code);
                         let _ = event_tx
                             .send(PtyEvent::Eof { reason: exit_reason, lost: false })
                             .await;
@@ -1732,7 +1857,7 @@ async fn read_task(
                     Some(ChannelMsg::Eof) => {}
                     // 通道完全关闭：有退出状态=正常退出；无=连接意外丢失（自动重连依据）
                     Some(ChannelMsg::Close) | None => {
-                        try_log_disconnect(&dc_state, exit_log_reason);
+                        try_log_disconnect(&dc_state, exit_log_reason, exit_code);
                         let _ = event_tx
                             .send(PtyEvent::Eof {
                                 reason: exit_reason,
@@ -1773,17 +1898,18 @@ fn scan_cwd(buf: &[u8]) -> Option<String> {
 ///
 /// 提示符注入（init_inject 存在时）三阶段状态机，全程输出不上屏：
 /// 1. AwaitQuiet：hold 全部 PTY 输出，120ms 静默判定 PS1 已刷完（readline 阻塞）
-/// 2. 注入 source 命令——回显紧跟 PS1 同行，脚本单行清行精确命中
-/// 3. AwaitMarker：检测到脚本末尾 OSC marker 后，hold 内容转入主攒包窗口，
-///    紧随的着色 PS1 并入同帧放行——前端单帧绘制最终画面
-/// 3s 超时兜底：尽力注入并直通（退化但不阻塞）。
+/// 2. 注入 source 命令
+/// 3. AwaitMarker：检测到脚本末尾 OSC marker 后，先按内容剥掉注入命令的回显行
+///    （[`late_gate`]），再转入主攒包窗口与紧随的着色 PS1 同帧放行——
+///    前端单帧绘制最终画面，屏上既无原始 PS1，也无回显中间态
+/// 3s 超时兜底：尽力注入、同样剥回显后直通放行（退化但不阻塞）。
 ///
 /// 另外扫描 PTY 输出中的 CWD 上报 OSC 序列，命中即更新会话 cwd 并向前端发 Cwd 帧。
 async fn merge_task(
     mut event_rx: mpsc::Receiver<PtyEvent>,
     frame_tx: mpsc::Sender<Vec<u8>>,
     cancel: CancellationToken,
-    init_inject: Option<(Vec<u8>, mpsc::Sender<WriteReq>)>,
+    init_inject: Option<(Vec<u8>, Vec<u8>, mpsc::Sender<WriteReq>)>,
     cwd: Arc<Mutex<Option<String>>>,
 ) {
     let mut buf = BytesMut::with_capacity(MERGE_BYTES * 2);
@@ -1792,11 +1918,14 @@ async fn merge_task(
     tokio::pin!(window);
     let mut window_open = false;
 
-    let mut hold: Option<InitHold> = init_inject.map(|(cmd, tx)| InitHold {
+    let mut hold: Option<InitHold> = init_inject.map(|(cmd, probe, tx)| InitHold {
         buf: BytesMut::with_capacity(8192),
         cmd: Some(cmd),
+        probe,
         tx,
     });
+    // 放行后仍在生效的回显剥离窗口（见 LATE_ECHO_TTL）；无注入则为 None，零开销
+    let mut late: Option<(Vec<u8>, Instant)> = None;
     // 静默计时（等 PS1 刷完）与 hold 硬超时，仅在对应阶段参与 select
     let quiet = time::sleep(SHELL_QUIET);
     tokio::pin!(quiet);
@@ -1821,9 +1950,11 @@ async fn merge_task(
                                 .windows(INIT_DONE_MARKER.len())
                                 .any(|w| w == INIT_DONE_MARKER)
                             {
-                                // 阶段 3：marker 到——转主攒包缓冲走正常窗口，
-                                // 紧随 marker 的着色 PS1 并入同帧
+                                // 阶段 3：marker 到——hold 内容转入主攒包缓冲走
+                                // 正常窗口，紧随 marker 的着色 PS1 并入同帧；
+                                // 注入命令的回显行由 flush 在发出前按内容剥掉
                                 let h = hold.take().unwrap();
+                                late = Some((h.probe, Instant::now() + LATE_ECHO_TTL));
                                 buf.extend_from_slice(&h.buf[..]);
                                 if !window_open {
                                     window.as_mut().reset(Instant::now() + MERGE_WINDOW);
@@ -1846,7 +1977,7 @@ async fn merge_task(
                             window_open = true;
                         }
                         if buf.len() >= MERGE_BYTES {
-                            flush(&mut buf, &frame_tx).await;
+                            flush(&mut buf, &frame_tx, &mut late).await;
                             window_open = false;
                         }
                     }
@@ -1854,7 +1985,7 @@ async fn merge_task(
                         if let Some(h) = hold.take() {
                             buf.extend_from_slice(&h.buf[..]);
                         }
-                        flush(&mut buf, &frame_tx).await;
+                        flush(&mut buf, &frame_tx, &mut late).await;
                         // 结构化 payload：reason 展示用，lost 指示前端是否可自动重连
                         let payload = serde_json::json!({
                             "reason": reason.unwrap_or_default(),
@@ -1871,13 +2002,13 @@ async fn merge_task(
                         if let Some(h) = hold.take() {
                             buf.extend_from_slice(&h.buf[..]);
                         }
-                        flush(&mut buf, &frame_tx).await;
+                        flush(&mut buf, &frame_tx, &mut late).await;
                         break;
                     }
                 }
             }
             _ = &mut window, if window_open => {
-                flush(&mut buf, &frame_tx).await;
+                flush(&mut buf, &frame_tx, &mut late).await;
                 window_open = false;
             }
             // 阶段 1→2：静默确认 shell 就绪，注入 source 命令
@@ -1889,14 +2020,16 @@ async fn merge_task(
                     }
                 }
             }
-            // hold 超时：尽力注入（若还未），已攒内容直通放行
+            // hold 超时：尽力注入（若还未），已攒内容直通放行；回显多半还在路上，
+            // 交给 late 窗口在后续 flush 里剥
             _ = &mut hold_deadline, if hold.is_some() => {
                 if let Some(mut h) = hold.take() {
                     if let Some(cmd) = h.cmd.take() {
                         let _ = h.tx.send(WriteReq::Data(cmd)).await;
                     }
+                    late = Some((h.probe, Instant::now() + LATE_ECHO_TTL));
                     buf.extend_from_slice(&h.buf[..]);
-                    flush(&mut buf, &frame_tx).await;
+                    flush(&mut buf, &frame_tx, &mut late).await;
                     window_open = false;
                 }
             }
@@ -1904,8 +2037,92 @@ async fn merge_task(
     }
 }
 
-/// 把累积缓冲区封装为 Data 帧发出（空缓冲不发）
-async fn flush(buf: &mut BytesMut, frame_tx: &mpsc::Sender<Vec<u8>>) {
+/// 回显剥离窗口内对缓冲的放行裁决（[`flush`] 每次发送前调用）。
+///
+/// 为什么在本地按内容剥而不是让远端脚本发清行序列：清行只能按游标相对位置猜行，
+/// 而注入时机靠输出静默判定——远端 profile 慢一拍（如 `/etc/profile.d/lang.sh`
+/// 里 `/sbin/consoletype` 报 ENOENT 才继续）时，回显、告警、PS1 三者会错位，
+/// 相对清行要么留下回显，要么把服务器自己的告警行吃掉（两种形态都实测过）。
+/// 本地知道注入的确切字节（probe 为本次会话独有的随机路径），按内容定位无猜测。
+///
+/// 三种裁决（每次都把缓冲里**所有**完整回显行剥掉，见下「回显会出现两次」）：
+/// - 完整命中（probe 与行尾换行同在）：整行剥除，继续找下一处；
+/// - probe 已现、行尾换行未到（flush 边界正好切在回显行中间）：从 probe 所在行
+///   的行首起整段扣留不发，留待下一批字节补全后再剥——照发半行即用户可见的
+///   「`[root@x ~]# . "/tmp/.ri-xx" 2>/dev/null` 泄漏」（3s 兜底放行后回显才
+///   到达的会话必经此窗口，PTY 分包/5ms 攒包边界落点不定，故偶发）；
+/// - probe 未现：检查缓冲末尾是否恰为 probe 的真前缀（probe 被切一半的形态），
+///   是则只扣留该后缀待拼接，否则全部放行。
+///
+/// 回显会出现两次（172.17.4.2 实测）：注入的字节在 shell 还在跑 profile 时到达
+/// tty，此时行规程是规范模式 + ECHO，内核立刻回显一份（**不带 PS1**）；profile
+/// 刷完、readline 接管后才从缓冲里取出这行逐字符再回显一份（**带原始 PS1 前缀**）。
+/// 只剥第一份就关窗，第二份原样上屏。故窗口不因命中而关闭，只按 [`LATE_ECHO_TTL`]
+/// 到期关闭；probe 是本次会话独有的随机路径，10s 内误伤正常输出的概率为零。
+///
+/// 返回 true 表示窗口继续开启（除空 probe 外恒为 true，TTL 到点由 [`flush`] 收窗）。
+///
+/// 扣留的字节最坏滞留到窗口过期（10s）才直通，但仅会话开头存在窗口且
+/// 扣留量 ≤ probe 长度（33 字节内），终端侧无感知。
+fn late_gate(buf: &mut BytesMut, probe: &[u8]) -> bool {
+    if probe.is_empty() {
+        return true;
+    }
+    while let Some(hit) = buf.windows(probe.len()).position(|w| w == probe) {
+        let row_start = buf[..hit]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |p| p + 1);
+        // 行尾换行未到：半行（扣留待补全）；已到：完整回显行，整行剥除后继续找下一处
+        let Some(off) = buf[hit..].iter().position(|&b| b == b'\n') else {
+            if row_start > 0 {
+                let tail = buf.split_off(row_start);
+                *buf = tail;
+            }
+            return true;
+        };
+        let row_end = hit + off + 1;
+        buf.copy_within(row_end.., row_start);
+        buf.truncate(buf.len() - (row_end - row_start));
+    }
+    // probe 未现：末尾真前缀（被切一半的 probe 开头）扣留待拼接
+    let keep = longest_suffix_prefix(buf, probe);
+    if keep > 0 {
+        let tail = buf.split_off(buf.len() - keep);
+        *buf = tail;
+    }
+    true
+}
+
+/// buf 末尾与 probe 前缀的最长公共部分长度（0 = 不可能有被切开的 probe）。
+fn longest_suffix_prefix(buf: &[u8], probe: &[u8]) -> usize {
+    let max = probe.len().saturating_sub(1).min(buf.len());
+    for n in (1..=max).rev() {
+        if &buf[buf.len() - n..] == &probe[..n] {
+            return n;
+        }
+    }
+    0
+}
+
+/// 把累积缓冲区封装为 Data 帧发出（空缓冲不发）。
+/// 发出前若回显剥离窗口仍开着，先经 [`late_gate`] 裁决：命中则剥整行（可多处）；
+/// 半行/半个 probe 则扣留待拼接（其余照发），窗口到期后全部直通。
+async fn flush(
+    buf: &mut BytesMut,
+    frame_tx: &mpsc::Sender<Vec<u8>>,
+    late: &mut Option<(Vec<u8>, Instant)>,
+) {
+    if buf.is_empty() {
+        return;
+    }
+    if let Some((probe, until)) = late.take() {
+        if Instant::now() < until {
+            if late_gate(buf, &probe) {
+                *late = Some((probe, until));
+            }
+        }
+    }
     if buf.is_empty() {
         return;
     }
@@ -2087,7 +2304,10 @@ mod gate_tests {
 
 #[cfg(test)]
 mod env_export_tests {
-    use super::{env_export_lines, init_script, locale_login_cmd};
+    use super::{
+        env_export_lines, init_script, late_gate, locale_login_cmd, INIT_DONE_MARKER,
+    };
+    use bytes::BytesMut;
 
     #[test]
     fn normal_pairs_get_quoted_exports() {
@@ -2125,21 +2345,194 @@ mod env_export_tests {
     }
 
     #[test]
-    fn env_block_lands_after_clear_line_in_script() {
+    fn script_carries_no_remote_clear_line_and_orders_env_before_hook() {
         let script = init_script("/tmp/.ri-test", false, &[("EDITOR".into(), "nvim".into())]);
-        let clear = script
-            .find("printf '\\033[1A\\r\\033[2K'")
-            .expect("清行必须是第一行");
+        // 回显由后端本地剥离，脚本发清行会在 profile 输出与注入交错时吃错行
+        assert!(
+            !script.contains("\\033[1A") && !script.contains("\\033[2K"),
+            "脚本不应再含相对清行序列"
+        );
+        let first = script.lines().next().unwrap_or_default();
+        assert!(
+            first.starts_with("_rh_l="),
+            "脚本首行应是 locale 探测起始，不该是清行 printf：{first}"
+        );
         let env_line = script
             .find("export EDITOR='nvim'")
             .expect("export 块应在脚本内");
         let hook = script.find("_rh_cwd_hook").expect("CWD 钩子应在脚本内");
         assert!(
-            clear < env_line && env_line < hook,
-            "顺序应为 清行 → export → 钩子"
+            env_line < hook,
+            "顺序应为 export → CWD 钩子"
         );
         // color_prompt=false 时 export 之后不应有颜色块
         assert!(!script.contains("_rh_e"), "未开启提示符着色时不应有颜色块");
+    }
+
+    /// 启动输出的典型形态：profile 输出 → PS1 → 注入命令回显 → 回车 → marker → 新 PS1
+    fn startup_stream(warn_before_echo: bool) -> BytesMut {
+        let warn = "/etc/profile.d/lang.sh: line 45: /sbin/consoletype: No such file or directory\r\n";
+        let echo = " \"/tmp/.ri-baf1d674\" 2>/dev/null\r\n";
+        let mut b = BytesMut::new();
+        if warn_before_echo {
+            b.extend_from_slice(warn.as_bytes());
+            b.extend_from_slice("root@localhost:~# ".as_bytes());
+            b.extend_from_slice(echo.as_bytes());
+        } else {
+            // 交错形态（实测截图）：回显先上屏，profile 告警晚于它才打印出来
+            b.extend_from_slice(echo.as_bytes());
+            b.extend_from_slice(warn.as_bytes());
+        }
+        b.extend_from_slice(INIT_DONE_MARKER);
+        b.extend_from_slice("root@localhost:~# ".as_bytes());
+        b
+    }
+
+    #[test]
+    fn late_gate_strips_only_the_echoed_command_row() {
+        let probe = b"/tmp/.ri-baf1d674";
+        let mut buf = startup_stream(true);
+        let open = late_gate(&mut buf, probe);
+        let text = String::from_utf8_lossy(&buf);
+        assert!(open, "窗口只按 TTL 收，命中不提前关窗（同一条命令回显两次）");
+        assert!(!text.contains(".ri-baf1d674"), "回显必须整行消失：{text}");
+        assert!(
+            text.contains("/sbin/consoletype"),
+            "服务器自己的告警行不能跟着被吃掉：{text}"
+        );
+        assert!(
+            text.ends_with("root@localhost:~# "),
+            "脚本生效后的新 PS1 必须保留：{text}"
+        );
+    }
+
+    #[test]
+    fn late_gate_strips_both_echo_copies() {
+        // 172.17.4.2 实测泄漏形态：注入字节在 profile 还在跑时到达 tty，内核按
+        // 规范模式先回显一份（不带 PS1）；profile 刷完、readline 接管后从缓冲里
+        // 取出同一行逐字符再回显一份（带原始 PS1 前缀）。旧实现命中一次即关窗，
+        // 第二份原样上屏。
+        let probe = b"/tmp/.ri-baf1d674";
+        let echo = " . \"/tmp/.ri-baf1d674\" 2>/dev/null\r\n";
+        let mut buf = BytesMut::from("/etc/profile.d/lang.sh: line 45: /sbin/consoletype: No such file or directory\r\n");
+        buf.extend_from_slice(echo.as_bytes()); // 内核回显（无 PS1）
+        buf.extend_from_slice("[root@localhost ~]# ".as_bytes());
+        buf.extend_from_slice(echo.as_bytes()); // readline 再回显（带 PS1）
+        buf.extend_from_slice(INIT_DONE_MARKER);
+        buf.extend_from_slice("root@localhost:~# ".as_bytes());
+
+        let mut open = late_gate(&mut buf, probe);
+        assert!(
+            !String::from_utf8_lossy(&buf).contains(".ri-baf1d674"),
+            "两份回显都要消失（屏上只剩告警行与新 PS1）：{}",
+            String::from_utf8_lossy(&buf)
+        );
+        // 第二份回显落在下一个 flush 批次：窗口仍开着，照样剥
+        let mut next = BytesMut::from(echo.as_bytes());
+        next.extend_from_slice("[root@localhost ~]# ls\r\n".as_bytes());
+        open = late_gate(&mut next, probe) && open;
+        assert!(
+            !String::from_utf8_lossy(&next).contains(".ri-baf1d674"),
+            "跨批次的第二份回显也必须消失：{}",
+            String::from_utf8_lossy(&next)
+        );
+        let text = String::from_utf8_lossy(&buf);
+        assert!(open, "窗口保持开启直到 TTL");
+        assert!(
+            !text.contains(".ri-baf1d674"),
+            "两份回显都要消失（屏上只剩告警行与新 PS1）：{text}"
+        );
+        assert_eq!(
+            text.matches("/sbin/consoletype").count(),
+            1,
+            "告警行不能被吃掉或重复：{text}"
+        );
+        assert!(
+            text.ends_with("root@localhost:~# "),
+            "新 PS1 保留：{text}"
+        );
+        assert!(
+            !text.contains("[root@localhost ~]#"),
+            "原始 PS1 与第二份回显同一行，一起剥掉才对（屏上只留新 PS1）：{text}"
+        );
+    }
+
+    #[test]
+    fn late_gate_survives_interleaved_profile_output() {
+        // 回显与 profile 告警先后颠倒（正是清行序列会吃错行的场景）
+        let probe = b"/tmp/.ri-baf1d674";
+        let mut buf = startup_stream(false);
+        let open = late_gate(&mut buf, probe);
+        let text = String::from_utf8_lossy(&buf);
+        assert!(open);
+        assert!(!text.contains(".ri-baf1d674"), "回显必须消失：{text}");
+        assert!(text.contains("/sbin/consoletype"), "告警行必须保留：{text}");
+    }
+
+    #[test]
+    fn late_gate_passthrough_without_probe_and_empty_probe() {
+        let probe = b"/tmp/.ri-baf1d674";
+        let mut plain: BytesMut = BytesMut::from("Last login: Mon\r\nroot@localhost:~# ".as_bytes());
+        let snapshot = plain.clone();
+        // 不含 probe：字节级原样放行，窗口保持开启
+        assert!(late_gate(&mut plain, probe));
+        assert_eq!(&plain[..], &snapshot[..]);
+        // 空 probe（脚本未落盘的降级路径）绝不错删
+        assert!(late_gate(&mut plain, b""));
+        assert_eq!(&plain[..], &snapshot[..]);
+    }
+
+    #[test]
+    fn late_gate_withholds_partial_row_until_line_completes() {
+        // 泄漏回归守卫（实测截图形态）：flush 边界切在回显行中间，行尾换行未到。
+        // 旧行为把半行原样发出，回显 `[root@x ~]# . "/tmp/.ri-xx" ...` 直接上屏。
+        let probe = b"/tmp/.ri-baf1d674";
+        let head = "Last login: Mon\r\nroot@localhost:~#  \"/tmp/.ri-baf1d674\" 2>/dev/null";
+        let mut buf = BytesMut::from(head.as_bytes());
+        assert!(late_gate(&mut buf, probe), "半行未命中应保持窗口开启");
+        assert_eq!(
+            &buf[..],
+            &BytesMut::from(
+                "root@localhost:~#  \"/tmp/.ri-baf1d674\" 2>/dev/null".as_bytes()
+            )[..],
+            "半行回显扣留不发（行首前的正常输出由本轮发出）"
+        );
+        // 下一批字节补上行尾换行 + marker + 新 PS1：此时整行剥得干净
+        buf.extend_from_slice("\r\n".as_bytes());
+        buf.extend_from_slice(INIT_DONE_MARKER);
+        buf.extend_from_slice("root@localhost:~# ".as_bytes());
+        let open = late_gate(&mut buf, probe);
+        let text = String::from_utf8_lossy(&buf);
+        assert!(open, "窗口保持开启直到 TTL");
+        assert!(!text.contains(".ri-baf1d674"), "回显整行消失：{text}");
+        assert!(
+            text.ends_with("root@localhost:~# "),
+            "新 PS1 原样保留：{text}"
+        );
+    }
+
+    #[test]
+    fn late_gate_reassembles_probe_split_across_flush_boundary() {
+        // probe 本身被 flush 边界切成两半：扣留真前缀待拼接，拼接后剥整行
+        let probe = b"/tmp/.ri-baf1d674";
+        let mut buf = BytesMut::from("root@localhost:~#  \"/tmp/.ri-baf1".as_bytes());
+        assert!(late_gate(&mut buf, probe));
+        assert_eq!(
+            &buf[..],
+            &BytesMut::from("/tmp/.ri-baf1".as_bytes())[..],
+            "末尾 probe 真前缀扣留，之前的输出放行"
+        );
+        // 末尾不是 probe 前缀时不扣留、全部放行
+        let mut plain = BytesMut::from("hello world\r\n".as_bytes());
+        assert!(late_gate(&mut plain, probe));
+        assert_eq!(&plain[..], &BytesMut::from("hello world\r\n".as_bytes())[..]);
+        // 补上另一半：拼成完整回显行（还差行尾），再补行尾后剥除
+        buf.extend_from_slice("d674\" 2>/dev/null\r\n".as_bytes());
+        assert!(late_gate(&mut buf, probe), "拼接后完整命中，窗口仍按 TTL 开启");
+        assert!(
+            !String::from_utf8_lossy(&buf).contains(".ri-baf1d674"),
+            "切开的回显拼接后同样剥得干净"
+        );
     }
 
     #[test]
@@ -2213,17 +2606,28 @@ mod env_export_tests {
         );
         // 命中：带 LC_ALL 前缀 exec；未命中：else 分支行首裸 exec（不塞无效 locale）
         assert!(
-            cmd.contains("LC_ALL=\"$_rh_l\" exec '/bin/bash' -l"),
+            cmd.contains("LC_ALL=\"$_rh_l\" exec \"$_rh_s\" -l"),
             "命中候选时应带 LC_ALL 前缀 exec"
         );
         assert!(
-            cmd.contains("\n  exec '/bin/bash' -l"),
+            cmd.contains("\n  exec \"$_rh_s\" -l"),
             "无候选时 else 分支应行首裸 exec"
         );
+        // 探测到的 shell 路径先校验可执行再 exec（passwd 值可能被启动告警污染，
+        // 直接 exec 得 127 秒断），不可执行时回退 $SHELL 与常见 shell
+        assert!(
+            cmd.contains("_rh_s='/bin/bash'"),
+            "shell 路径应先赋给受校验的变量"
+        );
+        assert!(
+            cmd.contains("[ ! -x \"$_rh_s\" ]"),
+            "exec 前应校验 shell 可执行"
+        );
+        assert!(cmd.contains("/bin/sh"), "不可执行时应回退到 /bin/sh");
         // shell 路径经单引号转义后安全内插
         let evil = locale_login_cmd("/tmp/x'bash");
         assert!(
-            evil.contains("'/tmp/x'\\''bash' -l"),
+            evil.contains("_rh_s='/tmp/x'\\''bash'"),
             "shell 单引号应被转义"
         );
         assert!(!evil.contains("LC_ALL=UTF-8 "), "不得把 UTF-8 当 locale 名");

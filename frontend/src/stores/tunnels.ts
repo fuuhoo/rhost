@@ -68,6 +68,8 @@ export async function startTunnel(session: Session, rule: TunnelRule): Promise<b
       portConflict: savedSettings.tunnelPortConflict,
       dnsResolve: savedSettings.tunnelDnsResolve,
       retryCount: savedSettings.tunnelRetryCount,
+      // 空闲断开：建连时快照给引擎，改动只影响之后新建的转发连接
+      idleTimeoutSec: Math.max(0, Math.trunc(savedSettings.tunnelIdleTimeoutSec || 0)),
     })
     return true
   } catch (e) {

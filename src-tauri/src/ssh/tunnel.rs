@@ -270,10 +270,13 @@ pub(crate) struct TunnelEntry {
     pub rule_conns: Arc<Semaphore>,
     /// 接入速率令牌桶
     pub accept_limiter: RateLimiter,
+    /// 本规则建立转发连接时快照的空闲断开时长（秒）；0 表示不因空闲关闭。
+    /// start 时取自 StartOptions，改设置不影响已入表的规则。
+    pub idle_sec: u32,
 }
 
 impl TunnelEntry {
-    fn new(rule: TunnelRule, session_cancel: &CancellationToken) -> Self {
+    fn new(rule: TunnelRule, session_cancel: &CancellationToken, idle_sec: u32) -> Self {
         Self {
             rule,
             rule_cancel: session_cancel.child_token(),
@@ -284,6 +287,7 @@ impl TunnelEntry {
             dirty: Arc::new(AtomicBool::new(false)),
             rule_conns: Arc::new(Semaphore::new(MAX_CONN_PER_RULE)),
             accept_limiter: RateLimiter::new(ACCEPT_RATE_BURST, ACCEPT_RATE_REFILL),
+            idle_sec,
         }
     }
 
@@ -367,6 +371,9 @@ pub struct StartOptions {
     pub dns_resolve: DnsResolve,
     /// 建立期瞬态错误重试次数（0–20）
     pub retry_count: u32,
+    /// 单条转发连接的双向空闲断开时长（秒）；0 表示不因空闲关闭。
+    /// 在 start 时快照进规则条目：改设置只影响之后新建的转发连接。
+    pub idle_timeout_sec: u32,
 }
 
 /* =========================================================
@@ -522,7 +529,11 @@ impl TunnelManager {
         }
 
         // 3. 建立运行时条目（Starting），入表并立即推快照（前端立刻可见）
-        let entry = Arc::new(TunnelEntry::new(rule.clone(), &self.cancel));
+        let entry = Arc::new(TunnelEntry::new(
+            rule.clone(),
+            &self.cancel,
+            opts.idle_timeout_sec,
+        ));
         entry.set_state(TunnelState::Starting, None);
         self.tunnels
             .lock()
@@ -1219,6 +1230,8 @@ pub(crate) async fn run_relay_conn(
 /// - 下行（channel → TCP）：字节计入 bytes_down；结束时 shutdown TCP 写端给客户端 EOF；
 /// - 上行（TCP → channel）：字节计入 bytes_up；结束时对 channel 发 EOF 给远端。
 /// 任一路结束即触发对侧收尾，两路都退出后本函数返回（许可随调用方栈回收）。
+/// 规则带 `idle_sec` 时另有看门狗：两路都没有流量超过该时长即取消本连接，
+/// 由各自的收尾路径关通道/释放许可；`idle_sec = 0` 时不启用（连接长活）。
 async fn relay_channel_tcp(
     channel: russh::Channel<client::Msg>,
     tcp: TcpStream,
@@ -1227,20 +1240,33 @@ async fn relay_channel_tcp(
     let (rh, wh) = channel.split();
     let (mut tcp_r, mut tcp_w) = tcp.into_split();
 
+    // 空闲基准用相对毫秒（本连接自己的起点），不看墙上时钟：休眠/改系统时间不该误杀连接
+    let idle_ms = entry.idle_sec as u64 * 1000;
+    let epoch = std::time::Instant::now();
+    let last_ms = Arc::new(AtomicU64::new(0));
+    let idle_cancel = CancellationToken::new();
+
     // 下行任务：channel → tcp
     let counters_down = entry.counters.clone();
     let dirty_down = entry.dirty.clone();
+    let last_down = last_ms.clone();
+    let cancel_down = idle_cancel.clone();
     let down = tokio::spawn(async move {
         let mut rh = rh;
         let mut reader = rh.make_reader();
         let mut buf = vec![0u8; COPY_BUF];
         loop {
-            match reader.read(&mut buf).await {
+            let read = tokio::select! {
+                r = reader.read(&mut buf) => r,
+                _ = cancel_down.cancelled() => break,
+            };
+            match read {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     if tcp_w.write_all(&buf[..n]).await.is_err() {
                         break;
                     }
+                    last_down.store(epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
                     counters_down
                         .bytes_down
                         .fetch_add(n as u64, Ordering::Relaxed);
@@ -1255,16 +1281,24 @@ async fn relay_channel_tcp(
     // 上行任务：tcp → channel
     let counters_up = entry.counters.clone();
     let dirty_up = entry.dirty.clone();
+    let last_up = last_ms.clone();
+    let cancel_up = idle_cancel.clone();
+    let rule_id = entry.rule.id.clone();
     let up = tokio::spawn(async move {
         let mut writer = wh.make_writer();
         let mut buf = vec![0u8; COPY_BUF];
         loop {
-            match tcp_r.read(&mut buf).await {
+            let read = tokio::select! {
+                r = tcp_r.read(&mut buf) => r,
+                _ = cancel_up.cancelled() => break,
+            };
+            match read {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     if writer.write_all(&buf[..n]).await.is_err() {
                         break;
                     }
+                    last_up.store(epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
                     counters_up.bytes_up.fetch_add(n as u64, Ordering::Relaxed);
                     dirty_up.store(true, Ordering::Relaxed);
                 }
@@ -1274,9 +1308,39 @@ async fn relay_channel_tcp(
         let _ = wh.eof().await;
     });
 
+    // 看门狗：检查粒度取 idle/4（限幅 250ms–5s），命中即取消两路 copy
+    let watch = if idle_ms > 0 {
+        let cancel = idle_cancel.clone();
+        let last = last_ms.clone();
+        let idle_sec = entry.idle_sec;
+        let id = rule_id.clone();
+        Some(tokio::spawn(async move {
+            let step = (idle_ms / 4).clamp(250, 5000);
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(step)) => {}
+                    _ = cancel.cancelled() => break,
+                }
+                let quiet = epoch.elapsed().as_millis() as u64 - last.load(Ordering::Relaxed);
+                if quiet >= idle_ms {
+                    debug!("隧道 {id} 的连接空闲 {quiet}ms ≥ {idle_sec}s，关闭并释放通道");
+                    cancel.cancel();
+                    break;
+                }
+            }
+        }))
+    } else {
+        None
+    };
+
     // 两路都退出才算连接结束（许可/计数在 handle_local_conn 栈上统一收尾）
     let _ = down.await;
     let _ = up.await;
+    // 任一路正常结束后叫醒看门狗，别让它空转到下一次检查
+    idle_cancel.cancel();
+    if let Some(w) = watch {
+        let _ = w.await;
+    }
 }
 
 /* =========================================================

@@ -17,7 +17,7 @@ pub enum FrameType {
     /// 协议预留：当前连接错误走 invoke 返回值，运行期错误并入 Exit 帧。
     #[allow(dead_code)]
     Error = 0x03,
-    /// Rhost MOTD 欢迎面板指令数组（payload 为 JSON 序列化的 `[{t,text,cls}]`）。
+    /// MOTD 服务器状态面板指令数组（payload 为 JSON 序列化的 `[{t,text,cls}]`）。
     /// 由后端在 PTY 数据流开启前作为首帧发出，前端解析后按 cls 配色绘制，
     /// 保证 MOTD 始终出现在远端 shell 提示符之前。
     Motd = 0x04,

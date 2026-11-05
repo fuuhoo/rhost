@@ -9,7 +9,7 @@ use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
 
 use super::session::{ExecOutput, SshSession};
-use super::sftp::{RemoteDirListing, TransferProgress};
+use super::sftp::{RemoteDirListing, TransferPolicy, TransferProgress};
 use super::{SessionConfig, SshError};
 use tauri::ipc::Channel;
 
@@ -134,10 +134,7 @@ impl SessionManager {
     ) -> Result<(), SshError> {
         let session = { self.sessions.read().await.get(session_id).cloned() };
         match session {
-            Some(s) => {
-                s.start_metrics(interval_ms, iface);
-                Ok(())
-            }
+            Some(s) => s.start_metrics(interval_ms, iface),
             None => Err(SshError::NotFound),
         }
     }
@@ -188,7 +185,62 @@ impl SessionManager {
         }
     }
 
-    /// 上传单个文件：本地路径 → 远端路径（同名覆盖），进度经事件推送
+    /// SFTP 批量创建目录（mkdir -p 语义，去重后一轮往返）：拖拽上传整棵目录树用
+    pub(crate) async fn sftp_mkdir_all(
+        &self,
+        session_id: &str,
+        paths: Vec<String>,
+    ) -> Result<(), SshError> {
+        let session = { self.sessions.read().await.get(session_id).cloned() };
+        match session {
+            Some(s) => s.sftp_mkdir_all(paths).await,
+            None => Err(SshError::NotFound),
+        }
+    }
+
+    /// SFTP 远端路径元数据（编辑器回写前的变更判定）
+    pub(crate) async fn sftp_stat(
+        &self,
+        session_id: &str,
+        path: String,
+    ) -> Result<crate::ssh::sftp::RemoteStat, SshError> {
+        let session = { self.sessions.read().await.get(session_id).cloned() };
+        match session {
+            Some(s) => s.sftp_stat(path).await,
+            None => Err(SshError::NotFound),
+        }
+    }
+
+    /// SFTP 递归枚举远端目录树（下载方向整棵递归，与 local_walk 对称）
+    pub(crate) async fn sftp_walk(
+        &self,
+        session_id: &str,
+        root: String,
+        max_files: Option<usize>,
+    ) -> Result<crate::ssh::sftp::RemoteWalkResult, SshError> {
+        let session = { self.sessions.read().await.get(session_id).cloned() };
+        match session {
+            Some(s) => s.sftp_walk(root, max_files).await,
+            None => Err(SshError::NotFound),
+        }
+    }
+
+    /// SFTP 取回编辑副本（不经传输队列，无覆盖策略/续传/校验）
+    pub(crate) async fn sftp_fetch(
+        &self,
+        session_id: &str,
+        remote_path: String,
+        local_path: String,
+    ) -> Result<u64, SshError> {
+        let session = { self.sessions.read().await.get(session_id).cloned() };
+        match session {
+            Some(s) => s.sftp_fetch(remote_path, local_path).await,
+            None => Err(SshError::NotFound),
+        }
+    }
+
+    /// 上传单个文件：本地路径 → 远端路径，行为策略由前端 `policy` 传入（见 sftp.rs），
+    /// 进度经事件推送
     pub(crate) async fn sftp_upload(
         &self,
         session_id: &str,
@@ -198,6 +250,7 @@ impl SessionManager {
         chunk_kb: Option<u32>,
         resume: Option<bool>,
         max_bytes: Option<u64>,
+        policy: Option<TransferPolicy>,
         channel: Channel<TransferProgress>,
     ) -> Result<(), SshError> {
         let session = { self.sessions.read().await.get(session_id).cloned() };
@@ -210,6 +263,7 @@ impl SessionManager {
                     chunk_kb,
                     resume,
                     max_bytes,
+                    policy,
                     channel,
                 )
                 .await
@@ -218,7 +272,7 @@ impl SessionManager {
         }
     }
 
-    /// 下载单个文件：远端路径 → 本地路径（本地父目录自动创建）
+    /// 下载单个文件：远端路径 → 本地路径（本地父目录自动创建），行为策略同上传
     pub(crate) async fn sftp_download(
         &self,
         session_id: &str,
@@ -228,6 +282,7 @@ impl SessionManager {
         chunk_kb: Option<u32>,
         resume: Option<bool>,
         max_bytes: Option<u64>,
+        policy: Option<TransferPolicy>,
         channel: Channel<TransferProgress>,
     ) -> Result<(), SshError> {
         let session = { self.sessions.read().await.get(session_id).cloned() };
@@ -240,6 +295,7 @@ impl SessionManager {
                     chunk_kb,
                     resume,
                     max_bytes,
+                    policy,
                     channel,
                 )
                 .await
@@ -257,6 +313,23 @@ impl SessionManager {
         let session = { self.sessions.read().await.get(session_id).cloned() };
         match session {
             Some(s) => s.sync_shell_cd(&path).await,
+            None => Err(SshError::NotFound),
+        }
+    }
+
+    /// 设定会话 SFTP 通道的空闲关闭阈值（秒，0 = 不自动关闭）。
+    /// 阈值由前端设置传入，Rust 侧不读 app_config.json。
+    pub(crate) async fn sftp_set_idle_timeout(
+        &self,
+        session_id: &str,
+        sec: u32,
+    ) -> Result<(), SshError> {
+        let session = { self.sessions.read().await.get(session_id).cloned() };
+        match session {
+            Some(s) => {
+                s.sftp_set_idle_timeout(sec).await;
+                Ok(())
+            }
             None => Err(SshError::NotFound),
         }
     }
@@ -320,6 +393,22 @@ impl SessionManager {
         let session = { self.sessions.read().await.get(session_id).cloned() };
         match session {
             Some(s) => s.sftp_readlink(path).await,
+            None => Err(SshError::NotFound),
+        }
+    }
+
+    /// SFTP 修改权限（chmod，可选递归；`scope` = all / files / dirs）
+    pub(crate) async fn sftp_set_perm(
+        &self,
+        session_id: &str,
+        path: String,
+        mode: u32,
+        recursive: bool,
+        scope: String,
+    ) -> Result<(), SshError> {
+        let session = { self.sessions.read().await.get(session_id).cloned() };
+        match session {
+            Some(s) => s.sftp_set_perm(path, mode, recursive, scope).await,
             None => Err(SshError::NotFound),
         }
     }
