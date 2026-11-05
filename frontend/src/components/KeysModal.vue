@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch, type Ref } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
 import { toast } from '../composables/useToast'
 import type { KeyType, SshKey } from '../types'
 import {
@@ -10,19 +11,28 @@ import {
   confirmDelete,
   copyText,
   deletingKeyId,
-  detectKeyType,
   detailKeyId,
   findKey,
   formatKeyDate,
   KEY_BITS_MAP,
   KEY_DEFAULT_BITS,
   keyModal,
-  keySlug,
   parseListInput,
-  randomFingerprint,
-  randomPublicKey,
   relKeyTime,
 } from '../stores/keys'
+
+/** 后端 keygen.rs 的 KeyInfo（真实落盘的密钥信息） */
+interface KeyInfo {
+  publicKey: string
+  fingerprint: string
+  keyType: string
+  bits: string
+  comment: string
+  privatePath: string | null
+  /** `~/.ssh/xxx` 展示形式；仅导入公钥时为 null */
+  privateTilde: string | null
+  publicPath: string
+}
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
@@ -109,36 +119,55 @@ async function submitGenerate() {
 
   generating.value = true
   genProgress.value = 0
-  const steps: Array<[number, string]> = [
-    [18, '正在初始化随机数发生器…'],
-    [42, `正在生成 ${genType.value} 密钥对…`],
-    [68, '正在计算 SHA256 指纹…'],
-    [88, '正在写入 ~/.ssh/ 目录…'],
-    [100, '密钥生成完成'],
-  ]
-  for (const [p, t] of steps) {
-    genProgress.value = p
-    genStatus.value = t
-    await sleep(240)
-  }
-  await sleep(260)
-
+  genStatus.value = '正在调用 ssh-keygen…'
   const type = genType.value
   const bits = KEY_BITS_MAP[type].length ? genBits.value : KEY_DEFAULT_BITS[type]
-  const comment = genComment.value.trim() || 'user@localhost'
+  const comment = genComment.value.trim()
+
+  // ssh-keygen 是一次性外部进程，没有中间进度可订阅；进度条按阶段推进到 90%，
+  // 真实结果返回后再补满（失败则停在原进度并展示后端错误）
+  const run = invoke<KeyInfo>('ssh_keygen', {
+    input: { name, keyType: type, bits, comment, passphrase: genPass.value },
+  })
+  const stages: Array<[number, string]> = [
+    [22, `正在生成 ${type} 密钥对…`],
+    [52, '正在写入 ~/.ssh/ 目录…'],
+    [78, '正在计算 SHA256 指纹…'],
+    [90, '等待 ssh-keygen 返回…'],
+  ]
+  let stageIdx = 0
+  const ticker = setInterval(() => {
+    if (stageIdx >= stages.length) return
+    const [p, t] = stages[stageIdx++]!
+    genProgress.value = p
+    genStatus.value = t
+  }, 420)
+
+  let info: KeyInfo
+  try {
+    info = await run
+  } catch (e) {
+    clearInterval(ticker)
+    generating.value = false
+    genProgress.value = 0
+    toast(`密钥生成失败：${String(e)}`, 'err', 4200)
+    return
+  }
+  clearInterval(ticker)
+  genProgress.value = 100
+  genStatus.value = '密钥生成完成'
+  await sleep(240)
+
   const hostsList = parseListInput(genHosts.value)
-  // TODO: 接入 Tauri 后端后改为调用 ssh-keygen 并读取真实公钥/指纹
   const created: Omit<SshKey, 'id'> = {
     name,
-    type,
-    bits,
-    comment,
-    fingerprint: randomFingerprint(),
-    publicKey: randomPublicKey(type),
-    privatePath:
-      '~/.ssh/id_' +
-      (type === 'ED25519' ? 'ed25519' : type === 'RSA' ? 'rsa' : 'ecdsa') +
-      '_' + keySlug(name),
+    type: info.keyType as KeyType,
+    bits: info.bits,
+    comment: info.comment,
+    fingerprint: info.fingerprint,
+    // 后端返回的就是 id_x.pub 的整行（含 comment），可直接作为 authorized_keys 内容
+    publicKey: info.publicKey,
+    privatePath: info.privateTilde ?? null,
     passphrase: genPass.value.length > 0,
     created: new Date().toISOString(),
     lastUsed: null,
@@ -149,7 +178,7 @@ async function submitGenerate() {
   closeKeyModal()
 
   if (genAutoCopy.value) {
-    const ok = await copyText(`${item.publicKey} ${comment}`)
+    const ok = await copyText(item.publicKey)
     toast(
       ok
         ? `密钥「${name}」已生成，公钥已复制${hostsList.length ? `，已关联 ${hostsList.length} 台主机` : ''}`
@@ -168,6 +197,9 @@ const impHosts = ref('')
 const impTags = ref<string[]>([])
 const impTagDraft = ref('')
 const impText = ref('')
+const impPass = ref('')
+const impPassShow = ref(false)
+const importing = ref(false)
 const impFile = ref<HTMLInputElement | null>(null)
 
 function resetImport() {
@@ -176,6 +208,9 @@ function resetImport() {
   impTags.value = []
   impTagDraft.value = ''
   impText.value = ''
+  impPass.value = ''
+  impPassShow.value = false
+  importing.value = false
   if (impFile.value) impFile.value.value = ''
 }
 
@@ -184,7 +219,8 @@ function onImpFile(e: Event) {
   if (!file) return
   const reader = new FileReader()
   reader.onload = () => {
-    impText.value = String(reader.result ?? '').slice(0, 8000)
+    // 放宽到 64KB：RSA 8192 的 PEM 约 3.3KB，留足余量；截断会让后端校验莫名失败
+    impText.value = String(reader.result ?? '').slice(0, 65536)
     if (!impName.value.trim()) {
       impName.value = file.name.replace(/\.[^.]+$/, '')
     }
@@ -193,7 +229,7 @@ function onImpFile(e: Event) {
   reader.readAsText(file)
 }
 
-function submitImport() {
+async function submitImport() {
   const text = impText.value.trim()
   if (!text) {
     toast('请粘贴或选择密钥文件', 'err')
@@ -203,27 +239,41 @@ function submitImport() {
     toast('密钥格式无法识别，请检查内容', 'err')
     return
   }
-
-  const type = detectKeyType(text)
-  const publicOnly = /^ssh-|^ecdsa-sha2-/m.test(text) && !/BEGIN/.test(text)
-  const name = impName.value.trim() || `导入的密钥`
-
-  addKey({
-    name,
-    type,
-    bits: KEY_DEFAULT_BITS[type],
-    comment: 'imported',
-    fingerprint: randomFingerprint(),
-    publicKey: publicOnly ? text.split('\n')[0]!.trim() : randomPublicKey(type),
-    privatePath: publicOnly ? null : `~/.ssh/${keySlug(name)}`,
-    passphrase: false,
-    created: new Date().toISOString(),
-    lastUsed: null,
-    hosts: parseListInput(impHosts.value),
-    tags: [...impTags.value],
-  })
-  closeKeyModal()
-  toast(`已导入密钥「${name}」`, 'ok', 2400)
+  if (importing.value) return
+  importing.value = true
+  const name = impName.value.trim() || '导入的密钥'
+  try {
+    // 后端落盘 + ssh-keygen 校验（私钥格式/口令都要过），失败直接报错不留假条目
+    const info = await invoke<KeyInfo>('ssh_key_import', {
+      input: { name, text, passphrase: impPass.value },
+    })
+    addKey({
+      name,
+      type: info.keyType as KeyType,
+      bits: info.bits,
+      comment: info.comment,
+      fingerprint: info.fingerprint,
+      publicKey: info.publicKey,
+      privatePath: info.privateTilde,
+      passphrase: impPass.value.length > 0,
+      created: new Date().toISOString(),
+      lastUsed: null,
+      hosts: parseListInput(impHosts.value),
+      tags: [...impTags.value],
+    })
+    closeKeyModal()
+    toast(
+      info.privateTilde
+        ? `已导入密钥「${name}」，私钥位于 ${info.privateTilde}`
+        : `已导入密钥「${name}」公钥`,
+      'ok',
+      3200,
+    )
+  } catch (e) {
+    toast(`导入失败：${String(e)}`, 'err', 4600)
+  } finally {
+    importing.value = false
+  }
 }
 
 /* ==================== 详情 ==================== */
@@ -508,13 +558,42 @@ const TYPE_CLS: Record<KeyType, string> = {
             ，密钥内容仅保存在本地，不会上传。
           </span>
         </div>
+
+        <div class="field">
+          <label>私钥密码短语（加密私钥必填）</label>
+          <div class="pw-wrap">
+            <input
+              v-model="impPass"
+              :type="impPassShow ? 'text' : 'password'"
+              placeholder="私钥未加密则留空"
+              spellcheck="false"
+            />
+            <button type="button" class="pw-toggle" :class="{ on: impPassShow }"
+                    :title="impPassShow ? '隐藏' : '显示'"
+                    @click="impPassShow = !impPassShow">
+              <svg v-if="impPassShow" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                <line x1="1" y1="1" x2="23" y2="23" />
+              </svg>
+              <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
+            </button>
+          </div>
+          <span class="desc">导入会把密钥写入本地 ~/.ssh/ 目录，并用 ssh-keygen 校验格式与口令。</span>
+        </div>
       </div>
 
       <div class="modal-foot">
         <span class="km-hint"><kbd>Esc</kbd> 取消</span>
         <span class="spacer"></span>
         <button type="button" class="btn ghost" @click="closeKeyModal">取消</button>
-        <button type="button" class="btn primary" @click="submitImport">导入密钥</button>
+        <button type="button" class="btn primary" :disabled="importing" @click="submitImport">
+          {{ importing ? '校验中…' : '导入密钥' }}
+        </button>
       </div>
     </div>
   </div>

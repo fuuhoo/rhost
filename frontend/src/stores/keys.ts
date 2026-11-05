@@ -206,36 +206,6 @@ export const KEY_DEFAULT_BITS: Record<KeyType, string> = {
   ECDSA: '521',
 }
 
-export function keySlug(name: string): string {
-  return (name || 'key').replace(/[^\w一-龥-]+/g, '_').slice(0, 24) || 'key'
-}
-
-function randToken(len: number): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-  let s = ''
-  for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * chars.length)]!
-  return s
-}
-
-export function randomFingerprint(): string {
-  return 'SHA256:' + randToken(43)
-}
-
-export function randomPublicKey(type: KeyType): string {
-  const prefix =
-    type === 'ED25519' ? 'ssh-ed25519'
-      : type === 'RSA' ? 'ssh-rsa'
-        : 'ecdsa-sha2-nistp521'
-  return `${prefix} ${randToken(type === 'RSA' ? 172 : 68)}`
-}
-
-/** 从粘贴文本粗略识别密钥类型 */
-export function detectKeyType(text: string): KeyType {
-  if (/ed25519/i.test(text)) return 'ED25519'
-  if (/ecdsa/i.test(text)) return 'ECDSA'
-  return 'RSA'
-}
-
 /* ==================== 展示辅助 ==================== */
 
 export function formatKeyDate(iso: string | null): string {
