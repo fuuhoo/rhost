@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://cdn.jsdelivr.net/gh/ShiJieCloud/rhost@main/docs/public/logo.svg" alt="Rhost Logo" width="160" />
+  <img src="https://cdn.jsdelivr.net/gh/fuuhoo/rhost@main/docs/public/logo.svg" alt="Rhost Logo" width="160" />
 </div>
 
 <h1 align="center">Rhost</h1>
@@ -142,7 +142,7 @@ sudo pacman -S --needed webkit2gtk-4.1 gtk3 \
 ### Clone & run in development
 
 ```bash
-git clone https://github.com/ShiJieCloud/rhost.git
+git clone https://github.com/fuuhoo/rhost.git
 cd rhost
 
 # Install frontend dependencies

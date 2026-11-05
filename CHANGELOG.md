@@ -6,6 +6,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 [中文](./CHANGELOG.zh-CN.md) · **English**
 
+## [2.1.0] - 2026-11-05
+
+This release completes the remote host workbench: the Files (SFTP) pane, server monitoring and the host list are fully built out, the terminal look (palette / fonts / background image) is fully customizable, and a global command palette with user-defined command templates is added.
+
+### Added
+
+#### Files (SFTP)
+
+- Dedicated "Files" tab with a path bar and a centered toolbar; the remote directory tree loads lazily and stays in sync with the file list; the list gains a type column and splits owner / group into two columns
+- Drag-and-drop upload (including recursive folder upload) and recursive directory download
+- Permission dialog: three scopes × read / write / execute checkboxes with a live octal and rwx preview
+- Open remote files in an external editor and write changes back on save, with batch editing; editors can be picked from the system or specified by path
+- Transfer ledger and a floating transfer-records popover: progress, speed, pause / resume, retry on failure and "open directory"
+- Configurable transfer behaviour: chunk size, resume check and post-completion hash verification, global / per-host concurrency, global and per-task rate limits, retry count and interval, session idle timeout, overwrite policy, metadata preservation, file blacklist and hidden-file display
+
+#### Terminal appearance
+
+- Terminal palettes expanded to multiple schemes × light / dark (follow the UI / always dark / always light), default deep blue
+- Background images from built-in wallpapers or local files, with opacity, blur and an average-colour wash underneath
+- Bundled monospace fonts DejaVu Sans Mono / Liberation Mono / JetBrains Mono (300–700) with their licences, CJK glyphs resolved through an explicit fallback chain; defaults are 14px, line height 1.25 and a block cursor
+
+#### Productivity
+
+- Global command palette (⌘K): built-in commands plus user-defined "command templates" maintained in Settings → Command Templates; selecting one writes it into the active terminal and executes it, with multi-line commands submitted as a bracketed paste
+- Shortcuts settings page: click any binding to re-record, Esc cancels, remapping takes effect immediately
+- New blank terminal window: double-clicking a host connects into that window
+
+#### Connectivity and integration
+
+- External bastion connections: parse external links to open a new local session, support single-channel / SFTP-only sessions, keep passwords in memory only
+- SSH key management now generates real keys via ssh-keygen (ED25519 / RSA / ECDSA) with fingerprints and metadata stored
+- Host metrics collection and monitoring pane: CPU / memory / network / disk / processes / GPU, collection interval configurable (2s by default)
+- Tunnels disconnect automatically on idle timeout
+- Session log entry point added; demo mock host data removed
+
+### Changed
+
+- Layout swapped left / right: the monitoring pane moves to the left rail and the host list joins the right-hand tabs; the legacy Inspector and sidebar components are removed
+- The connection panel (MOTD) no longer shows this application's branding and keeps only server status
+- Echo of injected commands is stripped locally by content, removing the duplicated echo in prompts
+- On narrow windows (≤1180px) the right rail becomes an overlay so the host list stays reachable
+
+### Fixed
+
+- Terminal background image not visible: class name clashed with the xterm root element, and the instance backdrop covered the image layer
+- The Save button stayed disabled after changing a background image or toggling an inline switch: dirty detection missed settings without their own row
+- Font preview now uses the terminal background colour and correctly overlays the background image
+- The title bar notification button no longer shows a fake toast; real notifications are used instead
+
 ## [2.0.0] - 2026-10-15
 
 This release is centered on **a full AI assistant**: Rhost evolves from a pure SSH terminal manager into a remote host workbench with a built-in AI assistant, supporting conversational terminal operations, Plan-and-Act task planning and multimodal input.
@@ -66,5 +115,5 @@ First public release: a cross-platform SSH remote host manager built with Tauri 
 
 - Fixed a remote prompt missing the username
 
-[2.0.0]: https://github.com/ShiJieCloud/rhost/compare/v1.0.0...v2.0.0
-[1.0.0]: https://github.com/ShiJieCloud/rhost/releases/tag/v1.0.0
+[2.0.0]: https://github.com/fuuhoo/rhost/compare/v1.0.0...v2.0.0
+[1.0.0]: https://github.com/fuuhoo/rhost/releases/tag/v1.0.0
