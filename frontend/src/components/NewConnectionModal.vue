@@ -3,10 +3,11 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { invoke } from '@tauri-apps/api/core'
 import { toast } from '../composables/useToast'
 import { confirmDialog, confirmState } from '../composables/useConfirm'
+import { confirmHostKey, parseHostKeyError } from '../composables/useHostKeyPrompt'
 import { copyText } from '../stores/keys'
 import { addHost, editingHost, showNewConn, updateHost } from '../stores/hosts'
 import { rehostSession } from '../stores/session'
-import { GROUP_OPTIONS } from '../data/mockHosts'
+import { allGroups, lastAddedGroup, openGroupModal } from '../stores/groups'
 import { isTauri } from '../lib/tauri'
 import type { HostColor, TunnelRule, TunnelType } from '../types'
 
@@ -65,7 +66,15 @@ const TYPES: { v: ConnType; t: string; icon: string; sub: string }[] = [
   { v: 'telnet', t: 'Telnet', icon: 'telnet', sub: 'Telnet 网络设备连接' },
 ]
 
-const GROUP_OPTS: FieldOption[] = GROUP_OPTIONS.map(g => ({ v: g, t: g }))
+/** 分组下拉里的哨兵项：选中即打开新建分组弹窗，本身不作为分组值保存 */
+const GROUP_SENTINEL = '+ 新建分组…'
+/** 分组下拉选项：真实分组（含由主机引入的未登记分组）+ 新建哨兵 */
+const groupOpts = computed<FieldOption[]>(() => [
+  ...allGroups.value.map(g => ({ v: g.name, t: g.name })),
+  { v: GROUP_SENTINEL, t: GROUP_SENTINEL },
+])
+/** 无分组可选时的兜底分组名 */
+const GROUP_FALLBACK = '默认'
 
 /* =========================================================
    端口转发（隧道规则）
@@ -105,7 +114,7 @@ const FORMS: Record<ConnType, { cards: CardDef[] }> = {
           .filter(Boolean).join(' · '),
         fields: [
           { label: '名称', name: 'name', span: 1, placeholder: '留空自动生成' },
-          { label: '分组', name: 'group', span: 1, type: 'select', value: GROUP_OPTIONS[0], options: GROUP_OPTS },
+          { label: '分组', name: 'group', span: 1, type: 'select', get options() { return groupOpts.value } },
           { label: '主机地址', name: 'host', span: 2, required: true, placeholder: '192.168.1.10 或 example.com' },
           { label: '端口', name: 'port', span: 1, required: true, value: '22', type: 'number' },
           { label: '用户名', name: 'user', span: 1, required: true, placeholder: 'root' },
@@ -224,7 +233,7 @@ const FORMS: Record<ConnType, { cards: CardDef[] }> = {
           .filter(Boolean).join(' · '),
         fields: [
           { label: '名称', name: 'name', span: 1, placeholder: '留空自动生成' },
-          { label: '分组', name: 'group', span: 1, type: 'select', value: GROUP_OPTIONS[0], options: GROUP_OPTS },
+          { label: '分组', name: 'group', span: 1, type: 'select', get options() { return groupOpts.value } },
           { label: '主机地址', name: 'host', span: 2, required: true, placeholder: '192.168.1.10 或 example.com' },
           { label: '端口', name: 'port', span: 1, required: true, value: '22', type: 'number' },
           { label: '用户名', name: 'user', span: 1, required: true, placeholder: 'root' },
@@ -334,7 +343,7 @@ const FORMS: Record<ConnType, { cards: CardDef[] }> = {
         summary: v => [v.name, v.shell].filter(Boolean).join(' · '),
         fields: [
           { label: '名称', name: 'name', span: 1, placeholder: '可选' },
-          { label: '分组', name: 'group', span: 1, type: 'select', value: GROUP_OPTIONS[2], options: GROUP_OPTS },
+          { label: '分组', name: 'group', span: 1, type: 'select', get options() { return groupOpts.value } },
           { label: 'Shell', name: 'shell', span: 1, required: true, type: 'select', value: '/bin/zsh',
             options: [
               { v: '/bin/zsh', t: 'Zsh' },
@@ -370,7 +379,7 @@ const FORMS: Record<ConnType, { cards: CardDef[] }> = {
         summary: v => [v.name, v.device].filter(Boolean).join(' · '),
         fields: [
           { label: '名称', name: 'name', span: 1, placeholder: '可选' },
-          { label: '分组', name: 'group', span: 1, type: 'select', value: GROUP_OPTIONS[0], options: GROUP_OPTS },
+          { label: '分组', name: 'group', span: 1, type: 'select', get options() { return groupOpts.value } },
           { label: '串口设备', name: 'device', span: 2, required: true,
             placeholder: '/dev/ttyUSB0 或 COM3',
             hint: 'Linux/macOS：/dev/tty*；Windows：COMx' },
@@ -435,7 +444,7 @@ const FORMS: Record<ConnType, { cards: CardDef[] }> = {
         summary: v => [v.name, v.container].filter(Boolean).join(' · '),
         fields: [
           { label: '名称', name: 'name', span: 1, placeholder: '可选' },
-          { label: '分组', name: 'group', span: 1, type: 'select', value: GROUP_OPTIONS[0], options: GROUP_OPTS },
+          { label: '分组', name: 'group', span: 1, type: 'select', get options() { return groupOpts.value } },
           { label: '容器', name: 'container', span: 2, required: true,
             placeholder: '容器名或 ID，如 nginx-prod',
             hint: '支持模糊匹配' },
@@ -471,7 +480,7 @@ const FORMS: Record<ConnType, { cards: CardDef[] }> = {
           .filter(Boolean).join(' · '),
         fields: [
           { label: '名称', name: 'name', span: 1, placeholder: '可选' },
-          { label: '分组', name: 'group', span: 1, type: 'select', value: GROUP_OPTIONS[0], options: GROUP_OPTS },
+          { label: '分组', name: 'group', span: 1, type: 'select', get options() { return groupOpts.value } },
           { label: '主机地址', name: 'host', span: 1, required: true, placeholder: '192.168.1.1' },
           { label: '端口', name: 'port', span: 1, required: true, value: '23', type: 'number' },
           { label: '标签', name: 'tags', span: 2, type: 'tags',
@@ -525,7 +534,14 @@ const typeSub = computed(() => TYPES.find(t => t.v === currentType.value)?.sub ?
 
 function initType(t: ConnType) {
   const data: Values = {}
-  FORMS[t].cards.forEach(c => c.fields.forEach(f => { data[f.name] = f.value ?? '' }))
+  FORMS[t].cards.forEach(c => c.fields.forEach(f => {
+    // 分组默认取当前第一个真实分组（列表是动态的，不能用编译期常量）
+    if (f.name === 'group') {
+      data[f.name] = allGroups.value[0]?.name ?? GROUP_FALLBACK
+      return
+    }
+    data[f.name] = f.value ?? ''
+  }))
   formData[t] = data
 }
 TYPES.forEach(t => initType(t.v))
@@ -553,7 +569,7 @@ watch(showNewConn, async v => {
     d.user = h.user
     d.host = h.ip
     d.port = String(h.port)
-    d.group = GROUP_OPTIONS.includes(h.group) ? h.group : GROUP_OPTIONS[0]
+    d.group = allGroups.value.some(g => g.name === h.group) ? h.group : (allGroups.value[0]?.name ?? GROUP_FALLBACK)
     // 新建时的兜底标记不回填为用户标签
     d.tags = h.tag === '新建' || h.tag === 'SFTP' ? '' : h.tag
     // 回填认证方式与密码：优先内存缓存，否则按需从钥匙串读取
@@ -638,10 +654,22 @@ function selectCard(id: string) {
 }
 
 function setField(name: string, val: string) {
+  // 分组下拉选中「+ 新建分组…」：打开真实的分组编辑弹窗，原值保持不变
+  if (name === 'group' && val === GROUP_SENTINEL) {
+    openGroupModal()
+    return
+  }
   values.value[name] = val
   delete fieldErrors[`${currentType.value}.${name}`]
   testResult.value = null
 }
+
+// 从分组弹窗新建完分组，回到本弹窗时自动选中它
+watch(lastAddedGroup, n => {
+  if (!n || !showNewConn.value) return
+  values.value.group = n
+  lastAddedGroup.value = null
+})
 
 /* ---- 标签（chips）输入：值以逗号分隔存入 Values ---- */
 const tagDraft = ref('')
@@ -1007,19 +1035,51 @@ async function testConnection() {
   if (canRealTest) {
     const port = parseInt(v.port, 10) || 22
     const target = `${v.user}@${v.host}:${port}`
+    // 主机密钥 TOFU 两阶段（与 QuickConnectView 门禁一致）：
+    // 首连返回 HOSTKEY_UNKNOWN/MISMATCH → 弹指纹确认 → 带确认指纹重试
+    let trust = false
+    let trustFp: string | undefined
+    let persist = true
     try {
-      const res = await invoke<{ latencyMs: number }>('test_ssh_connection', {
-        payload: {
-          host: v.host,
-          port,
-          username: v.user,
-          password: v.password,
-          cols: 0,
-          rows: 0,
-        },
-      })
-      testResult.value = { kind: 'ok', text: `连接成功 · ${target} · ${res.latencyMs}ms` }
-      toast(`测试成功 · ${target} · ${res.latencyMs}ms`, 'ok', 2200)
+      for (;;) {
+        try {
+          const res = await invoke<{ latencyMs: number }>('test_ssh_connection', {
+            payload: {
+              host: v.host,
+              port,
+              username: v.user,
+              password: v.password,
+              cols: 0,
+              rows: 0,
+              trustHostKey: trust,
+              trustFingerprint: trustFp,
+              trustHostKeyPersist: persist,
+            },
+          })
+          testResult.value = { kind: 'ok', text: `连接成功 · ${target} · ${res.latencyMs}ms` }
+          toast(`测试成功 · ${target} · ${res.latencyMs}ms`, 'ok', 2200)
+          return
+        } catch (e) {
+          const msg = String(e)
+          const hk = parseHostKeyError(msg)
+          if (!hk) throw e
+          const action = await confirmHostKey({
+            kind: hk.kind,
+            host: v.host,
+            port,
+            algo: hk.algo,
+            fingerprint: hk.fingerprint,
+            pubkey: hk.pubkey,
+          })
+          if (action === 'reject') {
+            testResult.value = { kind: 'err', text: '已取消：未信任该主机指纹' }
+            return
+          }
+          trust = true
+          trustFp = hk.fingerprint
+          persist = action !== 'once'
+        }
+      }
     } catch (e) {
       testResult.value = { kind: 'err', text: `连接失败：${String(e)}` }
       toast(`连接失败：${String(e)}`, 'err', 2800)
@@ -1071,10 +1131,6 @@ async function save() {
   }
 
   const v = { ...values.value }
-  if (v.group === '+ 新建分组…') {
-    toast('分组创建功能开发中', 'warn')
-    return
-  }
   if (!v.name?.trim()) v.name = autoName(v)
 
   saving.value = true
@@ -1109,7 +1165,7 @@ async function save() {
       port: parseInt(v.port, 10) || 22,
       label,
       tag: tagVal,
-      group: v.group || GROUP_OPTIONS[0],
+      group: v.group || GROUP_FALLBACK,
       keyPath: v.auth === 'key' ? v.keyfile : undefined,
       tunnels: connType === 'ssh' ? tunnelsVal : undefined,
       keepalive: keepaliveVal,
@@ -1143,7 +1199,7 @@ async function save() {
       cpu: '—',
       mem: '—',
       uptime: '—',
-      group: v.group || GROUP_OPTIONS[0],
+      group: v.group || GROUP_FALLBACK,
       keyPath: v.auth === 'key' ? v.keyfile : undefined,
       tunnels: isSftp ? undefined : tunnelsVal,
       keepalive: keepaliveVal,

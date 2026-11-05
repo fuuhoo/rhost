@@ -1,6 +1,10 @@
 import type { Host, HostColor } from '../types'
 
-/** TODO: 接入后端后由 invoke('list_hosts') 替换 */
+/**
+ * 纯浏览器开发（`npm run dev` 不带 Tauri）时的主机列表种子：此时没有 IPC，
+ * stores/hosts.ts 会用它填充首页，方便脱离原生壳调试界面。
+ * Tauri 环境下不生效——主机数据一律走持久化存储与 invoke 通道。
+ */
 export const MOCK_HOSTS: Host[] = [
   {
     id: 'web-prod-01', user: 'root', ip: '192.168.1.101', port: 22,
@@ -55,5 +59,3 @@ export const STYLE_LABELS = {
   grid: '网格视图',
   compact: '紧凑视图',
 } as const
-
-export const GROUP_OPTIONS = ['生产环境', '测试环境', '开发环境', '其他', '+ 新建分组…']
