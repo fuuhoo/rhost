@@ -323,7 +323,10 @@ pub fn build_host_info(raw: &HashMap<String, String>) -> HostInfo {
 /// 再逐行输出每个进程的原始 /proc/pid/stat（CPU 差值需每轮连续快照）。
 const METRICS_SCRIPT_BASE: &str = "echo @@STAT@@\nhead -n 1 /proc/stat 2>/dev/null\necho @@LOAD@@\ncat /proc/loadavg 2>/dev/null\necho @@MEM@@\ncat /proc/meminfo 2>/dev/null\necho @@NET@@\ncat /proc/net/dev 2>/dev/null\necho @@PROC@@\ngetconf CLK_TCK 2>/dev/null\ngetconf PAGESIZE 2>/dev/null\nfor p in /proc/[0-9]*; do read -r s < \"$p/stat\" 2>/dev/null && echo \"$s\"; done\n";
 /// 磁盘低频段：每 [`DISK_INTERVAL_ROUNDS`] 轮夹带一次（df 需枚举挂载点，开销略高）。
-const DISK_SCRIPT_SECTION: &str = "echo @@DISK@@\ndf -Pk 2>/dev/null\n";
+/// df 段脚本：优先 `df -PkT`（GNU/busybox 支持额外输出文件系统类型列，
+/// FinalShell 磁盘表同款信息）；macOS/BSD 的 df 无 -T 会整体失败，
+/// `||` 回落到纯 `df -Pk`（解析端兼容两种列布局）。
+const DISK_SCRIPT_SECTION: &str = "echo @@DISK@@\ndf -PkT 2>/dev/null || df -Pk 2>/dev/null\n";
 /// GPU 段：nvidia-smi 每张卡输出一行 CSV（noheader/nounits），字段顺序固定 8 列：
 /// index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit。
 /// 仅 collector 静态探测确认有 GPU 的主机才每轮夹带；无卡/无命令主机探测一次后永久跳过
@@ -524,11 +527,14 @@ pub(crate) fn byte_rate(prev: u64, cur: u64, dt: Duration) -> f64 {
 /// 首帧（第 0 轮）无条件采一次，面板打开即有磁盘数据。
 pub(crate) const DISK_INTERVAL_ROUNDS: u32 = 10;
 
-/// 单个挂载点磁盘用量（字节），取自 `df -Pk` 行；百分比由后端按 used/total 算好。
+/// 单个挂载点磁盘用量（字节），取自 `df -PkT`/`df -Pk` 行；百分比由后端按 used/total 算好。
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub(crate) struct DiskMetrics {
     /// 挂载点（POSIX `-P` 保证其位于行尾，允许含空格）
     pub mount: String,
+    /// 文件系统类型（ext4/xfs/overlay/tmpfs…，FinalShell 磁盘表同款列）；
+    /// df 不支持 -T 时为空串，前端不展示
+    pub fs: String,
     /// 总容量（字节）
     pub total: u64,
     /// 已用（字节）
@@ -539,17 +545,16 @@ pub(crate) struct DiskMetrics {
     pub pct: u8,
 }
 
-/// df 第一列中纯内存/内核伪文件系统：无真实磁盘介质，监控无意义。
-/// overlay/真实块设备（/dev/*）不在此列，必须保留。
+/// df 第一列中纯内核伪文件系统：监控无意义。overlay/真实块设备（/dev/*）不在此列。
+/// tmpfs/devtmpfs/none 刻意不滤：它们有真实容量（/dev/shm、/run、udev），
+/// FinalShell 的磁盘表按「全挂载点列表」展示，滤掉它们正是「比 FinalShell 少很多」
+/// 的主因之一；proc/sysfs/cgroup 等零容量伪 fs 由 total==0 兜底滤除。
 const PSEUDO_FS: &[&str] = &[
-    "tmpfs",
-    "devtmpfs",
     "sysfs",
     "proc",
     "cgroup",
     "cgroup2",
     "mqueue",
-    "shm",
     "devpts",
     "securityfs",
     "pstore",
@@ -566,7 +571,6 @@ const PSEUDO_FS: &[&str] = &[
     "selinuxfs",
     "bpf",
     "efivarfs",
-    "none",
 ];
 
 /// Docker/容器运行时注入的单文件 bind 挂载：df 里表现为独立条目，
@@ -582,24 +586,31 @@ fn mount_depth(mount: &str) -> usize {
 }
 
 impl DiskMetrics {
-    /// 解析一行 `df -Pk` 输出：
-    /// `Filesystem 1024-blocks Used Available Capacity Mounted on`
-    /// 表头/残缺行/伪 fs/黑名单挂载点返回 None；数值 kB 换算为字节。
+    /// 解析一行 df 输出（兼容两种列布局，表头/残缺行/伪 fs/黑名单挂载点返回 None）：
+    /// - `df -Pk`：  `Filesystem 1024-blocks Used Available Capacity Mounted on`（6 列）
+    /// - `df -PkT`：`Filesystem Type 1024-blocks Used Available Capacity Mounted on`（7 列）
+    /// 数值 kB 换算为字节。
     fn parse_df_line(line: &str) -> Option<Self> {
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() < 6 {
             return None;
         }
-        let device = fields[0];
+        // -PkT 比 -Pk 多一个 Type 列：判定依据是第 2 列非数字且第 3 列为数字
+        //（6 列布局第 2 列必为数字；Type 恒非数字，ext4/xfs/overlay/tmpfs…）
+        let (device, fs, rest) = match fields[1].parse::<u64>() {
+            Err(_) if fields[2].parse::<u64>().is_ok() => (fields[0], fields[1], &fields[2..]),
+            _ => (fields[0], "", &fields[1..]),
+        };
         if PSEUDO_FS.contains(&device) {
             return None;
         }
         // 表头与非数字行自然在此过滤
-        let total_kb: u64 = fields[1].parse().ok()?;
-        let used_kb: u64 = fields[2].parse().ok()?;
-        let avail_kb: u64 = fields[3].parse().ok()?;
-        // POSIX -P：挂载点恒在行尾（第 6 列起，含空格时占多列）
-        let mount = fields[5..].join(" ");
+        let total_kb: u64 = rest[0].parse().ok()?;
+        let used_kb: u64 = rest[1].parse().ok()?;
+        let avail_kb: u64 = rest[2].parse().ok()?;
+        // 数值 kB 换算为字节；rest[0..4] = total/used/avail/capacity，
+        // POSIX -P：挂载点恒在行尾（含空格时占多列）
+        let mount = rest[4..].join(" ");
         if mount.is_empty() || BIND_MOUNT_BLACKLIST.contains(&mount.as_str()) {
             return None;
         }
@@ -612,6 +623,7 @@ impl DiskMetrics {
         let pct = ((used as u128 * 100 + total as u128 / 2) / total as u128).min(100) as u8;
         Some(DiskMetrics {
             mount,
+            fs: fs.to_string(),
             total,
             used,
             available,
@@ -620,19 +632,19 @@ impl DiskMetrics {
     }
 }
 
-/// 解析 `df -Pk` 整段：过滤伪 fs/容器注入挂载，同设备或同容量三元组去重，
-/// 按挂载点由浅到深排序。overlay 与块设备 bind 挂载容量完全相同（容器常见），
-/// 后者在去重中被更浅的根分区吞并。
+/// 解析 `df -PkT`/`df -Pk` 整段：过滤内核伪 fs/容器注入挂载，重复挂载点去重，
+/// 按挂载点由浅到深排序。
+///
+/// 与 FinalShell 对齐（其磁盘表为全挂载点列表）：不再按容量三元组去重——
+/// 同容量去重会吞掉 btrfs 子卷/同规格多分区，更会把容器里每层 overlay
+/// 全部吞进根分区（FinalShell 对这些逐条展示）。零容量伪 fs 由
+/// `parse_df_line` 的 total==0 兜底滤除，表体在前端内部滚动。
 pub(crate) fn parse_disks(text: &str) -> Vec<DiskMetrics> {
     let mut disks: Vec<DiskMetrics> = Vec::new();
     for line in text.lines().skip(1) {
         // skip(1) 丢表头；行首空白不影响 split_whitespace
         if let Some(d) = DiskMetrics::parse_df_line(line)
-            && !disks.iter().any(|x| {
-                // 同设备名，或 (total,used,available) 三元组相同 → 同一底层文件系统
-                x.mount == d.mount
-                    || (x.total == d.total && x.used == d.used && x.available == d.available)
-            })
+            && !disks.iter().any(|x| x.mount == d.mount)
         {
             disks.push(d);
         }
@@ -1441,10 +1453,16 @@ mod metrics_dynamic_tests {
             "/dev/sdb1            20480    10240     10240      50% /mnt/my data\n",
         );
         let disks = parse_disks(text);
-        // tmpfs/shm 伪 fs 滤除；/etc/hosts 注入挂载滤除；
-        // overlay / 与 /dev/vdb1 /config 容量三元组相同 → 去重保留更浅的 /
+        // 全挂载点列表（与 FinalShell 对齐）：tmpfs/shm（/dev、/dev/shm，有真实容量）
+        // 保留；/etc/hosts 容器注入挂载滤除；同容量的 / 与 /config（btrfs 子卷/
+        // 同规格分区常见）不再被三元组去重吞并；重复挂载点只按路径去重
         let mounts: Vec<&str> = disks.iter().map(|d| d.mount.as_str()).collect();
-        assert_eq!(mounts, vec!["/", "/data", "/mnt/my data"]);
+        assert_eq!(
+            mounts,
+            vec![
+                "/", "/config", "/data", "/dev", "/dev/shm", "/mnt/my data", "/proc/asound"
+            ]
+        );
 
         let root = &disks[0];
         assert_eq!(root.total, 301_924_352 * 1024);
@@ -1453,13 +1471,45 @@ mod metrics_dynamic_tests {
         // 2835180/301924352 ≈ 0.94% → 四舍五入 1
         assert_eq!(root.pct, 1);
 
-        let data = &disks[1];
+        let config = &disks[1];
+        assert_eq!(config.pct, 1);
+        assert_eq!(config.total, 301_924_352 * 1024);
+
+        let data = &disks[2];
         assert_eq!(data.pct, 50);
         assert_eq!(data.total, 104_857_600 * 1024);
 
         // 挂载点含空格：-P 行尾多列正确拼回
-        assert_eq!(disks[2].mount, "/mnt/my data");
-        assert_eq!(disks[2].total, 20_480 * 1024);
+        assert_eq!(disks[5].mount, "/mnt/my data");
+        assert_eq!(disks[5].total, 20_480 * 1024);
+    }
+
+    #[test]
+    fn parse_disks_type_column() {
+        // `df -PkT`（7 列，含 Type 列；macOS/BSD 无 -T 回落 6 列，两种布局都要能解析）
+        let text = concat!(
+            "Filesystem Type 1024-blocks Used Available Capacity Mounted on\n",
+            "/dev/sda2 ext4 40890580 12345678 26440468 32% /\n",
+            "tmpfs tmpfs 8388608 0 8388608 0% /dev/shm\n",
+            "overlay overlay 40890580 12345678 26440468 32% /var/lib/docker/overlay2/x/merged\n",
+        );
+        let disks = parse_disks(text);
+        let mounts: Vec<&str> = disks.iter().map(|d| d.mount.as_str()).collect();
+        assert_eq!(mounts, vec!["/", "/dev/shm", "/var/lib/docker/overlay2/x/merged"]);
+        assert_eq!(disks[0].fs, "ext4");
+        assert_eq!(disks[0].pct, 30);
+        assert_eq!(disks[0].total, 40_890_580 * 1024);
+        assert_eq!(disks[1].fs, "tmpfs");
+        assert_eq!(disks[2].fs, "overlay");
+    }
+
+    #[test]
+    fn parse_disks_without_type_column_has_empty_fs() {
+        let text = "Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/sda1 1024 512 512 50% /\n";
+        let disks = parse_disks(text);
+        assert_eq!(disks.len(), 1);
+        assert_eq!(disks[0].fs, "");
+        assert_eq!(disks[0].mount, "/");
     }
 
     #[test]

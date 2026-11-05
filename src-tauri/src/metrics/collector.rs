@@ -4,7 +4,7 @@
 //! 生命周期：
 //! - [`spawn`] 在会话 cancel 下派生 child token，返回 [`CollectorHandle`]；
 //! - 前端每 5s 调 `metrics_heartbeat` 续约，超过 [`HEARTBEAT_TTL`] 未续约
-//!   （Inspector 隐藏/页面关闭/崩溃）采集任务自行退出；
+//!   （监控面板隐藏/页面关闭/崩溃）采集任务自行退出；
 //! - 会话 `shutdown()` 取消根 token，子任务同步取消，无任务泄漏。
 
 use std::collections::HashMap;
