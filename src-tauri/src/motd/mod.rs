@@ -1,6 +1,6 @@
 //! Rhost MOTD（Message of the Day）：SSH 认证成功后、PTY 交互 shell 启动前，
 //! 客户端经**独立 exec 子通道并行**采集服务器状态，在本地组装为渲染指令数组
-//! [`TermCmd`]，交由前端按序绘制产品化欢迎面板。
+//! [`TermCmd`]，交由前端按序绘制服务器状态面板。
 //!
 //! 阶段顺序（由 [`crate::ssh::session::SshSession::connect`] 编排）：
 //! 1. 认证成功 → 2. 并行 exec 采集 → 3. 模板占位符替换 → 4. 以 `Motd` 帧
@@ -78,7 +78,14 @@ async fn collect_parallel(handle: &mut client::Handle<ClientHandler>) -> HashMap
             "proc",
             "if [ -d /proc ]; then set -- /proc/[0-9]*; echo $#; fi",
         ),
-        ("shell", "getent passwd \"$USER\" 2>/dev/null | cut -d: -f7"),
+        // 登录 shell 供 exec 启动交互式 shell 使用（错一个字符即 127 断连），
+        // 故打 RHSH= 哨兵前缀：sshd 以「登录 shell -c」执行命令，部分镜像的
+        // shell 启动会向输出掺入 /etc/profile.d 告警（如缺 /sbin/consoletype），
+        // 无哨兵时首行可能是告警文本而非 shell 路径
+        (
+            "shell",
+            "echo \"RHSH=$(getent passwd \"$USER\" 2>/dev/null | cut -d: -f7)\"",
+        ),
         // 以下 4 项供右侧栏静态 HostInfo（0x05 帧）使用，与 MOTD 同批并行采集
         ("osrel", "cat /etc/os-release 2>/dev/null"),
         ("cores", "nproc 2>/dev/null"),
@@ -109,19 +116,28 @@ async fn collect_parallel(handle: &mut client::Handle<ClientHandler>) -> HashMap
     }
 
     // 2. 并发读取所有通道（各命令已在服务端运行，drain 互不阻塞）
+    //    stdout 才是采集值：sshd 以「登录 shell -c」执行命令，部分镜像的 shell
+    //    启动会往 stderr 掺入 /etc/profile.d 告警，两路混进同一缓冲后
+    //    「首行即系统名」这类解析会把告警当成数据
     let mut handles = Vec::with_capacity(channels.len());
     for (key, mut ch) in channels {
         handles.push(tokio::spawn(async move {
             let mut out = Vec::new();
+            let mut err = Vec::new();
             while let Some(msg) = ch.wait().await {
                 match msg {
                     ChannelMsg::Data { data } => out.extend_from_slice(&data),
-                    ChannelMsg::ExtendedData { data, .. } => out.extend_from_slice(&data),
+                    ChannelMsg::ExtendedData { data, .. } => err.extend_from_slice(&data),
                     ChannelMsg::Close => break,
                     _ => {}
                 }
             }
             let _ = ch.close().await;
+            if !err.is_empty() {
+                let text = String::from_utf8_lossy(&err);
+                let brief: String = text.chars().take(200).collect();
+                debug!("MOTD 采集 [{key}] 的 stderr（不参与解析）: {brief}");
+            }
             (key, String::from_utf8(out).unwrap_or_default())
         }));
     }
@@ -144,8 +160,8 @@ pub(crate) struct CollectOutcome {
 }
 
 /// 入口：并行采集 → 解析 → 模板替换 → 返回渲染指令数组。
-/// `custom_logo` 为用户自定义 ASCII LOGO（多行文本）；非空时替换模板内置
-/// LOGO 段（`logo: true` 标记的行），空串保留内置，任何情况下不影响状态区。
+/// `custom_logo` 为用户自定义 ASCII LOGO（多行文本）；非空时渲染在面板首段，
+/// 空串则该位置不输出任何内容（内置品牌行已移除），任何情况下不影响状态区。
 /// 任何阶段失败（超时/会话取消/采集无输出）均返回 None（静默降级）。
 pub(crate) async fn collect_and_build(
     handle: &mut client::Handle<ClientHandler>,
@@ -173,12 +189,7 @@ pub(crate) async fn collect_and_build(
         return None;
     }
 
-    let login_shell = raw
-        .get("shell")
-        .and_then(|s| s.lines().next())
-        .map(str::trim)
-        .filter(|s| s.starts_with('/'))
-        .map(str::to_string);
+    let login_shell = raw.get("shell").and_then(|s| parse_login_shell(s));
 
     let values = build_values(&raw);
     Some(CollectOutcome {
@@ -190,10 +201,26 @@ pub(crate) async fn collect_and_build(
 
 const NA: &str = "N/A";
 
+/// 是否为可信的 shell 路径：以 `/` 开头、不含空白与冒号
+/// （`/etc/profile.d/lang.sh: line 45: ...` 这类启动告警两者皆有）
+fn is_shell_path(s: &str) -> bool {
+    s.len() > 1 && s.starts_with('/') && !s.chars().any(|c| c.is_whitespace() || c == ':')
+}
+
+/// 从 `shell` 采集原始输出中取登录 shell 路径。
+/// 只认 `RHSH=` 哨兵行且值形如路径：部分镜像的 shell 启动会往输出里掺
+/// `/etc/profile.d/*.sh: line N: ...` 告警，取首行会把告警当 shell 去 exec，
+/// 得到 127 并在数十毫秒内断连。
+fn parse_login_shell(raw: &str) -> Option<String> {
+    raw.lines()
+        .filter_map(|l| l.trim().strip_prefix("RHSH="))
+        .find(|v| is_shell_path(v))
+        .map(str::to_string)
+}
+
 /// 把各命令原始输出解析为模板占位符的最终文本
 fn build_values(raw: &HashMap<String, String>) -> HashMap<String, String> {
     let mut v = HashMap::new();
-    v.insert("version".to_string(), env!("CARGO_PKG_VERSION").to_string());
 
     // uname -srm：首行空白切三段 = 系统名 / 内核版本 / 架构，缺失段各自降级 N/A
     let uname_fields: Vec<&str> = raw
@@ -461,7 +488,7 @@ const LOGO_MAX_COLS: usize = 200;
 
 /// 把用户自定义 ASCII LOGO 文本规整为渲染指令行：去掉首尾空行，
 /// 最多取 [`LOGO_MAX_LINES`] 行、单行最多 [`LOGO_MAX_COLS`] 字符；
-/// cls 统一 "brand" 复用内置 LOGO 配色。空文本返回空数组。
+/// cls 统一 "brand" 复用面板强调色。空文本返回空数组。
 fn custom_logo_cmds(custom_logo: &str) -> Vec<TermCmd> {
     custom_logo
         .trim_matches(['\n', '\r'])
@@ -475,9 +502,19 @@ fn custom_logo_cmds(custom_logo: &str) -> Vec<TermCmd> {
         .collect()
 }
 
+/// 一条空行指令（无配色类，走前端默认 dim 色）
+fn print_line(text: &str) -> TermCmd {
+    TermCmd {
+        t: "print".to_string(),
+        text: text.to_string(),
+        cls: String::new(),
+    }
+}
+
 /// 读取编译期模板，替换占位符，输出渲染指令数组。
-/// `custom_logo` 非空时替换模板中 `logo: true` 标记的内置 LOGO 段：
-/// 自定义行插在段首位置（其余段落顺序不变）；空串保留内置 LOGO。
+/// 模板里 `logo: true` 的行是**自定义 LOGO 的插入锚点**，本身不输出内容：
+/// 内置品牌行（ASCII LOGO / Welcome 版本行）已按用户要求从终端输出里去掉，
+/// 只有传入 `custom_logo` 时才在锚点位置落下自定义行并补一个空行分隔。
 fn build_cmds(values: &HashMap<String, String>, custom_logo: &str) -> Vec<TermCmd> {
     let custom = custom_logo_cmds(custom_logo);
     match serde_json::from_str::<Vec<RawLine>>(TEMPLATE_JSON) {
@@ -485,10 +522,10 @@ fn build_cmds(values: &HashMap<String, String>, custom_logo: &str) -> Vec<TermCm
             let mut cmds = Vec::with_capacity(lines.len() + custom.len());
             let mut inserted = false;
             for l in lines {
-                // 仅在传入自定义 LOGO 时跳过内置 LOGO 行：首个位置插入自定义段
-                if l.logo && !custom.is_empty() {
-                    if !inserted {
+                if l.logo {
+                    if !custom.is_empty() && !inserted {
                         cmds.extend(custom.iter().cloned());
+                        cmds.push(print_line(""));
                         inserted = true;
                     }
                     continue;
@@ -500,7 +537,7 @@ fn build_cmds(values: &HashMap<String, String>, custom_logo: &str) -> Vec<TermCm
                 });
             }
             if !inserted {
-                cmds.extend(custom); // 防御：模板无 LOGO 段时追加（当前模板不会走到）
+                cmds.extend(custom); // 兜底：模板没留锚点时追加到末尾（当前模板恒有锚点）
             }
             cmds
         }
@@ -519,7 +556,7 @@ struct RawLine {
     text: String,
     #[serde(default)]
     cls: String,
-    /// 内置 LOGO 段标记：传入自定义 LOGO 时整段被替换
+    /// 自定义 LOGO 插入锚点标记：仅该行会被替换为用户 ASCII art
     #[serde(default)]
     logo: bool,
 }
@@ -529,9 +566,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn login_shell_ignores_shell_startup_noise() {
+        // 真实故障形态：profile.d 告警先于哨兵行入输出（首行以 / 开头，旧逻辑会误取）
+        let noisy = "/etc/profile.d/lang.sh: line 45: /sbin/consoletype: No such file or directory\nRHSH=/bin/bash\n";
+        assert_eq!(parse_login_shell(noisy).as_deref(), Some("/bin/bash"));
+        // 干净输出
+        assert_eq!(parse_login_shell("RHSH=/usr/bin/fish").as_deref(), Some("/usr/bin/fish"));
+        // 无哨兵 / 值为空 / 值不像路径 → 一律 None，交回标准 shell 请求
+        assert_eq!(parse_login_shell("/bin/bash\n"), None);
+        assert_eq!(parse_login_shell("RHSH=").as_deref(), None);
+        assert_eq!(parse_login_shell("RHSH=/bin/sh; rm -rf /").as_deref(), None);
+    }
+
+    #[test]
     fn template_parses_and_substitutes() {
         let mut v = HashMap::new();
-        v.insert("version".to_string(), "0.1.0".into());
         v.insert("os".to_string(), "Linux".into());
         v.insert("kernel".to_string(), "6.8.0".into());
         v.insert("arch".to_string(), "x86_64".into());
@@ -547,56 +596,60 @@ mod tests {
             "Wed Oct 1 14:23:01 +0000 2025".into(),
         );
 
+        // 锚点行不产出内容，面板只剩五行服务器状态
         let cmds = build_cmds(&v, "");
-        assert!(cmds.len() > 10);
+        assert_eq!(cmds.len(), 5);
         let text_all = cmds
             .iter()
             .map(|c| c.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text_all.contains("Rhost 0.1.0"));
-        assert!(text_all.contains("(Linux 6.8.0 x86_64)"));
+        assert!(text_all.contains("Wed Oct 1 14:23:01 +0000 2025"));
         assert!(text_all.contains("23% of 7.8Gi"));
+        assert!(text_all.contains("192.168.1.1"));
+    }
+
+    /// 连接面板只讲服务器：模板不得再出现本软件名/欢迎语/版权等品牌行
+    /// （历史上内嵌过 ASCII LOGO 与 `Welcome to Rhost {version}`，用户要求去掉）
+    #[test]
+    fn template_carries_no_app_branding() {
+        let low = TEMPLATE_JSON.to_lowercase();
+        for banned in ["rhost", "welcome", "copyright", "license", "author", "apache"] {
+            assert!(!low.contains(banned), "MOTD 模板含本软件信息 {banned:?}");
+        }
     }
 
     #[test]
-    fn custom_logo_replaces_builtin_and_keeps_layout() {
+    fn custom_logo_inserts_at_anchor_and_keeps_status() {
         let v: HashMap<String, String> = build_values(&HashMap::new());
 
-        // 空自定义：内置 LOGO 原样保留
-        let builtin = build_cmds(&v, "");
-        assert!(builtin.iter().any(|c| c.text.contains("____")));
+        // 空自定义：锚点不输出，面板里没有 brand 配色的品牌行
+        let plain = build_cmds(&v, "");
+        assert_eq!(plain.iter().filter(|c| c.cls == "brand").count(), 0);
 
-        // 非空自定义：内置 5 行 LOGO 整段消失，自定义行插在 LOGO 段位置
+        // 非空自定义：插在锚点位置（面板首段），段后补一个空行分隔状态区
         let cmds = build_cmds(&v, "MY LOGO\nLINE2");
-        assert!(!cmds.iter().any(|c| c.text.contains("____")));
-        let idx = cmds
-            .iter()
-            .position(|c| c.text == "MY LOGO")
-            .expect("自定义 LOGO 首行应存在");
-        assert_eq!(cmds[idx].cls, "brand");
-        assert_eq!(cmds[idx + 1].text, "LINE2");
-        // LOGO 段后紧跟空行 + Welcome 行，其余布局不受影响
-        assert_eq!(cmds[idx + 2].text, "");
-        assert!(cmds[idx + 3].text.contains("Welcome to Rhost"));
+        assert_eq!(cmds[0].text, "MY LOGO");
+        assert_eq!(cmds[0].cls, "brand");
+        assert_eq!(cmds[1].text, "LINE2");
+        assert_eq!(cmds[2].text, "");
+        assert!(cmds[3].text.contains("Last login"));
+        assert_eq!(cmds.len(), 8);
     }
 
     #[test]
     fn custom_logo_caps_lines_and_width() {
         let v = HashMap::new();
-        // 超行数截断到 30 行，且后续布局完整（空行 + Welcome）
+        // 超行数截断到 30 行，且后续布局完整（分隔空行 + 状态区）
         let long = (0..40)
             .map(|i| format!("L{i}"))
             .collect::<Vec<_>>()
             .join("\n");
         let cmds = build_cmds(&v, &long);
-        let pos = cmds
-            .iter()
-            .position(|c| c.text == "L0")
-            .expect("自定义首行应存在");
-        assert_eq!(cmds[pos + 29].text, "L29");
-        assert_eq!(cmds[pos + 30].text, "");
-        assert!(cmds[pos + 31].text.contains("Welcome to Rhost"));
+        assert_eq!(cmds[0].text, "L0");
+        assert_eq!(cmds[29].text, "L29");
+        assert_eq!(cmds[30].text, "");
+        assert!(cmds[31].text.contains("Last login"));
 
         // 超宽单行截断到 200 字符
         let wide = "X".repeat(300);
@@ -608,7 +661,7 @@ mod tests {
     fn template_two_column_values_aligned() {
         let lines: Vec<RawLine> = serde_json::from_str(TEMPLATE_JSON).expect("模板可解析");
         // 四行双列布局：以右列字段名（users/ip/proc/uptime）精确识别，
-        // 不能用占位符数量（Welcome 行有 version/os/kernel/arch 四个）
+        // 不能用占位符数量（同一行含左右两个占位符）
         let right_fields = ["{users}", "{ip}", "{proc}", "{uptime}"];
         let two_col = lines
             .iter()
