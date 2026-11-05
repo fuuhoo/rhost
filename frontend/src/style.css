@@ -151,6 +151,50 @@ html[data-theme="light"] .sftp-task.running{--fill:linear-gradient(90deg,#1d4ed8
 html[data-theme="light"] .sftp-task.paused{--fill:linear-gradient(90deg,#b45309,#d97706)}
 html[data-theme="light"] .sftp-task.error{--fill:linear-gradient(90deg,#b91c1c,#dc2626)}
 html[data-theme="light"] .sftp-task.success{--fill:linear-gradient(90deg,#15803d,#22c55e)}
+/* 文件区浅色主题还原截图（FinalShell）色调：白底 + 浅灰表头条 + 浅灰斑马 + 浅蓝选中；
+   深色主题用等效色板，不刺眼 */
+html[data-theme="light"] .sftp-main,
+html[data-theme="light"] .pane{background:#fff}
+html[data-theme="light"] .list-header{background:#eceef2}
+html[data-theme="light"] .row:nth-child(even){background:#f5f7fa}
+html[data-theme="light"] .row:hover{background:#eef3fb}
+html[data-theme="light"] .row.selected{background:#dcebfb}
+html[data-theme="light"] .file-tree{background:#fff}
+html[data-theme="light"] .tree-row.active{background:#dcebfb}
+html[data-theme="light"] .row-icon{fill:#cfd6df}
+html[data-theme="light"] .row-kind,
+html[data-theme="light"] .row-size,
+html[data-theme="light"] .row-time,
+html[data-theme="light"] .row-perm,
+html[data-theme="light"] .row-user,
+html[data-theme="light"] .row-group{color:#7d8898}
+/* —— 左侧监控面板浅色还原截图（FinalShell）色调 —— */
+html[data-theme="light"] .ri-bar .track{background:#fff;border-color:#d9dee6}
+html[data-theme="light"] .ri-bar .fill{opacity:.85}
+html[data-theme="light"] .ri-proc-head{background:#5b9bd5}
+html[data-theme="light"] .ri-proc-row:nth-child(even){background:#eaf3fb}
+html[data-theme="light"] .ri-tbl-head{background:#eceef2}
+html[data-theme="light"] .ri-tbl-row .sbar{background:#bfe9d8}
+html[data-theme="light"] .ri-sys-btn{background:#e9f0f8;border-color:#c9d8ea;color:#2c3a4d}
+html[data-theme="light"] .ri-sys-btn:hover{border-color:#9fbcd9;color:#16233a}
+html[data-theme="light"] .ri-sys-btn.on{background:#dbe7f5;color:#16233a}
+html[data-theme="light"] .ri-rate.up{color:#d97706}
+html[data-theme="light"] .ri-rate.down{color:#16a34a}
+html[data-theme="light"] .ri-text .k,
+html[data-theme="light"] .ri-addr .k{color:#101820}
+html[data-theme="light"] .ri-text .v{color:#101820}
+html[data-theme="light"] .ri-chart{background:#fff;border-color:#e2e8f0}
+html[data-theme="light"] .ri-proc{background:#fff;border-color:#e2e8f0}
+html[data-theme="light"] .ri-chart-top .ri-iface{color:#7d8898}
+/* —— 窗口标签条浅色还原截图（FinalShell）色调：浅灰条 + 白色圆角胶囊标签 —— */
+html[data-theme="light"] .tabs-bar{background:#eeeeef}
+html[data-theme="light"] .tab{background:#f7f7f8;border-color:#dcdce0;color:#4a4a52}
+html[data-theme="light"] .tab.active{background:#ffffff;border-color:#d4d4da;color:#1c1c22;box-shadow:0 1px 2px rgba(0,0,0,.08),inset 0 -2px 0 #3b82f6}
+html[data-theme="light"] .tab:hover{background:#ffffff}
+html[data-theme="light"] .tab .close{color:#8a8a93}
+html[data-theme="light"] .tab .close:hover{background:#e4e4e8;color:#dc3d5c}
+html[data-theme="light"] .dot.online{background:#22c55e;box-shadow:none;animation:none}
+html[data-theme="light"] .dot.st-ok{background:#22c55e;box-shadow:none;animation:none}
 html[data-theme="light"] .log-row.WARN .log-msg{color:var(--yellow)}
 html[data-theme="light"] .log-row.ERROR .log-msg{color:var(--red)}
 html[data-theme="light"] .qc-chip.err .v{color:var(--red)}
@@ -1456,8 +1500,8 @@ body{
 /* ---- 工作区 ---- */
 .workspace{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
 .tabs-bar{
-    height:40px;flex-shrink:0;display:flex;align-items:stretch;
-    background:var(--glass-panel);border-bottom:1px solid var(--border);
+    height:36px;flex-shrink:0;display:flex;align-items:stretch;
+    background:var(--panel);border-bottom:1px solid var(--border);
     position:relative;
 }
 /* 视窗包装层：滚动容器的 flex 占位父级 */
@@ -1477,8 +1521,8 @@ body{
    自然溢出容器，scrollWidth 包含溢出部分，横向滚动照常工作。
    min-width:100% 保证标签很少时仍撑满视窗，空白区可右键。 */
 .tabs-track{
-    display:flex;align-items:stretch;height:100%;
-    width:100%;min-width:100%;
+    display:flex;align-items:center;gap:4px;height:100%;
+    width:100%;min-width:100%;padding:0 6px;box-sizing:border-box;
 }
 /* 横/纵滚动条都彻底隐藏：横向滚动（shift+滚轮/触控板）功能保留 */
 .tabs-scroll::-webkit-scrollbar{height:0;width:0}
@@ -1498,14 +1542,15 @@ body{
 .tab-arrow.show:hover{background:var(--hover);color:var(--text)}
 .tab-arrow.show[aria-disabled="true"]{opacity:.35;pointer-events:none}
 .tab{
-    display:flex;align-items:center;gap:8px;
-    padding:0 11px;
+    display:flex;align-items:center;gap:7px;
+    height:26px;padding:0 10px;
     /* Chrome 风格压缩：基准宽 190px 不 grow（少标签时左对齐不留拉伸）；
        总宽溢出视窗时 flex-shrink 平分收缩，下限 90px；到下限后停止收缩、
        溢出转横向滚动。宽度随视窗几何实时变化，无需 JS 参与。 */
     flex:0 1 auto;width:190px;min-width:90px;max-width:190px;
-    border-right:1px solid var(--border);
-    color:var(--muted);font-size:11.5px;cursor:pointer;
+    border:1px solid var(--border);border-radius:6px;
+    background:var(--veil-weak);
+    color:var(--muted);font-size:12px;cursor:pointer;
     /* width 不参与过渡：激活/失活时宽度即时变化（90↔190）。
        若给 width 加过渡，宽度插值动画会与 ensureVisible 的 smooth
        滚动并行，动画期间 scrollWidth/几何逐帧漂移，滚动目标被干扰、
@@ -1514,7 +1559,7 @@ body{
     position:relative;
 }
 .tab:hover{color:var(--text);background:var(--hover)}
-.tab.active{color:var(--text);background:var(--bg);box-shadow:inset 0 -2px 0 var(--green);
+.tab.active{color:var(--text-strong);background:var(--panel-2);border-color:var(--border-strong);box-shadow:inset 0 -2px 0 var(--blue);
     /* 激活标签不参与压缩：溢出时只收缩非激活标签，激活标签恒为 190px */
     flex-shrink:0;}
 /* 标签尾部加号：新建连接，紧随最后一个标签（FinalShell 同款位置）。
@@ -2063,8 +2108,8 @@ body{
 .tree-twisty svg{width:10px;height:10px;transition:transform .12s}
 .tree-twisty.open svg{transform:rotate(90deg)}
 .tree-icon{
-    width:12px;height:12px;flex-shrink:0;
-    stroke:var(--blue);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;
+    width:13px;height:13px;flex-shrink:0;
+    stroke:none;
 }
 .tree-name{overflow:hidden;text-overflow:ellipsis}
 .tree-empty{padding:14px 10px;font-size:11px;color:var(--muted-2)}
@@ -2156,10 +2201,10 @@ body{
 /* 传输按钮：有选中文件时高亮 */
 .transfer-btn.ready{color:var(--green)}
 .transfer-btn.ready:hover{background:rgba(var(--accent-rgb),.12);color:var(--green)}
-/* 文件列表 */
+/* 文件列表：FinalShell 式浅色表（截图口径），深浅主题共用结构、色板跟随主题 */
 .pane-list{
     flex:1;overflow:auto;min-height:0;
-    font-size:11.5px;position:relative;
+    font-size:12px;position:relative;
 }
 .pane-list::-webkit-scrollbar{width:8px;height:8px}
 .pane-list::-webkit-scrollbar-thumb{
@@ -2168,9 +2213,8 @@ body{
 }
 .list-header{
     display:flex;align-items:center;
-    background:var(--panel);border-bottom:1px solid var(--border);
-    font-size:9.5px;font-weight:600;letter-spacing:.05em;
-    text-transform:uppercase;color:var(--muted-2);user-select:none;
+    background:var(--panel-2);border-bottom:1px solid var(--border);
+    font-size:11px;font-weight:600;color:var(--text);user-select:none;
     flex-shrink:0;
 }
 .list-header>div{padding:6px 8px;cursor:pointer;transition:.12s}
@@ -2203,28 +2247,28 @@ body{
 /* 斑马纹：偶数行淡底，多列长表横向扫读不串行。
    用中性灰半透明而不是主题色，深浅两套表面同一条规则都成立；
    必须声明在 :hover/.selected 之前——同特异度下后者胜出，悬停/选中才压得住条纹 */
-.row:nth-child(even){background:rgba(128,128,128,.055)}
+.row:nth-child(even){background:rgba(128,128,128,.07)}
 .row:hover{background:var(--panel-2)}
-.row.selected{background:rgba(var(--accent-rgb),.08)}
+.row.selected{background:rgba(var(--accent-rgb),.16)}
 .row.selected .row-text{color:var(--text-strong)}
-.row>div{padding:4px 8px}
+.row>div{padding:5px 8px}
 .row-name{
     flex:1;min-width:0;display:flex;align-items:center;gap:7px;
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
+/* 文件/文件夹图标：截图式填充（黄文件夹、浅灰文档），深浅主题共用 */
 .row-icon{
-    width:13px;height:13px;flex-shrink:0;
-    stroke:var(--muted);fill:none;
-    stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;
+    width:14px;height:14px;flex-shrink:0;
+    fill:#6b7686;stroke:none;
 }
-.row.dir .row-icon{stroke:var(--blue)}
+/* 文件夹为渐变双层填充（后盖深金/前盖亮金带描边），路径自带 fill；svg 继承 fill 只服务文档图标 */
 .link-badge{
     width:11px;height:11px;flex-shrink:0;
     color:var(--muted-2);opacity:.7;
 }
 .row-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* 新建文件夹：行内编辑行 */
-.mkdir-row .row-icon{stroke:var(--blue)}
+.mkdir-row .row-icon{stroke:none}
 .mkdir-input{
     flex:1;min-width:0;
     background:transparent;border:1px solid var(--blue);

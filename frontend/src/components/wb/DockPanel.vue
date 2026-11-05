@@ -2718,7 +2718,7 @@ onUnmounted(() => {
                       @click="startEdit('remote', 'mkdir')">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                      stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M4 7a2 2 0 012-2h3l2 2h7a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2V7z"/>
+                  <path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/>
                   <path d="M12 11v5M9.5 13.5h5" stroke-width="2.2"/>
                 </svg>
                 新建
@@ -2783,7 +2783,14 @@ onUnmounted(() => {
                     @click.stop="toggleTree(r.path)"
                   ><svg v-if="!r.loading" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><span v-else class="tree-spin"></span></button>
                   <svg class="tree-icon" viewBox="0 0 24 24">
-                    <path d="M4 7a2 2 0 012-2h3l2 2h7a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2V7z"/>
+                    <defs>
+                      <linearGradient id="rk-folder-back" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#E8B34A"/><stop offset="1" stop-color="#C98F22"/></linearGradient>
+                      <linearGradient id="rk-folder-front" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFE9A8"/><stop offset=".55" stop-color="#F8CB4C"/><stop offset="1" stop-color="#EEA82E"/></linearGradient>
+                    </defs>
+                    <g stroke="#9C6F14" stroke-width=".7" stroke-linejoin="round">
+                      <path d="M2.8 6.4c0-1 .8-1.7 1.8-1.7h4.5l2.2 2.6h9.5c1 0 1.8.8 1.8 1.8v1.6H2.8z" fill="url(#rk-folder-back)"/>
+                      <path d="M3.4 9.6h17.2l-1.1 8.8c-.1 1-.9 1.7-1.9 1.7H6.4c-1 0-1.8-.7-1.9-1.7z" fill="url(#rk-folder-front)"/>
+                    </g>
                   </svg>
                   <span class="tree-name">{{ r.path === '/' ? '/' : r.name }}</span>
                 </div>
@@ -2821,7 +2828,7 @@ onUnmounted(() => {
                 <button class="pane-btn" title="新建文件夹" @click="startEdit('local', 'mkdir')">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                        stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M4 7a2 2 0 012-2h3l2 2h7a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2V7z"/>
+                    <path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/>
                     <path d="M12 11v5M9.5 13.5h5" stroke-width="2.2"/>
                   </svg>
                 </button>
@@ -2850,7 +2857,7 @@ onUnmounted(() => {
                 <div v-if="!localEntries.length && !(edit && edit.side==='local' && edit.kind!=='rename')" class="pane-empty">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
                        stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M4 7a2 2 0 012-2h3l2 2h7a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2V7z"/>
+                    <path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/>
                   </svg>
                   <div>{{ localLoading ? '加载中…' : '此文件夹为空' }}</div>
                 </div>
@@ -2866,7 +2873,14 @@ onUnmounted(() => {
                   >
                     <div class="row-name">
                       <svg class="row-icon" viewBox="0 0 24 24">
-                        <path v-if="e.type==='dir'" d="M4 7a2 2 0 012-2h3l2 2h7a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2V7z"/>
+                        <defs>
+                          <linearGradient id="rk-folder-back" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#E8B34A"/><stop offset="1" stop-color="#C98F22"/></linearGradient>
+                          <linearGradient id="rk-folder-front" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFE9A8"/><stop offset=".55" stop-color="#F8CB4C"/><stop offset="1" stop-color="#EEA82E"/></linearGradient>
+                        </defs>
+                        <g v-if="e.type==='dir'" stroke="#9C6F14" stroke-width=".7" stroke-linejoin="round">
+                          <path d="M2.8 6.4c0-1 .8-1.7 1.8-1.7h4.5l2.2 2.6h9.5c1 0 1.8.8 1.8 1.8v1.6H2.8z" fill="url(#rk-folder-back)"/>
+                          <path d="M3.4 9.6h17.2l-1.1 8.8c-.1 1-.9 1.7-1.9 1.7H6.4c-1 0-1.8-.7-1.9-1.7z" fill="url(#rk-folder-front)"/>
+                        </g>
                         <template v-else>
                           <path d="M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9z"/>
                           <path d="M14 3v6h6"/>
@@ -2896,7 +2910,14 @@ onUnmounted(() => {
                        class="row mkdir-row">
                     <div class="row-name">
                       <svg class="row-icon" viewBox="0 0 24 24">
-                        <path v-if="edit.kind==='mkdir'" d="M4 7a2 2 0 012-2h3l2 2h7a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2V7z"/>
+                        <defs>
+                          <linearGradient id="rk-folder-back" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#E8B34A"/><stop offset="1" stop-color="#C98F22"/></linearGradient>
+                          <linearGradient id="rk-folder-front" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFE9A8"/><stop offset=".55" stop-color="#F8CB4C"/><stop offset="1" stop-color="#EEA82E"/></linearGradient>
+                        </defs>
+                        <g v-if="edit.kind==='mkdir'" stroke="#9C6F14" stroke-width=".7" stroke-linejoin="round">
+                          <path d="M2.8 6.4c0-1 .8-1.7 1.8-1.7h4.5l2.2 2.6h9.5c1 0 1.8.8 1.8 1.8v1.6H2.8z" fill="url(#rk-folder-back)"/>
+                          <path d="M3.4 9.6h17.2l-1.1 8.8c-.1 1-.9 1.7-1.9 1.7H6.4c-1 0-1.8-.7-1.9-1.7z" fill="url(#rk-folder-front)"/>
+                        </g>
                         <template v-else>
                           <path d="M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9z"/>
                           <path d="M14 3v6h6"/>
@@ -2933,7 +2954,7 @@ onUnmounted(() => {
                 <div v-if="!remoteEntries.length && !(edit && edit.side==='remote' && edit.kind!=='rename')" class="pane-empty">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
                        stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M4 7a2 2 0 012-2h3l2 2h7a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2V7z"/>
+                    <path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/>
                   </svg>
                   <div>{{ !connected ? '未连接到远程主机' : remoteLoading ? '加载中…' : '此文件夹为空' }}</div>
                 </div>
@@ -2949,7 +2970,14 @@ onUnmounted(() => {
                   >
                     <div class="row-name">
                       <svg class="row-icon" viewBox="0 0 24 24">
-                        <path v-if="e.type==='dir'" d="M4 7a2 2 0 012-2h3l2 2h7a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2V7z"/>
+                        <defs>
+                          <linearGradient id="rk-folder-back" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#E8B34A"/><stop offset="1" stop-color="#C98F22"/></linearGradient>
+                          <linearGradient id="rk-folder-front" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFE9A8"/><stop offset=".55" stop-color="#F8CB4C"/><stop offset="1" stop-color="#EEA82E"/></linearGradient>
+                        </defs>
+                        <g v-if="e.type==='dir'" stroke="#9C6F14" stroke-width=".7" stroke-linejoin="round">
+                          <path d="M2.8 6.4c0-1 .8-1.7 1.8-1.7h4.5l2.2 2.6h9.5c1 0 1.8.8 1.8 1.8v1.6H2.8z" fill="url(#rk-folder-back)"/>
+                          <path d="M3.4 9.6h17.2l-1.1 8.8c-.1 1-.9 1.7-1.9 1.7H6.4c-1 0-1.8-.7-1.9-1.7z" fill="url(#rk-folder-front)"/>
+                        </g>
                         <template v-else>
                           <path d="M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9z"/>
                           <path d="M14 3v6h6"/>
@@ -2978,7 +3006,14 @@ onUnmounted(() => {
                        class="row mkdir-row">
                     <div class="row-name">
                       <svg class="row-icon" viewBox="0 0 24 24">
-                        <path v-if="edit.kind==='mkdir'" d="M4 7a2 2 0 012-2h3l2 2h7a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2V7z"/>
+                        <defs>
+                          <linearGradient id="rk-folder-back" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#E8B34A"/><stop offset="1" stop-color="#C98F22"/></linearGradient>
+                          <linearGradient id="rk-folder-front" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFE9A8"/><stop offset=".55" stop-color="#F8CB4C"/><stop offset="1" stop-color="#EEA82E"/></linearGradient>
+                        </defs>
+                        <g v-if="edit.kind==='mkdir'" stroke="#9C6F14" stroke-width=".7" stroke-linejoin="round">
+                          <path d="M2.8 6.4c0-1 .8-1.7 1.8-1.7h4.5l2.2 2.6h9.5c1 0 1.8.8 1.8 1.8v1.6H2.8z" fill="url(#rk-folder-back)"/>
+                          <path d="M3.4 9.6h17.2l-1.1 8.8c-.1 1-.9 1.7-1.9 1.7H6.4c-1 0-1.8-.7-1.9-1.7z" fill="url(#rk-folder-front)"/>
+                        </g>
                         <template v-else>
                           <path d="M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9z"/>
                           <path d="M14 3v6h6"/>

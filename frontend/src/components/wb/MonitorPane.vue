@@ -34,6 +34,9 @@ onMounted(() => {
 })
 onUnmounted(() => {
   if (timer) clearInterval(timer)
+  window.removeEventListener('mousemove', onPathMove)
+  window.removeEventListener('mouseup', onPathEnd)
+  window.clearTimeout(tipTimer)
 })
 
 /* ---------- 连接状态五态 ---------- */
@@ -208,6 +211,91 @@ function chartArea(arr: number[], max: number) {
 
 /* ---------- 磁盘（0x06 Metrics.disks；df 低频夹带，非夹带轮沿用缓存） ---------- */
 const liveDisks = computed(() => (connected.value ? activeMetrics.value?.disks ?? [] : []))
+
+/* ---------- 磁盘路径：左右拖拽平移 + 悬浮全路径提示 + 点击复制 ----------
+ * 路径列常被截断（docker overlay 路径冗长），横向滚不动就看不到全名：
+ * 按住左右拖移浏览；悬停 250ms 弹自定义提示显示全部；单击（无拖动）复制路径。 */
+let pdEl: HTMLElement | null = null
+let pdStartX = 0
+let pdStartLeft = 0
+let pdMoved = false
+let pdMount = ''
+let pdRaf = 0
+let pdTarget = 0
+
+function onPathDown(e: MouseEvent, mount: string) {
+  if (e.button !== 0) return
+  e.preventDefault()
+  const el = e.currentTarget as HTMLElement
+  pdEl = el
+  pdStartX = e.clientX
+  pdStartLeft = el.scrollLeft
+  pdMoved = false
+  pdMount = mount
+  window.addEventListener('mousemove', onPathMove)
+  window.addEventListener('mouseup', onPathEnd)
+}
+
+function onPathMove(e: MouseEvent) {
+  if (!pdEl) return
+  const dx = e.clientX - pdStartX
+  if (!pdMoved) {
+    if (Math.abs(dx) <= 4) return
+    pdMoved = true
+    pdEl.classList.add('panning')
+    onPathHoverEnd()
+  }
+  pdTarget = pdStartLeft - dx
+  if (pdRaf) return
+  pdRaf = requestAnimationFrame(() => {
+    pdRaf = 0
+    if (pdEl) pdEl.scrollLeft = pdTarget
+  })
+}
+
+function onPathEnd() {
+  window.removeEventListener('mousemove', onPathMove)
+  window.removeEventListener('mouseup', onPathEnd)
+  if (pdRaf) {
+    cancelAnimationFrame(pdRaf)
+    pdRaf = 0
+  }
+  const mount = pdMount
+  pdEl?.classList.remove('panning')
+  pdEl = null
+  pdMount = ''
+  if (!pdMoved && mount) {
+    navigator.clipboard?.writeText(mount).then(() => {
+      toast('路径已复制到剪贴板', 'ok', 1400)
+    }).catch(() => {
+      toast('复制失败', 'err', 1200)
+    })
+  }
+}
+
+/** 悬浮提示：内容与原来行 title 等价（全路径 + 文件系统 + 已用/总计），250ms 后出现 */
+const pathTip = ref<{ x: number; y: number; text: string } | null>(null)
+let tipTimer: number | undefined
+
+function onPathHover(e: MouseEvent, d: { mount: string; fs?: string }) {
+  window.clearTimeout(tipTimer)
+  const text = `${d.mount}${d.fs ? ` (${d.fs})` : ''}`
+  tipTimer = window.setTimeout(() => {
+    pathTip.value = { x: e.clientX, y: e.clientY, text }
+  }, 250)
+}
+
+function onPathHoverMove(e: MouseEvent) {
+  if (pathTip.value) {
+    pathTip.value.x = e.clientX
+    pathTip.value.y = e.clientY
+  }
+}
+
+function onPathHoverEnd() {
+  window.clearTimeout(tipTimer)
+  pathTip.value = null
+}
 
 /* ---------- 进程（0x06 Metrics.procs；Top 5 每轮随帧更新） ---------- */
 const liveProcs = computed(() =>
@@ -444,7 +532,7 @@ async function onDisconnect() {
         <div class="ri-bar">
           <span class="lb">CPU</span>
           <div class="track">
-            <i class="fill" :class="meterClass(cpuPct)" :style="{ width: cpuPct + '%' }" />
+            <i class="fill cpu" :class="meterClass(cpuPct)" :style="{ width: cpuPct + '%' }" />
             <span class="pct">{{ cpuPct.toFixed(0) }}%</span>
             <span class="aux">{{ cpuCoresText }}</span>
           </div>
@@ -480,7 +568,7 @@ async function onDisconnect() {
           <div class="ri-bar">
             <span class="lb">利用率</span>
             <div class="track">
-              <i class="fill" :class="meterClass(g.util)" :style="{ width: g.util + '%' }" />
+              <i class="fill cpu" :class="meterClass(g.util)" :style="{ width: g.util + '%' }" />
               <span class="pct">{{ Math.round(g.util) }}%</span>
               <span class="aux">
                 <span :class="gpuTempClass(g.temp)">{{ Math.round(g.temp) }}°C</span>
@@ -558,19 +646,31 @@ async function onDisconnect() {
             v-for="d in liveDisks"
             :key="d.mount"
             class="ri-tbl-row"
-            :title="`${d.mount}${d.fs ? ` (${d.fs})` : ''} · 已用 ${fmtBytes(d.used)} / ${fmtBytes(d.total)}（${d.pct}%）`"
           >
-            <span class="m">
+            <span
+              class="m"
+              @mousedown="onPathDown($event, d.mount)"
+              @mouseenter="onPathHover($event, d)"
+              @mousemove="onPathHoverMove"
+              @mouseleave="onPathHoverEnd"
+            >
               <span class="mp">{{ d.mount }}</span>
               <i v-if="d.fs" class="fst">{{ d.fs }}</i>
             </span>
-            <span class="s">{{ fmtBytes(d.available) }} / {{ fmtBytes(d.total) }}</span>
+            <span class="s"><i class="sbar" :style="{ width: (d.total > 0 ? (d.available / d.total) * 100 : 0) + '%' }" />{{ fmtBytes(d.available) }} / {{ fmtBytes(d.total) }}</span>
             <span class="u" :class="meterClass(d.pct)">{{ d.pct }}%</span>
           </div>
         </div>
       </div>
       </template>
     </div>
+
+    <!-- 磁盘路径悬浮提示：固定定位跟随光标，250ms 后出现 -->
+    <div
+      v-if="pathTip"
+      class="ri-pathtip"
+      :style="{ left: `${pathTip.x + 12}px`, top: `${pathTip.y + 16}px` }"
+    >{{ pathTip.text }}</div>
   </aside>
 </template>
 
@@ -884,21 +984,23 @@ async function onDisconnect() {
   background: var(--panel-deep);
   overflow: hidden;
 }
-/* 填充半透明压在文字下面：深浅两套主题里条内文字都保持原对比度 */
+/* 填充半透明压在文字下面：深浅两套主题里条内文字都保持原对比度；
+   截图（FinalShell）口径：CPU 绿、内存/交换桃色、显存桃色 */
 .ri-bar .fill {
   position: absolute;
   left: 0;
   top: 0;
   bottom: 0;
   border-radius: 0 3px 3px 0;
-  background: var(--green);
+  background: #f6b07e;
   opacity: 0.3;
   transition: width 0.5s ease, background 0.3s;
 }
+.ri-bar .fill.cpu { background: #4fbf67; }
 .ri-bar .fill.warn { background: var(--yellow); }
 .ri-bar .fill.crit { background: var(--red); }
-.ri-bar .fill.swap { background: var(--purple); }
-.ri-bar .fill.vram { background: var(--cyan); }
+.ri-bar .fill.swap { background: #f6b07e; }
+.ri-bar .fill.vram { background: #f6b07e; }
 .ri-bar .pct,
 .ri-bar .aux {
   position: relative;
@@ -1015,10 +1117,10 @@ async function onDisconnect() {
   font-size: 11px;
 }
 .ri-rate.up {
-  color: var(--purple);
+  color: #e89a3c;
 }
 .ri-rate.down {
-  color: var(--cyan);
+  color: #4ade80;
 }
 .ri-iface {
   margin-left: auto;
@@ -1062,26 +1164,26 @@ async function onDisconnect() {
 }
 .ri-plot .line-up {
   fill: none;
-  stroke: var(--purple);
+  stroke: #e89a3c;
   stroke-width: 1.5;
   stroke-linejoin: round;
   vector-effect: non-scaling-stroke;
 }
 .ri-plot .line-dn {
   fill: none;
-  stroke: var(--cyan);
+  stroke: #4ade80;
   stroke-width: 1.5;
   stroke-linejoin: round;
   vector-effect: non-scaling-stroke;
 }
 .ri-plot .area-up {
-  fill: var(--purple);
-  opacity: 0.13;
+  fill: #e89a3c;
+  opacity: 0.15;
   stroke: none;
 }
 .ri-plot .area-dn {
-  fill: var(--cyan);
-  opacity: 0.13;
+  fill: #4ade80;
+  opacity: 0.15;
   stroke: none;
 }
 
@@ -1117,11 +1219,12 @@ async function onDisconnect() {
   padding: 0 5px;
 }
 .ri-tbl-head {
+  padding-top: 4px;
   padding-bottom: 4px;
-  border-bottom: 1px solid var(--border-soft);
-  font-size: 10px;
-  letter-spacing: 0.05em;
-  color: var(--muted-2);
+  background: var(--panel-2);
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text);
 }
 .ri-tbl-head span:not(:first-child),
 .ri-tbl-row span:not(:first-child) {
@@ -1157,13 +1260,42 @@ async function onDisconnect() {
   min-width: 0;
   font-family: var(--mono);
   color: var(--text);
-  overflow: hidden;
+  /* 长路径可横移浏览（grab 拖拽），滚动条隐藏 */
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
   white-space: nowrap;
+  cursor: grab;
+  user-select: none;
+  touch-action: pan-y;
 }
-/* 路径 + 文件系统类型徽标（FinalShell 磁盘表同款信息）；路径自身截断省略 */
+.ri-tbl-row .m::-webkit-scrollbar {
+  display: none;
+}
+.ri-tbl-row .m.panning {
+  cursor: grabbing;
+}
+/* 路径不截断省略：超出部分由 .m 横移呈现；fs 徽标跟随在路径后 */
 .ri-tbl-row .m .mp {
+  flex: 0 0 auto;
+}
+/* 磁盘路径悬浮提示：固定定位跟随光标，pointer-events 不挡悬停/拖拽 */
+.ri-pathtip {
+  position: fixed;
+  z-index: 9999;
+  pointer-events: none;
+  max-width: 70vw;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--menu-bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
 }
 .ri-tbl-row .m .fst {
   flex-shrink: 0;
@@ -1177,8 +1309,18 @@ async function onDisconnect() {
   color: var(--muted);
 }
 .ri-tbl-row .s {
+  position: relative;
   color: var(--text-soft);
   white-space: nowrap;
+}
+/* 薄荷绿条：衬底显示「可用/总计」比例（截图口径），数字盖在条上 */
+.ri-tbl-row .sbar {
+  position: absolute;
+  left: 0;
+  top: 1px;
+  bottom: 1px;
+  border-radius: 3px;
+  background: rgba(94, 200, 160, 0.2);
 }
 .ri-tbl-row .u {
   color: var(--muted);
@@ -1213,19 +1355,21 @@ async function onDisconnect() {
   font-size: 11.5px;
 }
 .ri-proc-head {
-  color: var(--muted-2);
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  border-bottom: 1px solid var(--border-soft);
+  background: #3e7fc0;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  padding-top: 5px;
   padding-bottom: 5px;
-  margin-bottom: 3px;
+  border-radius: 3px 3px 0 0;
 }
 .ri-proc-row {
   padding-top: 4px;
   padding-bottom: 4px;
 }
-.ri-proc-row:nth-child(odd) {
-  background: var(--veil-weak);
+/* 截图斑马纹：偶数行浅蓝灰，深浅主题均可见 */
+.ri-proc-row:nth-child(even) {
+  background: rgba(94, 156, 214, 0.12);
 }
 .ri-proc-head span:not(:first-child),
 .ri-proc-row span:not(:first-child) {
