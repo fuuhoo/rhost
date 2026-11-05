@@ -1,0 +1,36 @@
+/* 随包发布的终端等宽字体：DejaVu Sans Mono（FinalShell 终端的默认字体）
+ * 取自官方 dejavu-fonts-ttf-2.37 发行包，与 FinalShell 程序包内的同名 TTF 逐字节一致。
+ * 许可证见 public/DejaVuSansMono-LICENSE.txt（Bitstream Vera + DejaVu 附加授权）。
+ * 只发布 Regular/Bold 两个字重：终端正文用 400，粗体 ANSI（字重选 500/700）取 700。 */
+@font-face {
+  font-family: 'DejaVu Sans Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url('/fonts/DejaVuSansMono.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'DejaVu Sans Mono';
+  font-style: normal;
+  font-weight: 700;
+  font-display: block;
+  src: url('/fonts/DejaVuSansMono-Bold.ttf') format('truetype');
+}
+
+/* Liberation Mono（Red Hat 发布的 metric-compatible 字体，替代 Times/Courier 的那一套）
+ * 取自 @docx-editor.dev/fonts 包内 Red Hat 原始 TTF，许可证见 public/LiberationMono-LICENSE.txt
+ * （SIL OFL 1.1 + Liberation 商标保留条款）。同样只发布 Regular/Bold。 */
+@font-face {
+  font-family: 'Liberation Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url('/fonts/LiberationMono-Regular.ttf') format('truetype');
+}
+@font-face {
+  font-family: 'Liberation Mono';
+  font-style: normal;
+  font-weight: 700;
+  font-display: block;
+  src: url('/fonts/LiberationMono-Bold.ttf') format('truetype');
+}

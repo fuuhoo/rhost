@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- macOS 打包时由 tauri-build 合并进 .app 的 Info.plist：
+     声明本应用可处理 ssh:// / sftp:// 链接（堡垒机「外部连接」入口）。
+     macOS 不支持运行时注册协议，只能这样静态声明；清单与
+     tauri.conf.json 的 plugins.deep-link.desktop.schemes 保持一致。 -->
+<plist version="1.0">
+<dict>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>com.rhost.app.ssh</string>
+      <key>CFBundleURLRoleForEditor</key>
+      <string>Editor</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>ssh</string>
+        <string>sftp</string>
+      </array>
+    </dict>
+  </array>
+</dict>
+</plist>

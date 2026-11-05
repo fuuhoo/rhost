@@ -10,6 +10,7 @@
     "opener:allow-open-url",
     "opener:allow-default-urls",
     "opener:allow-open-path",
+    "opener:allow-reveal-item-in-dir",
     "clipboard-manager:allow-read-text",
     "clipboard-manager:allow-write-text",
     "dialog:allow-open",
