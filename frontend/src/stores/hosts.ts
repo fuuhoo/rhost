@@ -58,6 +58,10 @@ function storedToHost(s: StoredHost): Host {
       typeof extra.keepalive === 'number' && extra.keepalive >= 0
         ? extra.keepalive
         : undefined,
+    connectTimeout:
+      typeof extra.connectTimeout === 'number' && extra.connectTimeout >= 0
+        ? extra.connectTimeout
+        : undefined,
     // password 不入 JSON，连接时从钥匙串按需读取
   }
 }
@@ -67,6 +71,7 @@ function hostToStored(h: Host, connType: string): StoredHost {
   const extra: Record<string, unknown> = {}
   if (h.tunnels?.length) extra.tunnels = h.tunnels
   if (h.keepalive !== undefined) extra.keepalive = h.keepalive
+  if (h.connectTimeout !== undefined) extra.connectTimeout = h.connectTimeout
   return {
     id: h.id,
     connType,

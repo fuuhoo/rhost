@@ -760,6 +760,8 @@ async function connectBackend(
         env: external ? [] : savedSettings.env.map(e => [e.key, e.value]),
         // 传输层保活间隔（秒）：0 = 禁用，未配置走缺省 30s
         keepaliveSecs: s.host.keepalive ?? 30,
+        // 连接建立总超时（秒，TCP 建连 + 握手 + 认证）：0 = 不限制，未配置走缺省 30s
+        connectTimeoutSecs: s.host.connectTimeout ?? 30,
         // 主机密钥 TOFU 二阶段：重试时带用户确认的指纹（后端校验格式并比对本次握手）；
         // 仅本次连接 trustPersist=false，后端跳过 known_hosts 落盘
         trustHostKey,

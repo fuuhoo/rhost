@@ -53,6 +53,10 @@ pub struct SessionConfig {
     /// 传输层保活间隔（按主机配置）：`None` = 禁用（表单 0）；
     /// 未配置时由 ipc 层解析为缺省 30s，本字段不携带缺省语义。
     pub keepalive: Option<Duration>,
+    /// 连接建立总超时（TCP 建连 + SSH 握手 + 认证，见 `SshSession::connect`
+    /// 的 `tokio::time::timeout` 包装）：`None` = 不限制（表单 0）；
+    /// 未配置时由 ipc 层解析为缺省 30s，本字段不携带缺省语义。
+    pub connect_timeout: Option<Duration>,
     /// 服务器主机密钥校验策略（hostkey-verification-design.md）。
     /// 非 `Option`：`None` 的缺省语义即「跳过校验」，属危险默认；
     /// 枚举强制显式选择、漏填即编译错误，生产路径恒为 `Verify`。

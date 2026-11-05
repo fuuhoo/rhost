@@ -1233,15 +1233,35 @@ impl SshSession {
         let algo = Arc::new(StdMutex::new(None));
         let remote = RemoteRegistry::default();
         let global_conns = Arc::new(Semaphore::new(super::tunnel::MAX_CONN_GLOBAL));
+        // 连接建立总超时：TCP 建连 + 握手 + 认证全程共享一个 deadline
+        // （规避不可达主机让 DNS/TCP 把用户晾住数分钟）；`None` = 不限制。
         let handle = Arc::new(Mutex::new(
-            connect_and_auth(
-                &cfg,
-                algo.clone(),
-                sid,
-                remote.clone(),
-                global_conns.clone(),
-            )
-            .await?,
+            match cfg.connect_timeout {
+                Some(d) => tokio::time::timeout(
+                    d,
+                    connect_and_auth(&cfg, algo.clone(), sid, remote.clone(), global_conns.clone()),
+                )
+                .await
+                .map_err(|_| {
+                    applog::emit(
+                        log::Level::Error,
+                        "ssh",
+                        ev::SSH_CONNECT_TCP_FAILED,
+                        Some(sid),
+                        "连接超时",
+                        Some(serde_json::json!({
+                            "host": cfg.host,
+                            "port": cfg.port,
+                            "timeout_secs": d.as_secs(),
+                        })),
+                    );
+                    SshError::Connect(format!(
+                        "连接超时（{} 秒内未完成 TCP 建连与认证）",
+                        d.as_secs()
+                    ))
+                })??,
+                None => connect_and_auth(&cfg, algo.clone(), sid, remote.clone(), global_conns.clone()).await?,
+            },
         ));
 
         // 2.【阶段 A/B】PTY 尚未打开：独立 exec 子通道并行采集服务器状态，

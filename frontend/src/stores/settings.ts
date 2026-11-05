@@ -268,8 +268,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
     { key: 'EDITOR', value: 'nvim' },
     { key: 'LANG', value: 'zh_CN.UTF-8' },
   ],
-  // 默认不预置命令模板：自定义命令直接写入远端执行，预置样例只会变成用户的删除工作量
-  commandTemplates: [],
+  // 预置命令模板（只读查询类，可直接写入终端执行；用户可在设置里增删）
+  // 注意：单引号内 \\t 保留为字面 \t（docker stats --format 的列分隔转义），勿写成真实制表符
+  commandTemplates: [
+    { name: '内存', command: 'docker stats --no-stream --format "table {{.Container}}\\t{{.Name}}\\t{{.MemUsage}}" | sort -hk 3' },
+    { name: 'CPU', command: 'docker stats --no-stream --format "table {{.Name}}\\t{{.CPUPerc}}" | sort -k 2 -h' },
+  ],
 
   'key.newTab': '⌘+T',
   // 与 FinalShell 默认键位一致（Ctrl+Shift+T 新建终端窗口）

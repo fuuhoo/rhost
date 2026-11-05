@@ -118,6 +118,10 @@ pub struct ConnectPayload {
     /// 传输层保活间隔（秒）：缺省 30s，0 = 禁用；按主机配置
     #[serde(default)]
     pub keepalive_secs: Option<u64>,
+    /// 连接建立总超时（秒，含 TCP 建连 + 握手 + 认证）：缺省 30s，0 = 不限制；
+    /// 按主机配置
+    #[serde(default)]
+    pub connect_timeout_secs: Option<u64>,
     /// 堡垒机外部连接：全程只开一条通道，不开 MOTD/初始化脚本/指标/AI 工具的
     /// 辅助 exec 通道（缺省 false = 常规保存主机连接）
     #[serde(default)]
@@ -129,6 +133,15 @@ pub struct ConnectPayload {
 
 /// 保活间隔解析：未指定 → 缺省 30s（保持现行行为）；0 → 禁用；其余 → 指定秒数
 fn resolve_keepalive(secs: Option<u64>) -> Option<Duration> {
+    match secs {
+        None => Some(Duration::from_secs(30)),
+        Some(0) => None,
+        Some(n) => Some(Duration::from_secs(n)),
+    }
+}
+
+/// 连接建立总超时解析：未指定 → 缺省 30s；0 → 不限制；其余 → 指定秒数
+fn resolve_connect_timeout(secs: Option<u64>) -> Option<Duration> {
     match secs {
         None => Some(Duration::from_secs(30)),
         Some(0) => None,
@@ -238,6 +251,7 @@ pub async fn connect_ssh(
         env: payload.env,
         motd_logo: payload.motd_logo,
         keepalive: resolve_keepalive(payload.keepalive_secs),
+        connect_timeout: resolve_connect_timeout(payload.connect_timeout_secs),
         host_key,
         single_channel,
         sftp_only: payload.sftp_only,
@@ -784,8 +798,10 @@ pub async fn test_ssh_connection(
         color_prompt: false,
         env: Vec::new(),
         motd_logo: String::new(),
-        // 测试连接短生命周期（10s 超时即断），保活无意义
+        // 测试连接短生命周期（下方 10s 外层包装即断），保活与连接超时
+        // 均无意义：内部不设限，由外层统一兜底
         keepalive: None,
+        connect_timeout: None,
         host_key,
         // 测试连接只握手与认证，不开任何通道
         single_channel: true,
@@ -1511,6 +1527,27 @@ mod keepalive_tests {
     #[test]
     fn explicit_value_passes_through() {
         assert_eq!(resolve_keepalive(Some(15)), Some(Duration::from_secs(15)));
+    }
+}
+
+#[cfg(test)]
+mod connect_timeout_tests {
+    use super::resolve_connect_timeout;
+    use std::time::Duration;
+
+    #[test]
+    fn default_is_30s() {
+        assert_eq!(resolve_connect_timeout(None), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn zero_means_unlimited() {
+        assert_eq!(resolve_connect_timeout(Some(0)), None);
+    }
+
+    #[test]
+    fn explicit_value_passes_through() {
+        assert_eq!(resolve_connect_timeout(Some(45)), Some(Duration::from_secs(45)));
     }
 }
 
