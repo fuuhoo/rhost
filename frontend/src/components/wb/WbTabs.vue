@@ -2,13 +2,14 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import ContextMenu, { type MenuItem } from './ContextMenu.vue'
 import {
-  activeSessionId, closeSession, sessions,
+  activeSessionId, closeSession, sessions, openSession,
   closeOtherSessions, closeSessionsToLeft, closeSessionsToRight,
   closeDisconnectedSessions, closeAllSessions,
   reconnectBackend, disconnectSession, setSessionAlias,
-  duplicateSession, isDuplicating, openDock,
+  duplicateSession, isDuplicating, isExternalSession, openDock,
+  isBlankSession, openBlankSession,
 } from '../../stores/session'
-import { showNewConn } from '../../stores/hosts'
+import { hosts, showNewConn } from '../../stores/hosts'
 import { toast } from '../../composables/useToast'
 import type { Session } from '../../stores/session'
 
@@ -37,17 +38,21 @@ const tabMenuItems = computed<MenuItem[]>(() => {
   const hasLeft = idx > 0
   const hasRight = idx < sessions.value.length - 1
   const hasOffline = sessions.value.some(x => x.state === 'offline')
+  // 外部连接（堡垒机链接）：不保存会话，也不在同一条连接上开第二条通道
+  const external = isExternalSession(s)
+  // 空白标签（新建窗口）：无主机可复制/重连，入口置灰
+  const blank = isBlankSession(s)
 
   return [
     { label: '重命名标签', action: () => startRename(s.id) },
     {
       label: '复制会话',
-      disabled: isBusy || isDuplicating(s.id),
+      disabled: isBusy || isDuplicating(s.id) || external || blank,
       action: () => { void duplicateSession(s.id) },
     },
     {
       label: '重新连接',
-      disabled: !['idle', 'offline', 'reconnecting'].includes(s.state),
+      disabled: blank || !['idle', 'offline', 'reconnecting'].includes(s.state),
       action: () => { activeSessionId.value = s.id; void reconnectBackend(s.id) },
     },
     {
@@ -66,17 +71,19 @@ const tabMenuItems = computed<MenuItem[]>(() => {
       action: () => { const n = closeDisconnectedSessions(); if (n > 0) toast(`已关闭 ${n} 个标签`) },
     },
     { label: '关闭所有标签页', action: () => closeAllSessions() },
-    { divider: true },
-    {
-      label: '打开 SFTP 面板',
+    // 外部连接：terminal 会话开 SFTP 需要第二条通道（后端拒绝）、sftp 会话本来就在
+    // SFTP 视图里，两种情况都没有这个入口的意义
+    ...(external ? [] : [{ divider: true }, {
+      label: '打开「文件」面板（SFTP）',
       disabled: s.state !== 'online',
       action: () => { activeSessionId.value = s.id; openDock('sftp') },
-    },
+    }] as MenuItem[]),
   ]
 })
 
 /* ---- 空白区右键菜单（targetId 为 null） ---- */
 const barMenuItems = computed<MenuItem[]>(() => [
+  { label: '新建终端窗口', action: () => openBlankSession() },
   { label: '新建连接…', action: () => { showNewConn.value = true } },
   { divider: true },
   {
@@ -90,6 +97,38 @@ const barMenuItems = computed<MenuItem[]>(() => [
     action: () => closeAllSessions(),
   },
 ])
+
+/* ---- 加号弹层：已保存主机列表（点选直接建连），底部保留「新建连接…」入口 ---- */
+const addMenu = ref<{ x: number; y: number } | null>(null)
+
+/** 在线优先、同态按名称排（与首页历史会话最近主机同口径） */
+const addHosts = computed(() =>
+  [...hosts.value].sort((a, b) => (a.status === 'online' ? 0 : 1) - (b.status === 'online' ? 0 : 1) || a.id.localeCompare(b.id)),
+)
+
+function hostDotCls(status: string) {
+  return status === 'online' ? 'h-on' : status === 'offline' ? 'h-off' : status === 'warn' ? 'h-warn' : 'h-idle'
+}
+
+function toggleAddMenu(e: MouseEvent) {
+  if (addMenu.value) { addMenu.value = null; return }
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+  // 右缘夹取：弹层宽 264px，避免贴边溢出视窗
+  addMenu.value = {
+    x: Math.max(8, Math.min(rect.left, window.innerWidth - 272)),
+    y: rect.bottom + 6,
+  }
+}
+
+function onAddPick(hostId: string) {
+  addMenu.value = null
+  openSession(hostId)
+}
+
+function onAddNew() {
+  addMenu.value = null
+  showNewConn.value = true
+}
 
 /* ---- 事件处理 ---- */
 function onTabContext(e: MouseEvent, s: Session) {
@@ -161,9 +200,9 @@ function onDragStart(e: MouseEvent) {
   if (!el) return
   // 无溢出时禁用拖拽：标签不超出视窗时拖拽无意义，且不应显示 grab 光标
   if (!canScroll.value) return
-  // 关闭钮与重命名输入框上不启动拖拽，避免点关闭 / 编辑变成拖视窗
+  // 关闭钮、重命名输入框与尾部加号上不启动拖拽，避免点关闭 / 编辑 / 新建变成拖视窗
   const t = e.target as HTMLElement
-  if (t.closest('.close, .rename-input')) return
+  if (t.closest('.close, .rename-input, .tab-add')) return
   // mousedown 即 preventDefault：阻止文本选区启动；不影响后续 click 派发
   e.preventDefault()
   dragArmed = true
@@ -456,6 +495,19 @@ watch(activeSessionId, () => {
             <span v-else class="name" @mouseenter="onNameEnter(s, $event)">{{ s.alias || s.host.id }}</span>
             <span class="close" @click.stop="closeSession(s.id)">×</span>
           </div>
+
+          <!-- 标签尾部加号：弹出已保存主机列表（FinalShell 新建窗口同款交互） -->
+          <button
+            class="tab-add"
+            :class="{ on: addMenu !== null }"
+            title="新建连接 (⌘T)"
+            aria-label="新建连接"
+            @click="toggleAddMenu"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+          </button>
         </div>
       </div>
     </div>
@@ -480,5 +532,29 @@ watch(activeSessionId, () => {
       :items="menu.targetId !== null ? tabMenuItems : barMenuItems"
       @update:visible="(v) => { if (!v) closeMenu() }"
     />
+
+    <!-- 加号连接选择弹层：透明遮罩点击关闭，弹层固定定位于加号下方 -->
+    <div v-if="addMenu" class="tab-add-scrim" @click="addMenu = null" @contextmenu.prevent="addMenu = null" />
+    <div v-if="addMenu" class="tab-add-pop" :style="{ left: `${addMenu.x}px`, top: `${addMenu.y}px` }">
+      <div class="tap-head">选择连接</div>
+      <div class="tap-list">
+        <button
+          v-for="h in addHosts"
+          :key="h.id"
+          class="tap-item"
+          :disabled="h.status === 'offline'"
+          @click="onAddPick(h.id)"
+        >
+          <span class="dot" :class="hostDotCls(h.status)"></span>
+          <span class="tap-name">{{ h.id }}</span>
+          <span class="tap-addr">{{ h.user }}@{{ h.ip }}:{{ h.port }}</span>
+        </button>
+        <div v-if="addHosts.length === 0" class="tap-empty">暂无已保存的主机</div>
+      </div>
+      <button class="tap-new" @click="onAddNew">
+        新建连接…
+        <span class="tap-kbd">⌘T</span>
+      </button>
+    </div>
   </div>
 </template>

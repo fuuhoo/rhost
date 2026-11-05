@@ -1,15 +1,19 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import Inspector from './wb/Inspector.vue'
+import HostsPane from './wb/HostsPane.vue'
+import HistoryPane from './wb/HistoryPane.vue'
 import AiChatPanel from './AiChatPanel.vue'
 import { appView, activeSession, rightPanelMaximized, rightPanelTab, rightPanelVisible, rightPanelWidth } from '../stores/session'
 import { savedSettings } from '../stores/settings'
 
-/** 头部标题：AI 固定；monitor 页签在首页显示「历史会话」，工作台显示「监控」 */
+/** 头部标题：AI 固定；hosts 页签在首页显示「历史会话」，工作台显示「主机」 */
 const panelTitle = computed(() => {
   if (rightPanelTab.value === 'ai') return 'AI 助手'
-  return appView.value === 'home' ? '历史会话' : '监控'
+  return appView.value === 'home' ? '历史会话' : '主机'
 })
+
+/** 首页视图标记：hosts 页签在首页渲染历史会话、在工作台渲染主机列表 */
+const isHome = computed(() => appView.value === 'home')
 
 /** AI 对话 scope 标识：工作台显示当前主机名（别名优先回落 host.id），其余为全局 */
 const scopeLabel = computed(() => {
@@ -23,8 +27,8 @@ const railRef = ref<HTMLElement | null>(null)
 const resizing = ref(false)
 
 const MIN_W = 360
-/** 终端面板最小保留宽度：约 80 列等宽字符（13px 字号 ≈ 630px 含内边距），取 640 保底 */
-const TERM_MIN_W = 640
+/** 终端面板最小保留宽度：约 80 列等宽字符（默认 14px · DejaVu Sans Mono 列宽 0.6em ≈ 8.4px → 672px，含左边距与滚动条），取 700 保底 */
+const TERM_MIN_W = 700
 
 function onMouseDown(e: MouseEvent) {
   if (!railRef.value) return
@@ -134,7 +138,9 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
 
     <!-- 面板内容 -->
     <div class="panel-body">
-      <Inspector v-show="rightPanelTab === 'monitor'" />
+      <!-- hosts 页签按视图切换：工作台显示主机列表，首页显示历史会话（都常驻，仅显隐） -->
+      <HostsPane v-show="rightPanelTab === 'hosts' && !isHome" />
+      <HistoryPane v-show="rightPanelTab === 'hosts' && isHome" />
       <AiChatPanel v-show="rightPanelTab === 'ai'" />
     </div>
   </div>
@@ -144,7 +150,7 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
 .right-panel {
   position: relative;
   flex-shrink: 0;
-  background: var(--panel);
+  background: var(--glass-panel);
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -269,9 +275,23 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
   flex-direction: column;
 }
 
-/* 窄屏隐藏整个面板（与工作台响应式一致） */
+/* 窄屏（≤1180px）：整块隐藏会让图标栏的点击没有任何响应（主机 / 历史是主导航），
+   改为浮层盖在工作区上、贴在 44px 图标栏左侧。宽度是拖拽时写死的 inline style，
+   需要 !important 才能压掉；.app-body 的 position:relative 在 style.css 提供 */
 @media (max-width: 1180px) {
   .right-panel {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: 44px;
+    z-index: 40;
+    width: min(360px, calc(100vw - 92px)) !important;
+    box-shadow: -22px 0 48px color-mix(in srgb, var(--shadow-color) 55%);
+  }
+  .right-panel.maximized {
+    flex: 0 0 auto;
+  }
+  .resize-handle {
     display: none;
   }
 }

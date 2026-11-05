@@ -76,7 +76,8 @@ export interface Host {
   group: string
   /** SSH 端口转发规则列表（持久化在 StoredHost.extra.tunnels） */
   tunnels?: TunnelRule[]
-  /** 登录密码（明文暂存，TODO: 迁移到系统钥匙串 tauri-plugin-keyring） */
+  /** 登录密码：仅运行期内存缓存（落盘的 StoredHost 不含此字段，真源是系统钥匙串）。
+   *  堡垒机外部连接的密码只来自链接，永不写入钥匙串。 */
   password?: string
   /** 公钥认证：私钥路径（存在时优先于 password，允许 ~ 前缀） */
   keyPath?: string
@@ -84,6 +85,13 @@ export interface Host {
   keyPassphrase?: string
   /** 传输层保活间隔（秒）：undefined = 缺省 30s，0 = 禁用（持久化在 StoredHost.extra.keepalive） */
   keepalive?: number
+  /**
+   * 堡垒机拉起的外部连接（不进主机列表、不落盘）：
+   * terminal = `ssh://` 链接（只开 PTY 一条通道）；sftp = `sftp://` 链接（只开 SFTP 子系统）。
+   * 该标记同时是所有"外部连接"门禁的判据：禁用钥匙串读写、历史会话、会话持久化、
+   * 指标采集与端口转发等一切会额外开通道或留下痕迹的能力。
+   */
+  external?: 'terminal' | 'sftp'
 }
 
 /**

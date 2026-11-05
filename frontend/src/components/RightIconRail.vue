@@ -6,16 +6,16 @@ import { savedSettings } from '../stores/settings'
 const isHome = computed(() => appView.value === 'home')
 const aiEnabled = computed(() => savedSettings.aiEnabled)
 
-/** AI 关闭时若正停留在 AI 页签，折叠面板并回退到监控页签 */
+/** AI 关闭时若正停留在 AI 页签，折叠面板并回退到主机页签 */
 watch(aiEnabled, on => {
   if (!on && rightPanelTab.value === 'ai') {
-    rightPanelTab.value = 'monitor'
+    rightPanelTab.value = 'hosts'
     rightPanelVisible.value = false
   }
 })
 
 /** 点击图标：面板折叠→展开并切到对应页签；当前页签激活中→折叠；否则仅切换页签 */
-function onIcon(tab: 'monitor' | 'ai') {
+function onIcon(tab: 'hosts' | 'ai') {
   if (rightPanelVisible.value && rightPanelTab.value === tab) {
     rightPanelVisible.value = false
   } else {
@@ -29,11 +29,11 @@ function onIcon(tab: 'monitor' | 'ai') {
   <aside class="icon-rail">
     <button
       class="rail-btn"
-      :class="{ on: rightPanelVisible && rightPanelTab === 'monitor' }"
-      :title="isHome ? '历史会话' : '监控'"
-      @click="onIcon('monitor')"
+      :class="{ on: rightPanelVisible && rightPanelTab === 'hosts' }"
+      :title="isHome ? '历史会话' : '主机列表'"
+      @click="onIcon('hosts')"
     >
-      <!-- 首页：历史会话（时钟）；工作台：监控（波形） -->
+      <!-- 首页：历史会话（时钟）；工作台：主机列表（服务器机架） -->
       <svg v-if="isHome" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="9" />
@@ -41,7 +41,9 @@ function onIcon(tab: 'monitor' | 'ai') {
       </svg>
       <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+        <rect x="3" y="4" width="18" height="7" rx="2" />
+        <rect x="3" y="13" width="18" height="7" rx="2" />
+        <path d="M7 7.5h.01M7 16.5h.01" />
       </svg>
     </button>
     <button
@@ -64,7 +66,7 @@ function onIcon(tab: 'monitor' | 'ai') {
 .icon-rail {
   width: 44px;
   flex-shrink: 0;
-  background: var(--panel);
+  background: var(--glass-panel);
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -99,10 +101,6 @@ function onIcon(tab: 'monitor' | 'ai') {
   border-color: rgba(61, 220, 132, 0.35);
 }
 
-/* 与工作台响应式一致：窄屏隐藏右侧栏整体（面板在同断点隐藏，见 RightPanel） */
-@media (max-width: 1180px) {
-  .icon-rail {
-    display: none;
-  }
-}
+/* 窄屏不再整体隐藏右侧栏：图标栏是浮层面板（主机 / 历史 / AI）的唯一入口，
+   面板在 ≤1180px 改为浮层，见 RightPanel 的同断点规则 */
 </style>

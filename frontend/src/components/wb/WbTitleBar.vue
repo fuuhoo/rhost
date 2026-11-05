@@ -3,9 +3,10 @@ import { appWindow, detectPlatform } from '../../lib/tauri'
 import AppLogo from '../AppLogo.vue'
 import { showNewConn } from '../../stores/hosts'
 import { showSettings } from '../../stores/settings'
+import { showPalette } from '../../lib/uiBus'
 import { toast } from '../../composables/useToast'
 import {
-  appView, dockVisible, openDock, rightPanelVisible, searchTick, sidebarVisible, toggleDock,
+  appView, dockVisible, monitorVisible, openDock, rightPanelVisible, searchTick, toggleDock,
 } from '../../stores/session'
 
 // macOS 由原生 Overlay 红绿灯渲染（左侧安全区）；Windows/Linux 前端自绘右侧窗口按钮
@@ -36,16 +37,16 @@ function onSearch() {
 
 function onSftp() {
   openDock('sftp')
-  toast('已打开 SFTP 文件管理', 'info', 1600)
+  toast('已打开「文件」面板', 'info', 1600)
 }
 
 function onPaletteClick() {
-  // TODO: 接入全局命令面板
-  toast('命令面板开发中', 'info')
+  showPalette.value = true
 }
 
+/** 通知中心尚无独立子系统；应用真实的事件流就是底部面板的运行日志页签 */
 function onNotify() {
-  toast('打开通知中心', 'info')
+  openDock('log')
 }
 
 function onSettings() {
@@ -74,7 +75,7 @@ function onSettings() {
     </button>
 
     <!-- SFTP -->
-    <button class="tb-btn" title="打开 SFTP" @click="onSftp">
+    <button class="tb-btn" title="打开文件面板（SFTP）" @click="onSftp">
       <svg viewBox="0 0 24 24"><path d="M4 7a2 2 0 012-2h3l2 2h7a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2V7z"/></svg>
     </button>
 
@@ -91,9 +92,9 @@ function onSettings() {
     <div class="tb-group">
       <button
         class="tb-toggle"
-        :class="{ active: sidebarVisible }"
-        title="显示 / 隐藏左侧栏"
-        @click="sidebarVisible = !sidebarVisible"
+        :class="{ active: monitorVisible }"
+        title="显示 / 隐藏监控面板（左栏）"
+        @click="monitorVisible = !monitorVisible"
       >
         <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>
       </button>
@@ -115,10 +116,9 @@ function onSettings() {
       </button>
     </div>
 
-    <!-- 通知 -->
-    <button class="tb-btn" title="通知" @click="onNotify">
+    <!-- 通知：打开底部运行日志（应用事件流） -->
+    <button class="tb-btn" title="运行日志" @click="onNotify">
       <svg viewBox="0 0 24 24"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 01-3.4 0"/></svg>
-      <span class="badge" style="display:none"></span>
     </button>
 
     <!-- 设置 -->

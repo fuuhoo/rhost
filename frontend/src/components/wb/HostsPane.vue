@@ -21,7 +21,7 @@ const groups = computed(() => {
 </script>
 
 <template>
-  <aside class="sidebar" :class="{ hide: false }">
+  <div class="hosts-root">
     <div class="search">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
            stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle>
@@ -30,6 +30,7 @@ const groups = computed(() => {
     </div>
 
     <div class="host-list">
+      <div v-if="!groups.length" class="hosts-empty">没有匹配的主机</div>
       <template v-for="g in groups" :key="g.name">
         <div class="group-label">{{ g.name }}</div>
         <div
@@ -46,5 +47,21 @@ const groups = computed(() => {
         </div>
       </template>
     </div>
-  </aside>
+  </div>
 </template>
+
+<style scoped>
+/* 右栏「主机」页签内容：宽度/背景/边框由 RightPanel 提供，这里只管纵向填充 */
+.hosts-root {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.hosts-empty {
+  padding: 14px 8px;
+  font-size: 11.5px;
+  color: var(--muted-2);
+  text-align: center;
+}
+</style>

@@ -161,10 +161,10 @@ onUnmounted(removeListeners)
   padding:4px 0;
   max-height:calc(100vh - 8px);
   overflow-y:auto;
-  background:rgba(13,19,28,.97);
+  background:var(--menu-bg);
   border:1px solid var(--border);
   border-radius:7px;
-  box-shadow:0 10px 34px rgba(0,0,0,.52),0 0 0 1px rgba(255,255,255,.02);
+  box-shadow:0 10px 34px color-mix(in srgb, var(--shadow-color) 55%),0 0 0 1px var(--veil-weak);
   backdrop-filter:blur(8px);
   user-select:none;
 }

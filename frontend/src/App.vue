@@ -14,7 +14,10 @@ import KeysModal from './components/KeysModal.vue'
 import PasswordModal from './components/PasswordModal.vue'
 import HostKeyModal from './components/HostKeyModal.vue'
 import ConfirmModal from './components/ConfirmModal.vue'
+import PaletteModal from './components/PaletteModal.vue'
 import AppToast from './components/AppToast.vue'
+import { installGlobalShortcuts } from './lib/shortcuts'
+import { startExternalLinks } from './lib/externalLinks'
 import { appView, restoreSessions, rightPanelMaximized, rightPanelVisible } from './stores/session'
 import { loadHosts } from './stores/hosts'
 import { savedSettings } from './stores/settings'
@@ -58,6 +61,13 @@ function clampSplashMs(v: unknown): number {
   return Math.min(SPLASH_MS_MAX, Math.max(SPLASH_MS_MIN, Number(v) || SPLASH_MS_DEFAULT))
 }
 
+// 设置驱动的全局快捷键（设置 → 快捷键）在 App 层唯一注册，避免与组件内监听重复派发
+let uninstallShortcuts: (() => void) | undefined
+onMounted(() => {
+  uninstallShortcuts = installGlobalShortcuts()
+})
+onBeforeUnmount(() => uninstallShortcuts?.())
+
 // 启动流程：先注册全局错误上报；然后从后端拉取全节配置快照（localStorage 已下线，
 // app_config.json 为唯一真相源）并 hydrate 各 store → 下发日志配置（热生效项立即一致；
 // logStoragePath 下次重启生效）→ 加载主机配置 → 恢复上次未关闭的会话（热启动）。
@@ -77,6 +87,9 @@ onMounted(async () => {
     syncLogConfig()
     await loadHosts()
     restoreSessions()
+    // 堡垒机外部连接（ssh:// / sftp://）入口：必须在 restoreSessions 之后——
+    // 恢复会话是整体赋值，先打开外部标签会被它抹掉
+    void startExternalLinks()
   })()
   await Promise.all([
     minDelay,
@@ -110,6 +123,7 @@ onMounted(async () => {
     <PasswordModal />
     <HostKeyModal />
     <ConfirmModal />
+    <PaletteModal />
     <AppToast />
   </div>
 </template>
