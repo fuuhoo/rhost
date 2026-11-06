@@ -71,19 +71,26 @@
     --hljs-meta:#56b6c2;
     /* 中文回退：JetBrains Mono 等拉丁等宽无 CJK 字形，缺这一步中文会掉到浏览器默认字体，字号与基线易不一致 */
     --mono:'JetBrains Mono','Cascadia Code','SF Mono',ui-monospace,Menlo,Consolas,'Sarasa Mono SC','Source Han Mono SC','Noto Sans Mono CJK SC','PingFang SC','Microsoft YaHei','Courier New',monospace;
+    /* 界面字体：FinalShell 用比例无衬线（Windows 上是微软雅黑，拉丁字形也一起排），
+     * 而我们此前整站走 --mono，数字/字母看着像终端。终端面另由设置里的字体驱动，不取此令牌。 */
+    --ui:'PingFang SC','Microsoft YaHei UI','Microsoft YaHei','Segoe UI',system-ui,-apple-system,'Helvetica Neue','Noto Sans SC',sans-serif;
 }
-/* ---------- 浅色主题（settings.ts applyTheme 写 html[data-theme="light"]） ---------- */
+/* ---------- 浅色主题（settings.ts applyTheme 写 html[data-theme="light"]） ----------
+ * 色值取自 FinalShell 4.6.5 浅色实测截图逐面板取样：所有表面是纯白 #ffffff，
+ * 次级带 #f9f9f9、分隔线 #e6e6e6/#dcdcdc、正文近中性黑、选中行淡蓝 #dfecf4。
+ * 我们旧值整体偏蓝灰（#f3f5f8/#eef1f6/#e9edf3/#2c3a4d），并列对比会显得「白得不一样」，
+ * 故中性化；语义色（成功/警告/强调）与终端底色不在此口径内，保持原值。 */
 html[data-theme="light"]{
     color-scheme:light;
-    --bg:#f3f5f8;
+    --bg:#f5f5f5;
     --panel:#ffffff;
-    --panel-2:#eef1f6;
-    --hover:#e6eaf1;
-    --border:#dbe1ea;
-    --border-soft:#e5eaf1;
-    --text:#2c3a4d;
-    --muted:#5d6b80;
-    --muted-2:#8a96a6;
+    --panel-2:#f7f7f7;
+    --hover:#efefef;
+    --border:#e3e3e3;
+    --border-soft:#ececec;
+    --text:#262626;
+    --muted:#666666;
+    --muted-2:#8c8c8c;
     --green:#0e9f6e;
     --cyan:#0891b2;
     --blue:#3b6fe0;
@@ -97,26 +104,26 @@ html[data-theme="light"]{
     --rhost-status-error:#dc2626;
     --rhost-status-idle:#8b93a1;
 
-    --text-strong:#0f1a28;
-    --text-soft:#5a6a7e;
-    --faint:#9aa5b3;
-    --fainter:#c3cad4;
-    --panel-deep:#e9edf3;
-    --panel-card:#eff2f7;
+    --text-strong:#111111;
+    --text-soft:#595959;
+    --faint:#a6a6a6;
+    --fainter:#c8c8c8;
+    --panel-deep:#f5f5f5;
+    --panel-card:#fafafa;
     --input-focus-bg:#ffffff;
-    --panel-grad-end:#e7ecf3;
-    --border-strong:#c8d0dc;
-    --kbd-bg:#e7ebf2;
-    --scrollbar-thumb:#c7cfd9;
-    --scrollbar-thumb-hover:#a6b1bf;
-    --titlebar-bg:rgba(252,253,255,.86);
+    --panel-grad-end:#f2f2f2;
+    --border-strong:#d4d4d4;
+    --kbd-bg:#f2f2f2;
+    --scrollbar-thumb:#c9c9c9;
+    --scrollbar-thumb-hover:#a8a8a8;
+    --titlebar-bg:rgba(250,250,250,.9);
     --menu-bg:rgba(255,255,255,.97);
-    --veil:rgba(18,32,54,.05);
-    --veil-weak:rgba(18,32,54,.025);
-    --veil-strong:rgba(18,32,54,.09);
+    --veil:rgba(0,0,0,.04);
+    --veil-weak:rgba(0,0,0,.02);
+    --veil-strong:rgba(0,0,0,.07);
     /* 终端底色：不用纯白，避免长时间阅读时的刺眼感（前景对比仍有约 14:1） */
     --term-bg:#f7f9fb;
-    --shadow-color:rgba(15,23,42,.42);
+    --shadow-color:rgba(0,0,0,.35);
     --hljs-kw:#8250df;
     --hljs-str:#116329;
     --hljs-num:#9a6700;
@@ -128,20 +135,17 @@ html[data-theme="light"]{
 }
 /* ---------- 浅色主题特例覆盖（单值变量表达不了的组件级调整） ---------- */
 html[data-theme="light"] body{
-    /* 浅色底上氛围光略加强，保持层次感 */
-    background:
-      radial-gradient(1000px 620px at 8% -14%, rgba(var(--accent-rgb),.10), transparent 62%),
-      radial-gradient(760px 520px at 96% -6%, rgba(59,111,224,.05), transparent 58%),
-      var(--glass-bg);
+    /* FinalShell 浅色是平涂白，没有氛围光；两团蓝紫径向渐变正是「白得不一样」的来源 */
+    background:var(--glass-bg);
 }
-html[data-theme="light"] .modal{box-shadow:0 40px 80px rgba(15,23,42,.18),0 0 0 1px rgba(18,32,54,.04)}
-html[data-theme="light"] .wc-btn:active{background:rgba(18,32,54,.16)}
+html[data-theme="light"] .modal{box-shadow:0 40px 80px rgba(0,0,0,.16),0 0 0 1px rgba(0,0,0,.04)}
+html[data-theme="light"] .wc-btn:active{background:rgba(0,0,0,.14)}
 html[data-theme="light"] .toast{background:rgba(255,255,255,.97)}
-html[data-theme="light"] .mask{background:rgba(15,23,42,.32)}
-html[data-theme="light"] .tnl-mask{background:rgba(15,23,42,.38)}
+html[data-theme="light"] .mask{background:rgba(0,0,0,.3)}
+html[data-theme="light"] .tnl-mask{background:rgba(0,0,0,.34)}
 html[data-theme="light"] .bcast-bar{background:rgba(255,255,255,.96)}
 html[data-theme="light"] .term-tools{background:rgba(255,255,255,.92)}
-html[data-theme="light"] .queue-tabs{background:rgba(18,32,54,.04)}
+html[data-theme="light"] .queue-tabs{background:rgba(0,0,0,.04)}
 /* 传输进度条的浅色主题底色：只给「等待中」用灰条。这条选择器比
    `.sftp-task.success` 一类状态规则更具体（多一个 html 元素），状态色必须逐条
    在浅色主题下重声明并压过它，否则整条被刷成 #cbd5e1，传完的任务看着像没传。
@@ -151,50 +155,50 @@ html[data-theme="light"] .sftp-task.running{--fill:linear-gradient(90deg,#1d4ed8
 html[data-theme="light"] .sftp-task.paused{--fill:linear-gradient(90deg,#b45309,#d97706)}
 html[data-theme="light"] .sftp-task.error{--fill:linear-gradient(90deg,#b91c1c,#dc2626)}
 html[data-theme="light"] .sftp-task.success{--fill:linear-gradient(90deg,#15803d,#22c55e)}
-/* 文件区浅色主题还原截图（FinalShell）色调：白底 + 浅灰表头条 + 浅灰斑马 + 浅蓝选中；
+/* 文件区浅色主题还原截图（FinalShell）色调：白底 + 白表头条 + 中性浅灰斑马 + 淡蓝选中；
    深色主题用等效色板，不刺眼 */
 html[data-theme="light"] .sftp-main,
 html[data-theme="light"] .pane{background:#fff}
-html[data-theme="light"] .list-header{background:#eceef2}
-html[data-theme="light"] .row:nth-child(even){background:#f5f7fa}
-html[data-theme="light"] .row:hover{background:#eef3fb}
-html[data-theme="light"] .row.selected{background:#dcebfb}
+html[data-theme="light"] .list-header{background:#ffffff}
+html[data-theme="light"] .row:nth-child(even){background:#f9f9f9}
+html[data-theme="light"] .row:hover{background:#f0f0f0}
+html[data-theme="light"] .row.selected{background:#dfecf4}
 html[data-theme="light"] .file-tree{background:#fff}
-html[data-theme="light"] .tree-row.active{background:#dcebfb}
-html[data-theme="light"] .row-icon{fill:#cfd6df}
+html[data-theme="light"] .tree-row.active{background:#dfecf4}
+html[data-theme="light"] .row-icon{fill:#d9d9d9}
 html[data-theme="light"] .row-kind,
 html[data-theme="light"] .row-size,
 html[data-theme="light"] .row-time,
 html[data-theme="light"] .row-perm,
 html[data-theme="light"] .row-user,
-html[data-theme="light"] .row-group{color:#7d8898}
+html[data-theme="light"] .row-group{color:#8c8c8c}
 /* —— 左侧监控面板浅色还原截图（FinalShell）色调 —— */
-html[data-theme="light"] .ri-bar .track{background:#fff;border-color:#d9dee6}
+html[data-theme="light"] .ri-bar .track{background:#fff;border-color:#dcdcdc}
 html[data-theme="light"] .ri-bar .fill{opacity:.85}
 html[data-theme="light"] .ri-proc-head{background:#5b9bd5}
-html[data-theme="light"] .ri-proc-row:nth-child(even){background:#eaf3fb}
-html[data-theme="light"] .ri-tbl-head{background:#eceef2}
+html[data-theme="light"] .ri-proc-row:nth-child(even){background:#f7f7f7}
+html[data-theme="light"] .ri-tbl-head{background:#ffffff}
 html[data-theme="light"] .ri-tbl-row .sbar{background:#bfe9d8}
-html[data-theme="light"] .ri-sys-btn{background:#e9f0f8;border-color:#c9d8ea;color:#2c3a4d}
-html[data-theme="light"] .ri-sys-btn:hover{border-color:#9fbcd9;color:#16233a}
-html[data-theme="light"] .ri-sys-btn.on{background:#dbe7f5;color:#16233a}
+html[data-theme="light"] .ri-sys-btn{background:#f5f5f5;border-color:#dcdcdc;color:#262626}
+html[data-theme="light"] .ri-sys-btn:hover{border-color:#b8b8b8;color:#111111}
+html[data-theme="light"] .ri-sys-btn.on{background:#e6e6e6;color:#111111}
 html[data-theme="light"] .ri-rate.up{color:#d97706}
 html[data-theme="light"] .ri-rate.down{color:#16a34a}
 html[data-theme="light"] .ri-text .k,
-html[data-theme="light"] .ri-addr .k{color:#101820}
-html[data-theme="light"] .ri-text .v{color:#101820}
-html[data-theme="light"] .ri-chart{background:#fff;border-color:#e2e8f0}
-html[data-theme="light"] .ri-proc{background:#fff;border-color:#e2e8f0}
-html[data-theme="light"] .ri-chart-top .ri-iface{color:#7d8898}
+html[data-theme="light"] .ri-addr .k{color:#1a1a1a}
+html[data-theme="light"] .ri-text .v{color:#1a1a1a}
+html[data-theme="light"] .ri-chart{background:#fff;border-color:#e3e3e3}
+html[data-theme="light"] .ri-proc{background:#fff;border-color:#e3e3e3}
+html[data-theme="light"] .ri-chart-top .ri-iface{color:#8c8c8c}
 /* 表头竖线在浅色下压深一档，拖拽位一目了然 */
-html[data-theme="light"] .list-header>div:not(:last-child){border-right-color:#d9dee6}
+html[data-theme="light"] .list-header>div:not(:last-child){border-right-color:#dcdcdc}
 /* —— 窗口标签条浅色还原截图（FinalShell）色调：浅灰条 + 白色圆角胶囊标签 —— */
-html[data-theme="light"] .tabs-bar{background:#eeeeef}
-html[data-theme="light"] .tab{background:#f7f7f8;border-color:#dcdce0;color:#4a4a52}
-html[data-theme="light"] .tab.active{background:#ffffff;border-color:#d4d4da;color:#1c1c22;box-shadow:0 1px 2px rgba(0,0,0,.08),inset 0 -2px 0 #3b82f6}
+html[data-theme="light"] .tabs-bar{background:#f5f5f5}
+html[data-theme="light"] .tab{background:#f2f2f2;border-color:#dcdcdc;color:#333333}
+html[data-theme="light"] .tab.active{background:#ffffff;border-color:#d4d4d4;color:#111111;box-shadow:0 1px 2px rgba(0,0,0,.08),inset 0 -2px 0 #3b82f6}
 html[data-theme="light"] .tab:hover{background:#ffffff}
-html[data-theme="light"] .tab .close{color:#8a8a93}
-html[data-theme="light"] .tab .close:hover{background:#e4e4e8;color:#dc3d5c}
+html[data-theme="light"] .tab .close{color:#8c8c8c}
+html[data-theme="light"] .tab .close:hover{background:#e4e4e4;color:#dc3d5c}
 html[data-theme="light"] .dot.online{background:#22c55e;box-shadow:none;animation:none}
 html[data-theme="light"] .dot.st-ok{background:#22c55e;box-shadow:none;animation:none}
 html[data-theme="light"] .log-row.WARN .log-msg{color:var(--yellow)}
@@ -216,7 +220,7 @@ body{
       radial-gradient(760px 520px at 96% -6%, rgba(122,162,247,.06), transparent 58%),
       var(--glass-bg);
     color:var(--text);
-    font-family:var(--mono);
+    font-family:var(--ui);
     font-size:13px;
     overflow:hidden;
     -webkit-font-smoothing:antialiased;
@@ -1877,7 +1881,7 @@ html[data-theme="light"] .tab-home{color:#3b82f6}
 .tp-empty .recent-item:hover{background:var(--hover);border-color:var(--border-soft);color:var(--text)}
 .tp-empty .recent-item .rname{font-weight:500;color:var(--text-soft);transition:color .13s}
 .tp-empty .recent-item:hover .rname{color:var(--text-strong)}
-.tp-empty .recent-item .raddr{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--muted-2)}
+.tp-empty .recent-item .raddr{margin-left:auto;font-family:var(--ui);font-size:11px;color:var(--muted-2)}
 .tp-empty .recent-item .rgo{opacity:0;color:var(--green);transition:opacity .13s;display:flex}
 .tp-empty .recent-item:hover .rgo{opacity:1}
 
@@ -1999,7 +2003,7 @@ html[data-theme="light"] .tab-home{color:#3b82f6}
 .path-input{
     flex:1;min-width:0;height:24px;padding:0 8px;
     background:var(--bg);border:1px solid var(--border);border-radius:5px;
-    color:var(--text-strong);font-family:var(--mono);font-size:11.5px;outline:none;
+    color:var(--text-strong);font-family:var(--ui);font-size:11.5px;outline:none;
 }
 .path-input:focus{border-color:var(--blue);box-shadow:0 0 0 2px rgba(59,130,246,.18)}
 .path-input:disabled{color:var(--muted-2);background:transparent}
@@ -2033,7 +2037,7 @@ html[data-theme="light"] .tab-home{color:#3b82f6}
 .tool-pop-item{
     text-align:left;padding:4px 7px;border-radius:4px;
     background:transparent;border:none;cursor:pointer;
-    color:var(--muted);font-family:var(--mono);font-size:11px;
+    color:var(--muted);font-family:var(--ui);font-size:11px;
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
 .tool-pop-item:hover{background:var(--hover);color:var(--text)}
@@ -2122,7 +2126,7 @@ html[data-theme="light"] .tab-home{color:#3b82f6}
 }
 .drop-hint-title{font-size:12.5px;font-weight:600;color:var(--text)}
 .drop-hint-path{
-    font-family:var(--mono);font-size:11px;color:var(--green);
+    font-family:var(--ui);font-size:11px;color:var(--green);
     max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
 .pane{
@@ -2411,7 +2415,7 @@ html[data-theme="light"] .tab-home{color:#3b82f6}
 .queue-summary{
     flex:0 1 auto;min-width:0;
     display:inline-flex;align-items:center;
-    color:var(--muted-2);font-size:10px;font-family:var(--mono);
+    color:var(--muted-2);font-size:10px;font-family:var(--ui);
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
     font-variant-numeric:tabular-nums;
 }
@@ -2543,7 +2547,7 @@ html[data-theme="light"] .tab-home{color:#3b82f6}
 /* 元信息行：字节 · 速率 · 备注 */
 .task-sub{
     display:flex;align-items:center;gap:7px;margin-top:4px;
-    font-family:var(--mono);font-size:10px;color:var(--muted-2);
+    font-family:var(--ui);font-size:10px;color:var(--muted-2);
     white-space:nowrap;overflow:hidden;
 }
 .task-sub .bytes{color:var(--muted);overflow:hidden;text-overflow:ellipsis}
@@ -2555,7 +2559,7 @@ html[data-theme="light"] .tab-home{color:#3b82f6}
 .acts{flex:0 0 auto;display:flex;align-items:center;gap:1px}
 .task-state{
     margin-right:5px;
-    font-family:var(--mono);font-size:10px;color:var(--muted-2);
+    font-family:var(--ui);font-size:10px;color:var(--muted-2);
     white-space:nowrap;
 }
 .sftp-task.pending .task-state{color:var(--muted-2)}
@@ -2587,7 +2591,7 @@ html[data-theme="light"] .tab-home{color:#3b82f6}
 .tc-item.error .tc-dot{background:var(--red)}
 .tc-name{
     flex:1;min-width:0;
-    font-family:var(--mono);font-size:10px;color:var(--muted);
+    font-family:var(--ui);font-size:10px;color:var(--muted);
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
 .tc-item.success .tc-name{color:var(--muted-2)}
@@ -2605,7 +2609,7 @@ html[data-theme="light"] .tab-home{color:#3b82f6}
 .tc-item.error .tc-bar i{background:var(--red)}
 .tc-meta{
     flex:0 0 108px;width:108px;text-align:right;
-    font-family:var(--mono);font-size:9.5px;color:var(--muted-2);
+    font-family:var(--ui);font-size:9.5px;color:var(--muted-2);
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
 
@@ -3423,7 +3427,7 @@ html[data-theme="light"] .tab-home{color:#3b82f6}
 .st-about-name{font-size:13.5px;font-weight:600;color:var(--text-strong)}
 .st-about-ver{
     font-size:10.5px;color:var(--muted-2);
-    margin-top:3px;font-family:var(--mono);
+    margin-top:3px;font-family:var(--ui);
 }
 .st-about-desc{
     font-size:10.5px;color:var(--muted-2);
@@ -3762,7 +3766,7 @@ html[data-theme="light"] .tab-home{color:#3b82f6}
 .qc-chip .k{color:var(--muted-2);font-size:10.5px}
 .qc-chip .v{
     color:var(--text);
-    font-family:var(--mono);
+    font-family:var(--ui);
     font-size:11px;
     max-width:200px;
     overflow:hidden;text-overflow:ellipsis;
@@ -4213,7 +4217,7 @@ html[data-theme="light"] .tab-home{color:#3b82f6}
 }
 .km-host-name{
     flex:1;min-width:0;
-    font-family:var(--mono);font-size:11.5px;color:var(--text);
+    font-family:var(--ui);font-size:11.5px;color:var(--text);
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
 .km-host-empty{padding:18px;text-align:center;font-size:11px;color:var(--muted-2)}

@@ -852,7 +852,7 @@ async function onDisconnect() {
 
 /* ============ ① 连接头部 ============ */
 .ri-body .mono {
-  font-family: var(--mono);
+  font-family: var(--ui);
 }
 .ri-head {
   padding: 12px 0 11px;
@@ -1041,7 +1041,7 @@ async function onDisconnect() {
   max-width: 66%;
 }
 .ri-kv .v.mono {
-  font-family: var(--mono);
+  font-family: var(--ui);
   font-size: 11.5px;
 }
 
@@ -1098,7 +1098,7 @@ async function onDisconnect() {
 .ri-bar .aux {
   position: relative;
   z-index: 1;
-  font-family: var(--mono);
+  font-family: var(--ui);
   font-size: 10.5px;
   white-space: nowrap;
 }
@@ -1136,7 +1136,7 @@ async function onDisconnect() {
 .ri-gpu-tag {
   flex: 0 0 auto;
   font-style: normal;
-  font-family: var(--mono);
+  font-family: var(--ui);
   font-size: 9.5px;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -1147,7 +1147,7 @@ async function onDisconnect() {
   padding: 1px 5px;
 }
 .ri-gpu-model {
-  font-family: var(--mono);
+  font-family: var(--ui);
   font-size: 11.5px;
   color: var(--text);
   overflow: hidden;
@@ -1227,7 +1227,7 @@ async function onDisconnect() {
   display: flex;
   align-items: center;
   gap: 10px;
-  font-family: var(--mono);
+  font-family: var(--ui);
   font-size: 11px;
 }
 .ri-rate.up {
@@ -1259,7 +1259,7 @@ async function onDisconnect() {
 .ri-plot .tick {
   position: absolute;
   left: 0;
-  font-family: var(--mono);
+  font-family: var(--ui);
   font-size: 9.5px;
   color: var(--muted-2);
   white-space: nowrap;
@@ -1326,7 +1326,7 @@ async function onDisconnect() {
   margin-left: auto;
   font-weight: 400;
   letter-spacing: 0;
-  font-family: var(--mono);
+  font-family: var(--ui);
   font-size: 10.5px;
 }
 .ri-tbl-head,
@@ -1372,14 +1372,14 @@ async function onDisconnect() {
 .ri-tbl-head span:not(:first-child),
 .ri-tbl-row span:not(:first-child) {
   text-align: right;
-  font-family: var(--mono);
+  font-family: var(--ui);
 }
 /* 竖线分隔符（FinalShell 表格口径）：只加在表头列头上，内容行不加 */
 .ri-tbl-head span:not(:last-child) {
   border-right: 1px solid var(--border-soft);
 }
 html[data-theme="light"] .ri-tbl-head span:not(:last-child) {
-  border-right-color: #d9dee6;
+  border-right-color: #dcdcdc;
 }
 /* 挂载点可能几十条（每个容器一条 overlay），表体固定为剩余高度内滚动 */
 .ri-tbl-body {
@@ -1409,7 +1409,7 @@ html[data-theme="light"] .ri-tbl-head span:not(:last-child) {
   display: flex;
   align-items: center;
   min-width: 0;
-  font-family: var(--mono);
+  font-family: var(--ui);
   color: var(--text);
   /* 长路径可横移浏览（grab 拖拽），滚动条隐藏 */
   overflow-x: auto;
@@ -1441,7 +1441,7 @@ html[data-theme="light"] .ri-tbl-head span:not(:last-child) {
   background: var(--menu-bg);
   border: 1px solid var(--border);
   color: var(--text);
-  font-family: var(--mono);
+  font-family: var(--ui);
   font-size: 11.5px;
   white-space: nowrap;
   overflow: hidden;
@@ -1534,13 +1534,13 @@ html[data-theme="light"] .ri-tbl-head span:not(:last-child) {
 .ri-proc-head span:not(:first-child),
 .ri-proc-row span:not(:first-child) {
   text-align: right;
-  font-family: var(--mono);
+  font-family: var(--ui);
 }
 .ri-proc-row .pname {
   display: flex;
   align-items: center;
   min-width: 0;
-  font-family: var(--mono);
+  font-family: var(--ui);
   color: var(--text);
   overflow: hidden;
   white-space: nowrap;
