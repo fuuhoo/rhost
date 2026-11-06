@@ -2,14 +2,15 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import ContextMenu, { type MenuItem } from './ContextMenu.vue'
 import {
-  activeSessionId, closeSession, sessions, openSession,
+  activeSessionId, appView, closeSession, sessions,
   closeOtherSessions, closeSessionsToLeft, closeSessionsToRight,
   closeDisconnectedSessions, closeAllSessions,
   reconnectBackend, disconnectSession, setSessionAlias,
   duplicateSession, isDuplicating, isExternalSession, openDock,
-  isBlankSession, openBlankSession,
+  isBlankSession, openBlankSession, openQuickConnectTab,
 } from '../../stores/session'
-import { hosts, showNewConn } from '../../stores/hosts'
+import { setHomeView } from '../../stores/homeView'
+import { showNewConn } from '../../stores/hosts'
 import { toast } from '../../composables/useToast'
 import type { Session } from '../../stores/session'
 
@@ -98,36 +99,10 @@ const barMenuItems = computed<MenuItem[]>(() => [
   },
 ])
 
-/* ---- 加号弹层：已保存主机列表（点选直接建连），底部保留「新建连接…」入口 ---- */
-const addMenu = ref<{ x: number; y: number } | null>(null)
-
-/** 在线优先、同态按名称排（与首页历史会话最近主机同口径） */
-const addHosts = computed(() =>
-  [...hosts.value].sort((a, b) => (a.status === 'online' ? 0 : 1) - (b.status === 'online' ? 0 : 1) || a.id.localeCompare(b.id)),
-)
-
-function hostDotCls(status: string) {
-  return status === 'online' ? 'h-on' : status === 'offline' ? 'h-off' : status === 'warn' ? 'h-warn' : 'h-idle'
-}
-
-function toggleAddMenu(e: MouseEvent) {
-  if (addMenu.value) { addMenu.value = null; return }
-  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
-  // 右缘夹取：弹层宽 264px，避免贴边溢出视窗
-  addMenu.value = {
-    x: Math.max(8, Math.min(rect.left, window.innerWidth - 272)),
-    y: rect.bottom + 6,
-  }
-}
-
-function onAddPick(hostId: string) {
-  addMenu.value = null
-  openSession(hostId)
-}
-
-function onAddNew() {
-  addMenu.value = null
-  showNewConn.value = true
+/* ---- 文件夹按钮：回到首页主机列表（FinalShell 连接管理器入口同位） ---- */
+function goHostsList() {
+  appView.value = 'home'
+  setHomeView('hosts')
 }
 
 /* ---- 事件处理 ---- */
@@ -452,6 +427,11 @@ watch(activeSessionId, () => {
 
 <template>
   <div class="tabs-bar" @contextmenu="onBarContext">
+    <!-- 文件夹：回到首页主机列表（FinalShell 连接管理器入口同位） -->
+    <button class="tab-home" title="返回首页主机列表" @click="goHostsList">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg>
+    </button>
+
     <button
       class="tab-arrow tab-arrow-left"
       :class="{ show: canScroll }"
@@ -496,13 +476,12 @@ watch(activeSessionId, () => {
             <span class="close" @click.stop="closeSession(s.id)">×</span>
           </div>
 
-          <!-- 标签尾部加号：弹出已保存主机列表（FinalShell 新建窗口同款交互） -->
+          <!-- 标签尾部加号：打开快速连接标签（FinalShell 新标签页同款交互） -->
           <button
             class="tab-add"
-            :class="{ on: addMenu !== null }"
-            title="新建连接 (⌘T)"
-            aria-label="新建连接"
-            @click="toggleAddMenu"
+            title="打开快速连接标签"
+            aria-label="打开快速连接标签"
+            @click="openQuickConnectTab"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
               <path d="M12 5v14M5 12h14" />
@@ -533,28 +512,6 @@ watch(activeSessionId, () => {
       @update:visible="(v) => { if (!v) closeMenu() }"
     />
 
-    <!-- 加号连接选择弹层：透明遮罩点击关闭，弹层固定定位于加号下方 -->
-    <div v-if="addMenu" class="tab-add-scrim" @click="addMenu = null" @contextmenu.prevent="addMenu = null" />
-    <div v-if="addMenu" class="tab-add-pop" :style="{ left: `${addMenu.x}px`, top: `${addMenu.y}px` }">
-      <div class="tap-head">选择连接</div>
-      <div class="tap-list">
-        <button
-          v-for="h in addHosts"
-          :key="h.id"
-          class="tap-item"
-          :disabled="h.status === 'offline'"
-          @click="onAddPick(h.id)"
-        >
-          <span class="dot" :class="hostDotCls(h.status)"></span>
-          <span class="tap-name">{{ h.id }}</span>
-          <span class="tap-addr">{{ h.user }}@{{ h.ip }}:{{ h.port }}</span>
-        </button>
-        <div v-if="addHosts.length === 0" class="tap-empty">暂无已保存的主机</div>
-      </div>
-      <button class="tap-new" @click="onAddNew">
-        新建连接…
-        <span class="tap-kbd">⌘T</span>
-      </button>
-    </div>
+
   </div>
 </template>

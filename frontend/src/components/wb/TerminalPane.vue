@@ -19,7 +19,7 @@ import { clampBgImgBlur, clampBgImgOpacity, resolveTerminalFontFamily, savedSett
 import { resolveTermBgImage } from '../../lib/termThemes'
 import {
   activeReconnectAttempt, activeSession, activeSessionId, attachTerminal,
-  autoReconnectDelayMs, detachTerminal, disconnectSession, isBlankSession, openSession, reconnectBackend,
+  autoReconnectDelayMs, clearRecentConnections, detachTerminal, disconnectSession, isBlankSession, openSession, recentConnections, reconnectBackend,
   reconnectTick, resizeTerminal, sendInput, sessions,
 } from '../../stores/session'
 import type { Session, SessionState } from '../../stores/session'
@@ -950,6 +950,27 @@ const recentHosts = computed(() =>
     .slice(0, 3),
 )
 
+/* ---- 快速连接列表（标签栏「+」/⌘⇧T 空白标签内容）：最近连接优先，其余按名称 ---- */
+const quickRows = computed(() => {
+  const seen = new Set<string>()
+  const rows: typeof hosts.value = []
+  for (const r of recentConnections.value) {
+    const h = hosts.value.find(x => x.id === r.hostId)
+    if (h && !seen.has(h.id)) {
+      seen.add(h.id)
+      rows.push(h)
+    }
+  }
+  const rest = hosts.value
+    .filter(h => !seen.has(h.id))
+    .sort((a, b) => a.id.localeCompare(b.id, 'zh-CN'))
+  return [...rows, ...rest]
+})
+const quickRecentCount = computed(() => {
+  const ids = new Set(hosts.value.map(h => h.id))
+  return recentConnections.value.filter(r => ids.has(r.hostId)).length
+})
+
 function dotClass(status: HostStatus) {
   return status === 'online' ? 'online' : status === 'offline' ? 'offline' : 'warn'
 }
@@ -1045,11 +1066,33 @@ function dotClass(status: HostStatus) {
         class="term-instance"
       ></div>
 
-      <!-- 空白终端窗口（新建窗口）提示：悬浮于空终端之上，不拦鼠标（不挡右键菜单） -->
-      <div v-if="activeBlank" class="blank-hint" aria-hidden="true">
-        <div class="bh-title">空白终端窗口</div>
-        <div class="bh-text">双击右侧主机列表中的主机，在此窗口建立连接</div>
-        <div class="bh-keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>T</kbd> 新建窗口</div>
+      <!-- 快速连接：悬浮于空终端之上的列表面（最近连接优先），选中即原地转正为该主机连接；
+           右键菜单/终端区右缘热区仍可达，空态右击走应用菜单 -->
+      <div v-if="activeBlank" class="quick-conn">
+        <div class="qc-head">
+          <span class="qc-title">快速连接</span>
+          <button
+            v-if="quickRecentCount > 0"
+            class="qc-clear"
+            title="清空最近连接历史"
+            @click="clearRecentConnections"
+          >清空</button>
+        </div>
+        <div class="qc-list">
+          <button
+            v-for="(h, i) in quickRows"
+            :key="h.id"
+            class="qc-row"
+            :disabled="h.status === 'offline'"
+            @click="openSession(h.id)"
+          >
+            <span class="dot" :class="dotClass(h.status)"></span>
+            <span class="qc-name">{{ h.id }}</span>
+            <span class="qc-addr mono">{{ h.group || '/' }} · {{ h.user }}@{{ h.ip }}:{{ h.port }}</span>
+            <em v-if="i < quickRecentCount" class="qc-recent">最近</em>
+          </button>
+          <div v-if="quickRows.length === 0" class="qc-empty">还没有已保存的主机</div>
+        </div>
       </div>
     </div>
 
@@ -1455,20 +1498,43 @@ function dotClass(status: HostStatus) {
   font-family:'JetBrains Mono','SF Mono',Menlo,Consolas,monospace;color:var(--text);
 }
 
-/* 空白终端窗口（新建窗口）提示：居中悬浮于空终端之上，pointer-events:none
-   不拦鼠标——右键菜单、后续终端交互都不受影响 */
-.blank-hint{
-  position:absolute;inset:0;z-index:2;display:flex;flex-direction:column;align-items:center;
-  justify-content:center;gap:6px;pointer-events:none;user-select:none;
-  color:var(--muted);text-align:center;padding-bottom:40px;
+/* 快速连接：空白标签的完整列表面（FinalShell 新标签页同款），最近连接优先 */
+.quick-conn{
+  position:absolute;inset:0;z-index:2;display:flex;flex-direction:column;
+  background:var(--term-surface, var(--term-bg));
+  overflow:auto;
 }
-.blank-hint .bh-title{font-size:15px;font-weight:600;color:var(--text-soft);letter-spacing:.04em}
-.blank-hint .bh-text{font-size:12px}
-.blank-hint .bh-keys{margin-top:8px;font-size:11px;display:flex;align-items:center;gap:4px}
-.blank-hint .bh-keys kbd{
-  min-width:18px;height:18px;padding:0 5px;border-radius:4px;
-  border:1px solid var(--border);background:var(--veil);
-  display:inline-flex;align-items:center;justify-content:center;
-  font-size:10px;font-family:var(--mono);color:var(--muted);
+.quick-conn .qc-head{
+  display:flex;align-items:center;gap:10px;
+  padding:12px 16px 8px;flex-shrink:0;
 }
+.quick-conn .qc-title{font-size:13px;font-weight:600;color:var(--text-strong);letter-spacing:.04em}
+.quick-conn .qc-clear{
+  margin-left:auto;padding:3px 12px;border-radius:5px;
+  border:1px solid var(--border);background:transparent;
+  color:var(--muted);font-size:11px;cursor:pointer;transition:.12s;
+}
+.quick-conn .qc-clear:hover{color:var(--red);border-color:var(--red)}
+.quick-conn .qc-list{flex:1;min-height:0;overflow-y:auto;padding:0 8px 14px}
+.quick-conn .qc-row{
+  display:flex;align-items:center;gap:10px;width:100%;
+  padding:6px 10px;border:none;background:transparent;border-radius:6px;
+  color:var(--text);cursor:pointer;text-align:left;transition:background .12s;
+}
+.quick-conn .qc-row:hover:not(:disabled){background:rgba(var(--accent-rgb),.1)}
+.quick-conn .qc-row:disabled{color:var(--muted);cursor:default;opacity:.55}
+.quick-conn .qc-name{
+  flex:0 0 auto;min-width:0;font-size:12.5px;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;
+}
+.quick-conn .qc-addr{
+  flex:1 1 auto;min-width:0;font-family:var(--mono);font-size:11px;
+  color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.quick-conn .qc-recent{
+  flex:0 0 auto;font-style:normal;font-size:10px;
+  padding:1px 6px;border-radius:8px;
+  background:rgba(var(--accent-rgb),.14);color:var(--green);
+}
+.quick-conn .qc-empty{padding:22px;text-align:center;font-size:12px;color:var(--muted)}
 </style>

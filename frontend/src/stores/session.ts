@@ -1232,7 +1232,7 @@ export function isBlankSession(s: Session | null | undefined): boolean {
 }
 
 /** 新建一个空白终端标签（快捷键 ⌘⇧T / 标签栏右键菜单入口），返回会话 id */
-export function openBlankSession() {
+export function openBlankSession(alias = '新建窗口') {
   appView.value = 'workbench'
   const id = crypto.randomUUID()
   blankSessionIds.add(id)
@@ -1244,10 +1244,22 @@ export function openBlankSession() {
     disconnectReason: '',
     retryAt: null,
     resetSeq: 0,
-    alias: '',
+    alias,
   })
   activeSessionId.value = id
   return id
+}
+
+/** 新建快速连接标签（标签栏「+」语义，FinalShell 新标签页同款）：
+ *  标签直接呈现快速连接列表（最近连接优先），选中即原地转正为该主机连接 */
+export function openQuickConnectTab() {
+  return openBlankSession('快速连接')
+}
+
+/** 清空最近连接历史（快速连接列表顶部「清空」按钮） */
+export function clearRecentConnections() {
+  recentConnections.value = []
+  patchUiState({ recentConnections: [] })
 }
 
 export function openSession(hostId: string) {

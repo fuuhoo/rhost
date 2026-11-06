@@ -1564,7 +1564,18 @@ body{
 .tab.active{color:var(--text-strong);background:var(--panel-2);border-color:var(--border-strong);box-shadow:inset 0 -2px 0 var(--blue);
     /* 激活标签不参与压缩：溢出时只收缩非激活标签，激活标签恒为 190px */
     flex-shrink:0;}
-/* 标签尾部加号：新建连接，紧随最后一个标签（FinalShell 同款位置）。
+/* 标签栏首位文件夹按钮：返回首页主机列表（FinalShell 连接管理器入口同位） */
+.tab-home{
+    flex:0 0 auto;width:36px;height:100%;
+    display:grid;place-items:center;
+    background:transparent;border:none;
+    color:var(--blue);cursor:pointer;
+    transition:color .15s,background-color .15s;
+}
+.tab-home svg{width:17px;height:17px}
+.tab-home:hover{color:var(--text);background:var(--hover)}
+html[data-theme="light"] .tab-home{color:#3b82f6}
+/* 标签尾部加号：打开快速连接标签，紧随最后一个标签（FinalShell 新标签页同款位置）。
    非 .tab，不参与拖拽换位与压缩分配；随轨道横向滚动，溢出时经箭头可达 */
 .tab-add{
     flex:0 0 auto;width:30px;
@@ -1574,51 +1585,6 @@ body{
     transition:color .15s,background-color .15s;
 }
 .tab-add:hover{color:var(--text);background:var(--hover)}
-.tab-add.on{color:var(--text);background:var(--hover)}
-/* 加号连接选择弹层：已保存主机列表，点选直接建连（固定定位挂 body 层级语义） */
-.tab-add-scrim{position:fixed;inset:0;z-index:9998}
-.tab-add-pop{
-    position:fixed;z-index:9999;width:264px;
-    display:flex;flex-direction:column;
-    background:var(--bg);border:1px solid var(--border);border-radius:8px;
-    box-shadow:0 12px 32px rgba(0,0,0,.28);
-    overflow:hidden;
-}
-.tab-add-pop .tap-head{
-    padding:8px 12px 6px;font-size:10.5px;font-weight:700;letter-spacing:.08em;
-    color:var(--muted-2);border-bottom:1px solid var(--border-soft);
-}
-.tab-add-pop .tap-list{max-height:296px;overflow-y:auto;overscroll-behavior:contain;padding:4px}
-.tab-add-pop .tap-list::-webkit-scrollbar{width:8px}
-.tab-add-pop .tap-list::-webkit-scrollbar-thumb{background:var(--scrollbar-thumb);border-radius:4px}
-.tap-item{
-    display:flex;align-items:center;gap:8px;width:100%;
-    padding:6px 8px;border:none;background:transparent;border-radius:6px;
-    color:var(--text);font-size:11.5px;cursor:pointer;text-align:left;
-    transition:background-color .12s;
-}
-.tap-item:hover:not(:disabled){background:var(--hover)}
-.tap-item:disabled{color:var(--muted);cursor:default;opacity:.55}
-.tap-item .dot{flex-shrink:0;width:7px;height:7px;border-radius:50%}
-.tap-item .dot.h-on{background:var(--green)}
-.tap-item .dot.h-idle{background:var(--muted)}
-.tap-item .dot.h-warn{background:var(--yellow)}
-.tap-item .dot.h-off{background:var(--border-strong)}
-.tap-item .tap-name{flex-shrink:0;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tap-item .tap-addr{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-family:var(--mono);font-size:10.5px}
-.tap-item:disabled .tap-addr{color:var(--muted)}
-.tap-add-pop .tap-empty{padding:14px 12px;font-size:11.5px;color:var(--muted);text-align:center}
-.tab-add-pop .tap-new{
-    display:flex;align-items:center;justify-content:space-between;
-    padding:8px 12px;border:none;border-top:1px solid var(--border-soft);
-    background:transparent;color:var(--text);font-size:11.5px;cursor:pointer;
-    transition:background-color .12s;
-}
-.tab-add-pop .tap-new:hover{background:var(--hover)}
-.tab-add-pop .tap-new .tap-kbd{
-    padding:1px 5px;border:1px solid var(--border);border-radius:4px;
-    font-size:10px;font-family:var(--mono);color:var(--muted);
-}
 /* 拖拽态：全部 grabbing、禁止文本选中；特异性高于 .tab 的 cursor:pointer */
 .tabs-scroll.dragging{cursor:grabbing}
 .tabs-scroll.dragging .tab,.tabs-scroll.dragging .tab *{cursor:grabbing;user-select:none}
