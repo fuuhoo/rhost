@@ -9,6 +9,7 @@ import { savedSettings } from '../../stores/settings'
 import { toast } from '../../composables/useToast'
 import { confirmDialog } from '../../composables/useConfirm'
 import TunnelPane from './TunnelPane.vue'
+import FileIcon from './FileIcon.vue'
 import PermModal from './PermModal.vue'
 import { detectPlatform, isTauri } from '../../lib/tauri'
 import { dropToCss, watchFileDrop } from '../../lib/fileDrop'
@@ -2984,20 +2985,7 @@ onUnmounted(() => {
                     @contextmenu.stop="onRowContext($event, 'local', e)"
                   >
                     <div class="row-name">
-                      <svg class="row-icon" viewBox="0 0 24 24">
-                        <defs>
-                          <linearGradient id="rk-folder-back" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#E8B34A"/><stop offset="1" stop-color="#C98F22"/></linearGradient>
-                          <linearGradient id="rk-folder-front" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFE9A8"/><stop offset=".55" stop-color="#F8CB4C"/><stop offset="1" stop-color="#EEA82E"/></linearGradient>
-                        </defs>
-                        <g v-if="e.type==='dir'" stroke="#9C6F14" stroke-width=".7" stroke-linejoin="round">
-                          <path d="M2.8 6.4c0-1 .8-1.7 1.8-1.7h4.5l2.2 2.6h9.5c1 0 1.8.8 1.8 1.8v1.6H2.8z" fill="url(#rk-folder-back)"/>
-                          <path d="M3.4 9.6h17.2l-1.1 8.8c-.1 1-.9 1.7-1.9 1.7H6.4c-1 0-1.8-.7-1.9-1.7z" fill="url(#rk-folder-front)"/>
-                        </g>
-                        <template v-else>
-                          <path d="M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9z"/>
-                          <path d="M14 3v6h6"/>
-                        </template>
-                      </svg>
+                      <FileIcon :dir="e.type==='dir'" />
                       <!-- 重命名：原位行内编辑；其它情况纯文本 -->
                       <input v-if="edit && edit.side==='local' && edit.kind==='rename' && edit.origName===e.name"
                              ref="editInput" v-model="editName" class="rename-input"
@@ -3021,20 +3009,7 @@ onUnmounted(() => {
                   <div v-if="edit && edit.side==='local' && (edit.kind==='mkdir' || edit.kind==='mkfile')"
                        class="row mkdir-row">
                     <div class="row-name">
-                      <svg class="row-icon" viewBox="0 0 24 24">
-                        <defs>
-                          <linearGradient id="rk-folder-back" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#E8B34A"/><stop offset="1" stop-color="#C98F22"/></linearGradient>
-                          <linearGradient id="rk-folder-front" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFE9A8"/><stop offset=".55" stop-color="#F8CB4C"/><stop offset="1" stop-color="#EEA82E"/></linearGradient>
-                        </defs>
-                        <g v-if="edit.kind==='mkdir'" stroke="#9C6F14" stroke-width=".7" stroke-linejoin="round">
-                          <path d="M2.8 6.4c0-1 .8-1.7 1.8-1.7h4.5l2.2 2.6h9.5c1 0 1.8.8 1.8 1.8v1.6H2.8z" fill="url(#rk-folder-back)"/>
-                          <path d="M3.4 9.6h17.2l-1.1 8.8c-.1 1-.9 1.7-1.9 1.7H6.4c-1 0-1.8-.7-1.9-1.7z" fill="url(#rk-folder-front)"/>
-                        </g>
-                        <template v-else>
-                          <path d="M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9z"/>
-                          <path d="M14 3v6h6"/>
-                        </template>
-                      </svg>
+                      <FileIcon :dir="edit.kind==='mkdir'" />
                       <input ref="editInput" v-model="editName" class="mkdir-input"
                              :placeholder="edit.kind==='mkdir' ? '输入文件夹名，回车确认' : '输入文件名，回车确认'"
                              @keydown.enter.prevent="confirmEdit"
@@ -3081,20 +3056,7 @@ onUnmounted(() => {
                     @contextmenu.stop="onRowContext($event, 'remote', e)"
                   >
                     <div class="row-name">
-                      <svg class="row-icon" viewBox="0 0 24 24">
-                        <defs>
-                          <linearGradient id="rk-folder-back" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#E8B34A"/><stop offset="1" stop-color="#C98F22"/></linearGradient>
-                          <linearGradient id="rk-folder-front" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFE9A8"/><stop offset=".55" stop-color="#F8CB4C"/><stop offset="1" stop-color="#EEA82E"/></linearGradient>
-                        </defs>
-                        <g v-if="e.type==='dir'" stroke="#9C6F14" stroke-width=".7" stroke-linejoin="round">
-                          <path d="M2.8 6.4c0-1 .8-1.7 1.8-1.7h4.5l2.2 2.6h9.5c1 0 1.8.8 1.8 1.8v1.6H2.8z" fill="url(#rk-folder-back)"/>
-                          <path d="M3.4 9.6h17.2l-1.1 8.8c-.1 1-.9 1.7-1.9 1.7H6.4c-1 0-1.8-.7-1.9-1.7z" fill="url(#rk-folder-front)"/>
-                        </g>
-                        <template v-else>
-                          <path d="M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9z"/>
-                          <path d="M14 3v6h6"/>
-                        </template>
-                      </svg>
+                      <FileIcon :dir="e.type==='dir'" />
                       <input v-if="edit && edit.side==='remote' && edit.kind==='rename' && edit.origName===e.name"
                              ref="editInput" v-model="editName" class="rename-input"
                              @keydown.enter.prevent="confirmEdit"
@@ -3117,20 +3079,7 @@ onUnmounted(() => {
                   <div v-if="edit && edit.side==='remote' && (edit.kind==='mkdir' || edit.kind==='mkfile')"
                        class="row mkdir-row">
                     <div class="row-name">
-                      <svg class="row-icon" viewBox="0 0 24 24">
-                        <defs>
-                          <linearGradient id="rk-folder-back" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#E8B34A"/><stop offset="1" stop-color="#C98F22"/></linearGradient>
-                          <linearGradient id="rk-folder-front" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFE9A8"/><stop offset=".55" stop-color="#F8CB4C"/><stop offset="1" stop-color="#EEA82E"/></linearGradient>
-                        </defs>
-                        <g v-if="edit.kind==='mkdir'" stroke="#9C6F14" stroke-width=".7" stroke-linejoin="round">
-                          <path d="M2.8 6.4c0-1 .8-1.7 1.8-1.7h4.5l2.2 2.6h9.5c1 0 1.8.8 1.8 1.8v1.6H2.8z" fill="url(#rk-folder-back)"/>
-                          <path d="M3.4 9.6h17.2l-1.1 8.8c-.1 1-.9 1.7-1.9 1.7H6.4c-1 0-1.8-.7-1.9-1.7z" fill="url(#rk-folder-front)"/>
-                        </g>
-                        <template v-else>
-                          <path d="M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9z"/>
-                          <path d="M14 3v6h6"/>
-                        </template>
-                      </svg>
+                      <FileIcon :dir="edit.kind==='mkdir'" />
                       <input ref="editInput" v-model="editName" class="mkdir-input"
                              :placeholder="edit.kind==='mkdir' ? '输入文件夹名，回车确认' : '输入文件名，回车确认'"
                              @keydown.enter.prevent="confirmEdit"
