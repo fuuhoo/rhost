@@ -34,6 +34,8 @@ export interface Session {
 }
 
 export const appView = ref<AppView>('home')
+/** 快速连接弹窗（标签栏「+」入口）：浮在工作台之上，选完即关，不占用页签 */
+export const showQuickConnect = ref(false)
 export const sessions = ref<Session[]>([])
 export const activeSessionId = ref<string | null>(null)
 
@@ -1252,12 +1254,6 @@ export function openBlankSession(alias = '新建窗口') {
   })
   activeSessionId.value = id
   return id
-}
-
-/** 新建快速连接标签（标签栏「+」语义，FinalShell 新标签页同款）：
- *  标签直接呈现快速连接列表（最近连接优先），选中即原地转正为该主机连接 */
-export function openQuickConnectTab() {
-  return openBlankSession('快速连接')
 }
 
 /** 清空最近连接历史（快速连接列表顶部「清空」按钮） */

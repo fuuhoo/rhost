@@ -7,7 +7,7 @@ import {
   closeDisconnectedSessions, closeAllSessions,
   reconnectBackend, disconnectSession, setSessionAlias,
   duplicateSession, isDuplicating, isExternalSession, openDock,
-  isBlankSession, openBlankSession, openQuickConnectTab,
+  isBlankSession, openBlankSession, showQuickConnect,
 } from '../../stores/session'
 import { setHomeView } from '../../stores/homeView'
 import { showNewConn } from '../../stores/hosts'
@@ -476,12 +476,12 @@ watch(activeSessionId, () => {
             <span class="close" @click.stop="closeSession(s.id)">×</span>
           </div>
 
-          <!-- 标签尾部加号：打开快速连接标签（FinalShell 新标签页同款交互） -->
+          <!-- 标签尾部加号：打开快速连接弹窗（不新建页签，选完回到当前会话） -->
           <button
             class="tab-add"
-            title="打开快速连接标签"
-            aria-label="打开快速连接标签"
-            @click="openQuickConnectTab"
+            title="快速连接"
+            aria-label="快速连接"
+            @click="showQuickConnect = true"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
               <path d="M12 5v14M5 12h14" />

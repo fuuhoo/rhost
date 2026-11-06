@@ -3,6 +3,7 @@ import MonitorPanel from '../components/wb/MonitorPanel.vue'
 import WbTabs from '../components/wb/WbTabs.vue'
 import TerminalPane from '../components/wb/TerminalPane.vue'
 import DockPanel from '../components/wb/DockPanel.vue'
+import QuickConnectModal from '../components/wb/QuickConnectModal.vue'
 import { dockVisible, monitorVisible, sftpFillActive } from '../stores/session'
 </script>
 
@@ -20,5 +21,8 @@ import { dockVisible, monitorVisible, sftpFillActive } from '../stores/session'
         <DockPanel v-show="dockVisible || sftpFillActive" />
       </main>
     </div>
+
+    <!-- 标签栏「+」的落点：自身 Teleport 到 body，故可与工作台同生命周期常驻 -->
+    <QuickConnectModal />
   </div>
 </template>
