@@ -212,6 +212,40 @@ fn keyring_entry(host_id: &str) -> Result<Entry, String> {
     Entry::new(KEYRING_SERVICE, host_id).map_err(|e| format!("创建钥匙串条目失败: {e}"))
 }
 
+/// 钥匙串读写结果埋点：只记条目归属与秘密长度，绝不记内容。
+///
+/// `kind`：read 为 `hit`/`miss`/`err`，write 为 `ok`/`fail`。前端读不到密码时
+/// 一律回退到弹框询问，现象相同、成因不同，只能靠这条日志区分。
+fn emit_keychain(
+    op: &str,
+    kind: &str,
+    host_id: &str,
+    code: Option<i32>,
+    err: Option<&str>,
+    len: Option<usize>,
+) {
+    let quiet = matches!(kind, "ok" | "hit" | "miss" | "deleted" | "noop");
+    crate::applog::emit(
+        if quiet { log::Level::Info } else { log::Level::Warn },
+        "ipc",
+        if op == "read" {
+            crate::applog::events::IPC_KEYCHAIN_READ
+        } else {
+            crate::applog::events::IPC_KEYCHAIN_WRITE
+        },
+        None,
+        format!("钥匙串 {op} {kind}：主机 [{host_id}]"),
+        Some(serde_json::json!({
+            "op": op,
+            "kind": kind,
+            "host_id": host_id,
+            "code": code,
+            "err": err.map(|e| e.chars().take(200).collect::<String>()),
+            "secret_len": len,
+        })),
+    );
+}
+
 /* ---- macOS 专用：security 命令行工具 ----
  *
  * macOS Keychain 基于代码签名做访问控制（ACL）。`cargo tauri dev` 模式下
@@ -237,12 +271,26 @@ fn macos_security_save(host_id: &str, password: &str) -> Result<(), String> {
         .output()
         .map_err(|e| format!("执行 security 命令失败: {e}"))?;
     if output.status.success() {
+        emit_keychain(
+            "write",
+            "ok",
+            host_id,
+            Some(output.status.code().unwrap_or(-1)),
+            None,
+            Some(password.chars().count()),
+        );
         Ok(())
     } else {
-        Err(format!(
-            "security add-generic-password 失败: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
+        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        emit_keychain(
+            "write",
+            "fail",
+            host_id,
+            Some(output.status.code().unwrap_or(-1)),
+            Some(&err),
+            None,
+        );
+        Err(format!("security add-generic-password 失败: {err}"))
     }
 }
 
@@ -259,11 +307,23 @@ fn macos_security_get(host_id: &str) -> Result<Option<String>, String> {
         ])
         .output()
         .map_err(|e| format!("执行 security 命令失败: {e}"))?;
+    let code = output.status.code().unwrap_or(-1);
     if output.status.success() {
         let pwd = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        emit_keychain("read", "hit", host_id, Some(code), None, Some(pwd.chars().count()));
         Ok(Some(pwd))
     } else {
-        // exit code 44 = 条目不存在
+        // 44 = 条目不存在；其余（如 ACL 被拒、钥匙串锁住）是真实故障，
+        // 两者都会让前端回退到弹框询问，只靠现象分不开，故各自留一条日志。
+        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        emit_keychain(
+            "read",
+            if code == 44 { "miss" } else { "err" },
+            host_id,
+            Some(code),
+            Some(&err),
+            None,
+        );
         Ok(None)
     }
 }
@@ -280,8 +340,16 @@ fn macos_security_delete(host_id: &str) -> Result<(), String> {
         ])
         .output()
         .map_err(|e| format!("执行 security 命令失败: {e}"))?;
-    // 条目不存在不报错
-    let _ = output.status;
+    // 条目不存在不报错，但要留痕：改名/导入也会走到这里删条目，
+    // 「密码突然要重输」往往就是这条删掉了它
+    emit_keychain(
+        "write",
+        if output.status.success() { "deleted" } else { "noop" },
+        host_id,
+        output.status.code(),
+        None,
+        None,
+    );
     Ok(())
 }
 
@@ -293,9 +361,17 @@ pub(crate) fn keyring_save(host_id: &str, password: &str) -> Result<(), String> 
     }
     #[cfg(not(target_os = "macos"))]
     {
-        keyring_entry(host_id)?
-            .set_password(password)
-            .map_err(|e| e.to_string())
+        match keyring_entry(host_id)?.set_password(password) {
+            Ok(()) => {
+                emit_keychain("write", "ok", host_id, None, None, Some(password.chars().count()));
+                Ok(())
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                emit_keychain("write", "fail", host_id, None, Some(&msg), None);
+                Err(msg)
+            }
+        }
     }
 }
 
@@ -308,9 +384,19 @@ pub(crate) fn keyring_get(host_id: &str) -> Result<Option<String>, String> {
     #[cfg(not(target_os = "macos"))]
     {
         match keyring_entry(host_id)?.get_password() {
-            Ok(pwd) => Ok(Some(pwd)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(e.to_string()),
+            Ok(pwd) => {
+                emit_keychain("read", "hit", host_id, None, None, Some(pwd.chars().count()));
+                Ok(Some(pwd))
+            }
+            Err(keyring::Error::NoEntry) => {
+                emit_keychain("read", "miss", host_id, None, None, None);
+                Ok(None)
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                emit_keychain("read", "err", host_id, None, Some(&msg), None);
+                Err(msg)
+            }
         }
     }
 }
@@ -324,9 +410,19 @@ fn keyring_delete(host_id: &str) -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
     {
         match keyring_entry(host_id)?.delete_credential() {
-            Ok(()) => Ok(()),
-            Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(e.to_string()),
+            Ok(()) => {
+                emit_keychain("write", "deleted", host_id, None, None, None);
+                Ok(())
+            }
+            Err(keyring::Error::NoEntry) => {
+                emit_keychain("write", "noop", host_id, None, None, None);
+                Ok(())
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                emit_keychain("write", "fail", host_id, None, Some(&msg), None);
+                Err(msg)
+            }
         }
     }
 }
@@ -335,13 +431,11 @@ fn keyring_delete(host_id: &str) -> Result<(), String> {
 
 /// 保存密码到系统钥匙串。
 pub fn save_password(_app: &AppHandle, host_id: &str, password: &str) -> Result<(), String> {
-    log::info!("save_password: 保存主机 [{host_id}] 的密码到系统钥匙串");
     keyring_save(host_id, password)
 }
 
 /// 从系统钥匙串读取密码。
 pub fn get_password(_app: &AppHandle, host_id: &str) -> Result<Option<String>, String> {
-    log::info!("get_password: 从系统钥匙串读取主机 [{host_id}] 的密码");
     keyring_get(host_id)
 }
 

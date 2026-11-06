@@ -224,6 +224,8 @@
 | 采集能力缺失（常态） | `metrics.collect.degraded` | DEBUG | `GPU 指标不可用，跳过`（component=gpu, reason=not_present）/ `目标主机不支持指标采集，转入慢轮询`（component=exec, reason=unsupported，首轮从未成功即失败，如无 procfs）：目标主机本就没有该能力（云主机/虚拟机常态），非故障；每采集任务首次确认记一次 |
 | 采集运行时降级（故障） | `metrics.collect.degraded` | WARN | `采集连续失败，指标降级为慢轮询`：component=exec、reason=runtime_failure、consecutive、backoff_ms、err；仅曾采集成功后连续失败才告警，边沿触发，恢复后再次达到阈值才重记 |
 | 慢 IPC 调用 | `ipc.slow_call` | WARN | `IPC 调用耗时过长` cmd、elapsed_ms（阈值 2000ms，只告警不阻断）。**豁免**：`sftp_upload`/`sftp_download` 等流式传输命令——大文件天然长耗时，进度由 Channel 推送，invoke 总时长不反映卡顿且包含用户主动暂停时间；传输卡顿监控应基于进度帧间隔而非 invoke 时长 |
+| 钥匙串读取结果 | `ipc.keychain_read` | INFO/WARN | `钥匙串 read …：主机 [id]` op、kind（hit/miss/err）、host_id、code（security 退出码，44=无条目）、err、secret_len（**只记长度，绝不记内容**）。前端读不到密码一律回退弹框询问，hit/miss/err 三种成因现象相同，只能靠这条区分 |
+| 钥匙串写入/删除结果 | `ipc.keychain_write` | INFO/WARN | `钥匙串 write …：主机 [id]` kind（ok/fail/deleted/noop）、code、err、secret_len；改名与导入合并会先删旧 id 条目，「密码突然要重输」通常就是这条 |
 | 前端 IPC 错误 | `web.ipc.error` | ERROR | 前端 invoke 失败统一上报：cmd、err |
 | 前端未捕获异常 | `web.unhandled_error` | ERROR | window.onerror / unhandledrejection：err、stack 摘要（截断 500 字符） |
 | 堡垒机外部链接入队 | `external.link_open` | INFO | `收到堡垒机外部连接链接` source（cli/second_instance/url_event）、count、rejected、targets（`user@host:port`，sftp 加后缀）；**kv 永不含密码** |

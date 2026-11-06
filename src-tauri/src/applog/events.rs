@@ -103,6 +103,10 @@ pub const METRICS_COLLECT_START: &str = "metrics.collect.start";
 pub const METRICS_COLLECT_STOP: &str = "metrics.collect.stop";
 pub const METRICS_COLLECT_DEGRADED: &str = "metrics.collect.degraded";
 pub const IPC_SLOW_CALL: &str = "ipc.slow_call";
+/// 钥匙串读结果（命中/无条目/失败 + security 退出码），排查「升级后又要输密码」
+pub const IPC_KEYCHAIN_READ: &str = "ipc.keychain_read";
+/// 钥匙串写/删结果（含 security 退出码与 stderr），只记长度不记内容
+pub const IPC_KEYCHAIN_WRITE: &str = "ipc.keychain_write";
 pub const WEB_IPC_ERROR: &str = "web.ipc.error";
 pub const WEB_UNHANDLED_ERROR: &str = "web.unhandled_error";
 /// 第三方 crate 日志统一事件：原始 target 放 kv.crate_target
