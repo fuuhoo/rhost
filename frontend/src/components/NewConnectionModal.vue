@@ -151,6 +151,7 @@ const FORMS: Record<ConnType, { cards: CardDef[] }> = {
           if (v.jumpHost) p.push('跳板机')
           if (v.keepalive && v.keepalive !== '0') p.push('保活 ' + v.keepalive + 's')
           if (v.connectTimeout && v.connectTimeout !== '0') p.push('连接超时 ' + v.connectTimeout + 's')
+          if (v.testTimeout && v.testTimeout !== '0') p.push('测试超时 ' + v.testTimeout + 's')
           return p.join(' · ')
         },
         fields: [
@@ -167,6 +168,7 @@ const FORMS: Record<ConnType, { cards: CardDef[] }> = {
             hint: '多条跳板机按顺序串联' },
           { label: '保活间隔（秒）', name: 'keepalive', span: 1, value: '30', type: 'number', hint: '0 = 禁用' },
           { label: '连接超时（秒）', name: 'connectTimeout', span: 1, value: '30', type: 'number', hint: '0 = 不限制；含 TCP 建连 + 握手 + 认证' },
+          { label: '测试连接超时（秒）', name: 'testTimeout', span: 1, value: '30', type: 'number', hint: '0 = 不限制；「测试连接」按钮的等待上限' },
           { label: '压缩', name: 'compression', span: 1, type: 'select', value: 'off',
             options: [{ v: 'off', t: '关闭' }, { v: 'on', t: '开启' }] },
           { label: '主机密钥验证', name: 'hostKeyCheck', span: 1, type: 'select', value: 'ask',
@@ -308,6 +310,7 @@ const FORMS: Record<ConnType, { cards: CardDef[] }> = {
           if (v.jumpHost) p.push('跳板机')
           if (v.keepalive && v.keepalive !== '0') p.push('保活 ' + v.keepalive + 's')
           if (v.connectTimeout && v.connectTimeout !== '0') p.push('连接超时 ' + v.connectTimeout + 's')
+          if (v.testTimeout && v.testTimeout !== '0') p.push('测试超时 ' + v.testTimeout + 's')
           return p.join(' · ')
         },
         fields: [
@@ -324,6 +327,7 @@ const FORMS: Record<ConnType, { cards: CardDef[] }> = {
             hint: '多条跳板机按顺序串联' },
           { label: '保活间隔（秒）', name: 'keepalive', span: 1, value: '30', type: 'number', hint: '0 = 禁用' },
           { label: '连接超时（秒）', name: 'connectTimeout', span: 1, value: '30', type: 'number', hint: '0 = 不限制；含 TCP 建连 + 握手 + 认证' },
+          { label: '测试连接超时（秒）', name: 'testTimeout', span: 1, value: '30', type: 'number', hint: '0 = 不限制；「测试连接」按钮的等待上限' },
           { label: '压缩传输', name: 'compression', span: 1, type: 'select', value: 'off',
             options: [{ v: 'off', t: '关闭' }, { v: 'on', t: '开启' }] },
           { label: '主机密钥验证', name: 'hostKeyCheck', span: 1, type: 'select', value: 'ask',
@@ -593,9 +597,10 @@ watch(showNewConn, async v => {
     editingId.value = h.id
     // 回填端口转发规则（拷贝一份，取消编辑时不污染原数据）
     tunnelRules.value = (h.tunnels ?? []).map(t => ({ ...t }))
-    // 回填保活间隔与连接超时：未配置走缺省 30s
+    // 回填保活间隔与连接/测试超时：未配置走缺省 30s
     d.keepalive = String(h.keepalive ?? 30)
     d.connectTimeout = String(h.connectTimeout ?? 30)
+    d.testTimeout = String(h.testTimeout ?? 30)
   } else {
     currentType.value = 'ssh'
     currentCardId.value = FORMS.ssh.cards[0].id
@@ -1054,6 +1059,7 @@ async function testConnection() {
               password: v.password,
               cols: 0,
               rows: 0,
+              testTimeoutSecs: Math.max(0, parseInt(v.testTimeout, 10) || 0),
               trustHostKey: trust,
               trustFingerprint: trustFp,
               trustHostKeyPersist: persist,
@@ -1150,6 +1156,8 @@ async function save() {
   const keepaliveVal = Math.max(0, parseInt(v.keepalive, 10) || 0)
   // 连接超时：非法输入回落 0（不限制），兜底同保活
   const connectTimeoutVal = Math.max(0, parseInt(v.connectTimeout, 10) || 0)
+  // 测试连接超时：同上
+  const testTimeoutVal = Math.max(0, parseInt(v.testTimeout, 10) || 0)
 
   /** 保存密码到系统钥匙串（Tauri 环境）；浏览器 dev 模式跳过。
    *  改名场景下旧 id 的钥匙串条目已由 updateHost 内部清理。 */
@@ -1175,6 +1183,7 @@ async function save() {
       tunnels: connType === 'ssh' ? tunnelsVal : undefined,
       keepalive: keepaliveVal,
       connectTimeout: connectTimeoutVal,
+      testTimeout: testTimeoutVal,
       // 密码仅暂存内存（hostToStored 不会写入 JSON），供本次会话连接直接使用；
       // 同时异步写入系统钥匙串，供下次启动读取
       password: v.auth === 'password' ? v.password : undefined,
@@ -1210,6 +1219,7 @@ async function save() {
       tunnels: isSftp ? undefined : tunnelsVal,
       keepalive: keepaliveVal,
       connectTimeout: connectTimeoutVal,
+      testTimeout: testTimeoutVal,
       // 密码仅暂存内存（不入 JSON），首次连接直接使用免弹框；钥匙串持久化由 persistPassword 完成
       password: v.auth === 'password' ? v.password : undefined,
     }

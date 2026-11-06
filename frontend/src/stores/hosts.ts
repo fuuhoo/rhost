@@ -62,6 +62,10 @@ function storedToHost(s: StoredHost): Host {
       typeof extra.connectTimeout === 'number' && extra.connectTimeout >= 0
         ? extra.connectTimeout
         : undefined,
+    testTimeout:
+      typeof extra.testTimeout === 'number' && extra.testTimeout >= 0
+        ? extra.testTimeout
+        : undefined,
     // password 不入 JSON，连接时从钥匙串按需读取
   }
 }
@@ -72,6 +76,7 @@ function hostToStored(h: Host, connType: string): StoredHost {
   if (h.tunnels?.length) extra.tunnels = h.tunnels
   if (h.keepalive !== undefined) extra.keepalive = h.keepalive
   if (h.connectTimeout !== undefined) extra.connectTimeout = h.connectTimeout
+  if (h.testTimeout !== undefined) extra.testTimeout = h.testTimeout
   return {
     id: h.id,
     connType,

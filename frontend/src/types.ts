@@ -87,6 +87,8 @@ export interface Host {
   keepalive?: number
   /** 连接建立总超时（秒，含 TCP 建连 + 握手 + 认证）：undefined = 缺省 30s，0 = 不限制（持久化在 StoredHost.extra.connectTimeout） */
   connectTimeout?: number
+  /** 测试连接总超时（秒，含 TCP 建连 + 握手 + 认证）：undefined = 缺省 30s，0 = 不限制（持久化在 StoredHost.extra.testTimeout） */
+  testTimeout?: number
   /**
    * 堡垒机拉起的外部连接（不进主机列表、不落盘）：
    * terminal = `ssh://` 链接（只开 PTY 一条通道）；sftp = `sftp://` 链接（只开 SFTP 子系统）。

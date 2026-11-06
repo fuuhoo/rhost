@@ -122,6 +122,10 @@ pub struct ConnectPayload {
     /// 按主机配置
     #[serde(default)]
     pub connect_timeout_secs: Option<u64>,
+    /// 测试连接总超时（秒，含 TCP 建连 + 握手 + 认证）：缺省 30s，0 = 不限制；
+    /// 仅用于 `test_ssh_connection`，按主机配置（表单字段）
+    #[serde(default)]
+    pub test_timeout_secs: Option<u64>,
     /// 堡垒机外部连接：全程只开一条通道，不开 MOTD/初始化脚本/指标/AI 工具的
     /// 辅助 exec 通道（缺省 false = 常规保存主机连接）
     #[serde(default)]
@@ -773,8 +777,9 @@ pub struct TestResult {
 
 /// 测试 SSH 连接：仅做 TCP 握手 + 认证（密码/公钥），成功即断，不申请 PTY、不注册会话池。
 ///
-/// 与正式连接共用 [`connect_and_auth`]，保证认证行为完全一致；用 10s 超时包裹，
-/// 避免不可达主机让用户久等。错误直接转字符串返回，前端可区分"连不上/认证错/超时"，
+/// 与正式连接共用 [`connect_and_auth`]，保证认证行为完全一致；用 payload 的
+/// 测试超时（缺省 30s，0 = 不限制）包裹，避免不可达主机让用户久等。
+/// 错误直接转字符串返回，前端可区分"连不上/认证错/超时"，
 /// 私钥加密时错误以 KEY_ENCRYPTED 前缀返回，前端据此弹口令框重试；
 /// 主机密钥未信任/变更时以 HOSTKEY_UNKNOWN / HOSTKEY_MISMATCH 前缀返回（同样命中
 /// check_server_key，QuickConnect 门禁的重试必须能构造 HostKeyCheck，设计 §6.3）。
@@ -798,7 +803,7 @@ pub async fn test_ssh_connection(
         color_prompt: false,
         env: Vec::new(),
         motd_logo: String::new(),
-        // 测试连接短生命周期（下方 10s 外层包装即断），保活与连接超时
+        // 测试连接短生命周期（下方外层包装即断），保活与内部连接超时
         // 均无意义：内部不设限，由外层统一兜底
         keepalive: None,
         connect_timeout: None,
@@ -813,21 +818,23 @@ pub async fn test_ssh_connection(
     // sid 用固定值便于排障时过滤测试连接日志。
     // -R 回调共享件给默认值：registry 为空表、闸门不参与，测试连接不做转发
     let algo = std::sync::Arc::new(std::sync::Mutex::new(None));
-    let handle = tokio::time::timeout(
-        Duration::from_secs(10),
-        connect_and_auth(
-            &cfg,
-            algo,
-            "test",
-            Default::default(),
-            std::sync::Arc::new(tokio::sync::Semaphore::new(
-                crate::ssh::tunnel::MAX_CONN_GLOBAL,
-            )),
-        ),
-    )
-    .await
-    .map_err(|_| "连接超时（10 秒内未响应）".to_string())?
-    .map_err(|e| e.to_string())?;
+    let test_fut = connect_and_auth(
+        &cfg,
+        algo,
+        "test",
+        Default::default(),
+        std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::ssh::tunnel::MAX_CONN_GLOBAL,
+        )),
+    );
+    // 测试超时：表单字段解析（缺省 30s，0 = 不限制）；None 时不限时
+    let handle = match resolve_connect_timeout(payload.test_timeout_secs) {
+        Some(d) => tokio::time::timeout(d, test_fut)
+            .await
+            .map_err(|_| format!("连接超时（{} 秒内未响应）", d.as_secs()))?
+            .map_err(|e| e.to_string())?,
+        None => test_fut.await.map_err(|e| e.to_string())?,
+    };
 
     let latency_ms = start.elapsed().as_millis() as u64;
     // 立即断开，不注册会话池、不留后台任务
