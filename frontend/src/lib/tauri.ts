@@ -28,3 +28,17 @@ export async function appWindow() {
   const { getCurrentWindow } = await import('@tauri-apps/api/window')
   return getCurrentWindow()
 }
+
+/**
+ * 应用版本展示串，如「2.3.0 · 开发版」（开发版仅在 debug 构建下出现）。
+ * 取 lib.rs 首帧注入的 window.__RHOST_BOOT__，与 Cargo.toml / tauri.conf.json /
+ * frontend/package.json 的版本同源；浏览器 dev 预览无注入时为空串，调用方需隐藏该行。
+ */
+export const appVersionLabel: string = (() => {
+  const boot = (window as unknown as {
+    __RHOST_BOOT__?: { appVersion?: string; appDevBuild?: boolean }
+  }).__RHOST_BOOT__
+  const v = boot?.appVersion
+  if (!v) return ''
+  return boot?.appDevBuild ? `${v} · 开发版` : v
+})()

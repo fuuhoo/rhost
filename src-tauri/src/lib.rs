@@ -111,6 +111,11 @@ pub fn run() {
                     // 同步注入运行平台（前端据此切换标题栏安全区与窗口控件渲染），
                     // 取 std::env::consts::OS：macos / windows / linux
                     "platform": std::env::consts::OS,
+                    // 同步注入应用版本与是否开发版：侧栏/关于卡片据此显示，
+                    // 走首帧注入而非异步 IPC，避免版本号先空后现的闪跳。
+                    // 版本取 Cargo.toml（与 tauri.conf.json、frontend/package.json 同步）
+                    "appVersion": env!("CARGO_PKG_VERSION"),
+                    "appDevBuild": cfg!(debug_assertions),
                     "uiTheme": ui_theme,
                     "opacity": opacity,
                 })

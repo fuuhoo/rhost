@@ -17,7 +17,7 @@ import {
   TERM_BG_BUILTINS, TERM_BG_BUILTIN_PREFIX,
   resolveTermBgImage, termBgBuiltinKey, termBgBuiltinThumb, termBgImageLabel,
 } from '../lib/termThemes'
-import { isTauri, detectPlatform } from '../lib/tauri'
+import { isTauri, detectPlatform, appVersionLabel } from '../lib/tauri'
 import { settingsFocusPanel } from '../lib/uiBus'
 import { pathBaseName, readFileFromPath } from '../lib/localFile'
 import { aiClearMemories, aiGetApiKey, aiListMemories, aiListPromptAssets, aiRevealPromptDir, aiSaveMemories, aiSetApiKey, aiTestConnection, AI_MEMORY_CONTENT_MAX_CHARS, type AiMemoryItem, type AiPromptAsset, type AiPromptAssets } from '../lib/ai'
@@ -1600,7 +1600,7 @@ function optionList(r: RowDef): Opt[] {
                 <div class="st-about-logo"><AppLogo /></div>
                 <div>
                   <div class="st-about-name">Rhost</div>
-                  <div class="st-about-ver">v0.1.0 · 开发版</div>
+                  <div v-if="appVersionLabel" class="st-about-ver">v{{ appVersionLabel }}</div>
                   <div class="st-about-desc">轻量、快速的 SSH 终端工作台。<br>基于 Web 技术构建，支持 GPU 加速渲染。</div>
                 </div>
               </div>

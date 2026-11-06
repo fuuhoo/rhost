@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import AppLogo from './AppLogo.vue'
+import { appVersionLabel } from '../lib/tauri'
 import { showSettings } from '../stores/settings'
 import { homeView, setHomeView } from '../stores/homeView'
 import { HOME_NAV, type HomeNavItem } from '../config/homeNav'
@@ -21,7 +22,7 @@ function onNav(item: HomeNavItem) {
       </div>
       <div class="app-meta">
         <div class="app-name">Rhost</div>
-        <div class="app-ver">0.1.0 · 开发版</div>
+        <div v-if="appVersionLabel" class="app-ver">{{ appVersionLabel }}</div>
       </div>
     </div>
 
