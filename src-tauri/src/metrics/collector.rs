@@ -7,9 +7,9 @@
 //!   （监控面板隐藏/页面关闭/崩溃）采集任务自行退出；
 //! - 会话 `shutdown()` 取消根 token，子任务同步取消，无任务泄漏。
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use log::debug;
@@ -20,9 +20,10 @@ use tokio_util::sync::CancellationToken;
 use crate::applog;
 use crate::applog::events as ev;
 use crate::metrics::{
-    CpuMetricsPayload, CpuTimes, DISK_INTERVAL_ROUNDS, DiskMetrics, GpuItemPayload, MetricsPayload,
-    NetCounters, NetMetricsPayload, ProcsPayload, build_procs_payload, byte_rate, cpu_util,
-    metrics_script, parse_metrics_output,
+    CpuMetricsPayload, CpuTimes, DISK_INTERVAL_ROUNDS, DiskMetrics, DockerScanScope,
+    GpuItemPayload, MetricsPayload, NetCounters, NetMetricsPayload, ProcsPayload, RawMetrics,
+    build_procs_payload, byte_rate, container_name_for, cpu_util, metrics_script,
+    parse_metrics_output,
 };
 use crate::ssh::frame::{FrameType, encode_frame};
 use crate::ssh::session::SshSession;
@@ -33,6 +34,15 @@ const ROUND_TIMEOUT: Duration = Duration::from_secs(3);
 const FAILURE_BACKOFF_THRESHOLD: u32 = 3;
 /// 退避态轮询间隔：故障主机上降低重试频率，继续重试而非放弃，任一轮成功即恢复
 const BACKOFF_INTERVAL: Duration = Duration::from_secs(10);
+/// docker cgroup 全量扫描周期（轮）：日常只增量扫描新 PID，定期全量兜底
+/// （容器内子进程未被观察到、cgroup 迁移等），按 3s 间隔约 2 分钟一次。
+const DOCKER_FULL_SCAN_ROUNDS: u32 = 40;
+/// 增量扫描 PID 上限：新进程过多（批量拉起/重启风暴）时直接回退全量，
+/// 避免脚本参数过长；全量本就是一次 grep，不会更慢。
+const DOCKER_INCREMENTAL_MAX_PIDS: usize = 200;
+/// 容器名映射刷新周期（轮）：名称变化缓慢，日常只在首次/未知容器时查询，
+/// 按 3s 间隔约 5 分钟兜底刷新一次，处理容器改名。
+const DOCKER_NAMES_REFRESH_ROUNDS: u32 = 100;
 
 /// 根据连续失败轮数决定下一轮节拍：未达阈值用正常间隔，达到 [`FAILURE_BACKOFF_THRESHOLD`]
 /// 降到 [`BACKOFF_INTERVAL`]。纯函数便于单测。
@@ -50,6 +60,8 @@ pub(crate) const HEARTBEAT_TTL: Duration = Duration::from_secs(9);
 pub(crate) struct CollectorHandle {
     cancel: CancellationToken,
     last_heartbeat: Arc<StdMutex<Instant>>,
+    /// 进程弹窗订阅开关：打开才随帧附全量进程，关闭即回到 Top 榜
+    procs_full: Arc<AtomicBool>,
     /// 会话标签（stop 日志事件用）
     sid: String,
 }
@@ -58,6 +70,11 @@ impl CollectorHandle {
     /// 刷新续约时间（前端心跳）
     pub(crate) fn heartbeat(&self) {
         *self.last_heartbeat.lock().unwrap() = Instant::now();
+    }
+
+    /// 进程弹窗打开/关闭：切换是否随帧附全量进程列表
+    pub(crate) fn set_procs_full(&self, on: bool) {
+        self.procs_full.store(on, Ordering::Relaxed);
     }
 
     /// 主动停止采集（重复 start 时先停旧任务，或前端显式 stop）
@@ -97,6 +114,7 @@ pub(crate) fn spawn(
     );
     let cancel = root.child_token();
     let last_heartbeat = Arc::new(StdMutex::new(Instant::now()));
+    let procs_full = Arc::new(AtomicBool::new(false));
     tokio::spawn(run(
         session,
         interval,
@@ -104,10 +122,12 @@ pub(crate) fn spawn(
         frame_tx,
         last_heartbeat.clone(),
         iface,
+        procs_full.clone(),
     ));
     CollectorHandle {
         cancel,
         last_heartbeat,
+        procs_full,
         sid,
     }
 }
@@ -120,6 +140,7 @@ async fn run(
     frame_tx: mpsc::Sender<Vec<u8>>,
     last_heartbeat: Arc<StdMutex<Instant>>,
     iface: Option<String>,
+    procs_full: Arc<AtomicBool>,
 ) {
     // 启动错峰 0~300ms：多个会话同时连接时避免 exec 通道齐步走
     let jitter_ms = SystemTime::now()
@@ -142,6 +163,17 @@ async fn run(
     // 退出的进程自然淘汰，无泄漏
     let mut prev_procs: HashMap<u32, (Instant, u64)> = HashMap::new();
     let mut procs_cache: Option<ProcsPayload> = None;
+    // docker 归属缓存：pid→容器 ID（增量维护）与容器 ID→名称（首次/未知容器时查询）。
+    // 名称查询一次 docker ps 即可，绝不每轮重复；cgroup 日常只扫新 PID。
+    let mut docker_cg: HashMap<u32, String> = HashMap::new();
+    let mut docker_names: HashMap<String, String> = HashMap::new();
+    // 已扫过 cgroup 的 PID（含非容器进程）：增量扫描只看差集；按存活进程裁剪防泄漏
+    let mut docker_scanned: HashSet<u32> = HashSet::new();
+    // 已确认查不到名称的容器 ID：避免对无名容器每轮重发 docker ps
+    let mut docker_unknown: HashSet<String> = HashSet::new();
+    let mut docker_names_loaded = false;
+    // 出现新的无名容器 ID 时置位，下一轮补一次名称查询后清除
+    let mut docker_names_refresh = false;
     // GPU 静态探测态：None=尚未探测（首轮乐观带段试一次）；Some(false)=空输出判定无卡，
     // 后续轮次永久不带段（省 nvidia-smi 冷启动开销）；Some(true)=每轮带段。
     // 已确认有卡后单轮空输出视为瞬态失败，沿用缓存、不改判，避免驱动抖动导致区块闪没。
@@ -171,20 +203,72 @@ async fn run(
 
         // 采样时刻取 exec 之前：远端 /proc 读数近似此刻，相邻轮次差值即真实墙钟间隔
         let sampled_at = Instant::now();
-        let with_disk = tick.is_multiple_of(DISK_INTERVAL_ROUNDS);
+        let round = tick;
+        let with_disk = round.is_multiple_of(DISK_INTERVAL_ROUNDS);
         tick = tick.wrapping_add(1);
         // 未判定无卡前轮轮带段（首轮探测 + 已确认有卡后的常态采集）
         let with_gpu = gpu_supported != Some(false);
-        match session
-            .exec_collect(&metrics_script(with_disk, with_gpu), ROUND_TIMEOUT)
+        // docker 归属：首帧/周期全量，其余轮只扫上一轮之后新出现的 PID；
+        // 名称映射仅在首次、未知容器、周期兜底时查询（docker ps 不随每轮走）。
+        let full_docker = round.is_multiple_of(DOCKER_FULL_SCAN_ROUNDS);
+        let new_pids: Vec<u32> = prev_procs
+            .keys()
+            .copied()
+            .filter(|pid| !docker_scanned.contains(pid))
+            .collect();
+        let docker_scope = if full_docker || new_pids.len() > DOCKER_INCREMENTAL_MAX_PIDS {
+            DockerScanScope::All
+        } else if !new_pids.is_empty() {
+            DockerScanScope::Pids(&new_pids)
+        } else if docker_names_refresh {
+            DockerScanScope::NamesOnly
+        } else {
+            DockerScanScope::Off
+        };
+        let with_docker_names = match docker_scope {
+            DockerScanScope::Off => false,
+            DockerScanScope::NamesOnly => true,
+            DockerScanScope::All => {
+                !docker_names_loaded
+                    || docker_names_refresh
+                    || round.is_multiple_of(DOCKER_NAMES_REFRESH_ROUNDS)
+            }
+            DockerScanScope::Pids(_) => !docker_names_loaded || docker_names_refresh,
+        };
+        // 超时返回的是半截输出：缺 @@END@@ 说明脚本没跑完，本帧指标与进程快照都不可信；
+        // 通道提前关闭时还会出现“成功但缺段”的输出。两类坏帧都按失败轮处理
+        // （不发帧、沿用上一帧），绝不把 0%/N/A 的坏帧推给界面。
+        let round_result: Result<RawMetrics, String> = match session
+            .exec_collect(
+                &metrics_script(with_disk, with_gpu, docker_scope, with_docker_names),
+                ROUND_TIMEOUT,
+            )
             .await
         {
+            Ok(exec) if exec.timed_out && !exec.output.contains("@@END@@") => Err(format!(
+                "采集超时且输出不完整（{} 字节，缺 @@END@@）",
+                exec.output.len()
+            )),
             Ok(exec) => {
-                let text = exec.output;
+                let raw = parse_metrics_output(&exec.output, iface.as_deref());
+                // CPU 与内存段都缺 = 远端输出不可信（正常主机两者必有）；
+                // 保留上一帧比显示 0%/N/A 更接近真实
+                if raw.cpu.is_none() && raw.mem.total == 0 {
+                    Err(format!(
+                        "输出缺少 CPU/内存段（{} 字节）",
+                        exec.output.len()
+                    ))
+                } else {
+                    Ok(raw)
+                }
+            }
+            Err(e) => Err(e.to_string()),
+        };
+        match round_result {
+            Ok(mut raw) => {
                 // exec 成功即解除退避（即使部分 marker 段缺失也算通道健康）
                 consecutive_failures = 0;
                 ever_succeeded = true;
-                let raw = parse_metrics_output(&text, iface.as_deref());
                 // CPU 利用率需相邻两次快照差值；首帧（或本轮缺 stat）util 为 0
                 let util = match (prev_cpu, raw.cpu) {
                     (Some(p), Some(c)) => cpu_util(p, c),
@@ -217,10 +301,72 @@ async fn run(
                     disks_cache = disks;
                 }
 
+                // docker 增量合并：名称段是完整快照才整体替换；
+                // cgroup 全量轮整体替换（同时清掉已退出归属），增量轮只合并新 PID
+                let names_scanned = raw.docker.as_ref().is_some_and(|s| s.names_scanned);
+                if let Some(scan) = raw.docker.take() {
+                    if scan.names_scanned {
+                        docker_names = scan.names;
+                        docker_names_loaded = true;
+                    }
+                    match docker_scope {
+                        DockerScanScope::All => {
+                            docker_cg = scan.cg_ids;
+                            docker_scanned = prev_procs.keys().copied().collect();
+                        }
+                        DockerScanScope::Pids(pids) => {
+                            docker_cg.extend(scan.cg_ids);
+                            docker_scanned.extend(pids.iter().copied());
+                        }
+                        DockerScanScope::NamesOnly | DockerScanScope::Off => {}
+                    }
+                }
+                // 按本轮存活进程裁剪缓存（退出的 PID 自然淘汰），并补齐容器归属标注。
+                // 首轮全量后把当前存活集记为已扫，否则下一轮会把全部旧进程当“新增”再全量一次；
+                // 后续全量仍以「上轮进程集」为已扫基线，保证全量期间新起的进程下轮增量补扫。
+                if let Some(proc_raw) = &mut raw.procs {
+                    let alive: HashSet<u32> = proc_raw.procs.iter().map(|p| p.pid).collect();
+                    docker_cg.retain(|pid, _| alive.contains(pid));
+                    if round == 0 {
+                        docker_scanned.extend(alive.iter().copied());
+                    }
+                    docker_scanned.retain(|pid| alive.contains(pid));
+                    for snap in &mut proc_raw.procs {
+                        if let Some(cid) = docker_cg.get(&snap.pid) {
+                            // 名字查不到时给 12 位短 ID（与 docker ps 一致），
+                            // 别把 64 位长 ID 直接糊到列表上
+                            snap.container = container_name_for(&docker_names, cid)
+                                .map(str::to_string)
+                                .unwrap_or_else(|| cid.chars().take(12).collect());
+                        }
+                    }
+                }
+                // 名称缓存：已确认查不到的容器 ID 记入 unknown，避免每轮重发 docker ps；
+                // 新出现的无名 ID 置位 refresh，下一轮补查一次（容器刚启动可能还没进 ps）
+                if names_scanned {
+                    docker_unknown = docker_cg
+                        .values()
+                        .filter(|cid| container_name_for(&docker_names, cid).is_none())
+                        .cloned()
+                        .collect();
+                    docker_names_refresh = false;
+                }
+                if docker_cg.values().any(|cid| {
+                    container_name_for(&docker_names, cid).is_none()
+                        && !docker_unknown.contains(cid)
+                }) {
+                    docker_names_refresh = true;
+                }
+
                 // 进程：本轮有 stat 快照才算榜（首帧新进程 CPU 全 0，次帧起有效）；
                 // 段缺失时沿用上一次榜单；prev 表用本轮存活集合重建
                 if let Some(proc_raw) = &raw.procs {
-                    let payload_procs = build_procs_payload(proc_raw, &prev_procs, sampled_at);
+                    let payload_procs = build_procs_payload(
+                        proc_raw,
+                        &prev_procs,
+                        sampled_at,
+                        procs_full.load(Ordering::Relaxed),
+                    );
                     prev_procs = proc_raw
                         .procs
                         .iter()
@@ -269,6 +415,7 @@ async fn run(
                     procs: procs_cache.clone().unwrap_or(ProcsPayload {
                         total: 0,
                         top: Vec::new(),
+                        all: Vec::new(),
                     }),
                     gpus: gpus_cache.clone(),
                 };

@@ -1701,6 +1701,15 @@ impl SshSession {
         }
     }
 
+    /// 进程弹窗订阅开关：采集未启动时静默忽略（下次启动默认关）
+    pub fn set_procs_full(&self, on: bool) {
+        if let Ok(guard) = self.metrics.lock()
+            && let Some(handle) = guard.as_ref()
+        {
+            handle.set_procs_full(on);
+        }
+    }
+
     /// 前端心跳续约：刷新采集任务的 TTL
     pub fn metrics_heartbeat(&self) {
         if let Ok(guard) = self.metrics.lock()

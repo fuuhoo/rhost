@@ -385,6 +385,7 @@ pub fn run() {
             ipc::start_metrics,
             ipc::stop_metrics,
             ipc::metrics_heartbeat,
+            ipc::metrics_procs_full,
             ipc::test_ssh_connection,
             ipc::load_connections,
             ipc::save_connection,

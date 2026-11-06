@@ -352,13 +352,17 @@ export interface ProcMetricsData {
   cpu: number
   /** 常驻内存字节（RSS） */
   rss: number
+  /** 所属 docker 容器名（非容器进程为空；容器识别见后端 cgroup 提取） */
+  container: string
 }
 
-/** 进程区：全量进程数 + CPU Top 5 */
+/** 进程区：全量进程数 + CPU Top 5；`all` 仅进程弹窗订阅期间下发 */
 export interface ProcsMetricsData {
   /** 主机当前进程总数 */
   total: number
   top: ProcMetricsData[]
+  /** 全量进程（按 CPU 降序）；未订阅时后端不下发该字段 */
+  all?: ProcMetricsData[]
 }
 
 /** 主机动态指标（0x06 帧；cpu.util/load + mem/swap + net + disks + procs + gpus） */
@@ -1613,4 +1617,10 @@ export async function stopMetrics(backendId: string) {
 export function metricsHeartbeat(backendId: string) {
   if (!isTauri) return
   void invoke('metrics_heartbeat', { sessionId: backendId }).catch(() => {})
+}
+
+/** 进程弹窗订阅开关：打开才随帧推全量进程，关闭回到 Top 榜（见后端 metrics_procs_full） */
+export function metricsProcsFull(backendId: string, on: boolean) {
+  if (!isTauri) return
+  void invoke('metrics_procs_full', { sessionId: backendId, on }).catch(() => {})
 }

@@ -768,6 +768,21 @@ pub async fn metrics_heartbeat(
         .map_err(|e| e.to_string())
 }
 
+/// 进程弹窗订阅开关：打开时置 true，0x06 帧的 procs.all 才带全量进程；
+/// 关闭/弹窗卸载时置 false，回到只推 Top 榜，避免千级进程列表常驻占带宽
+#[tauri::command]
+pub async fn metrics_procs_full(
+    session_id: &str,
+    on: bool,
+    manager: State<'_, SessionManager>,
+) -> Result<(), String> {
+    slow_span!("metrics_procs_full");
+    manager
+        .set_procs_full(session_id, on)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// 测试连接返回：成功时附带 TCP→认证全链路耗时
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

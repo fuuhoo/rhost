@@ -163,6 +163,18 @@ impl SessionManager {
         }
     }
 
+    /// 进程弹窗打开期间订阅全量进程列表（关闭即退订）
+    pub async fn set_procs_full(&self, session_id: &str, on: bool) -> Result<(), SshError> {
+        let session = { self.sessions.read().await.get(session_id).cloned() };
+        match session {
+            Some(s) => {
+                s.set_procs_full(on);
+                Ok(())
+            }
+            None => Err(SshError::NotFound),
+        }
+    }
+
     /// SFTP 列举远端目录：path 为 None 时返回登录默认目录（远端家目录）
     pub(crate) async fn sftp_list_dir(
         &self,

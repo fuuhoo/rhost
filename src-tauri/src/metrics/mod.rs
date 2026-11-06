@@ -321,7 +321,18 @@ pub fn build_host_info(raw: &HashMap<String, String>) -> HostInfo {
 /// 每轮都跑的高频段：CPU/负载/内存/Swap/网卡/进程（procfs，开销极低）。
 /// 进程段先输出 CLK_TCK/PAGESIZE 两个换算常量（各占一行，缺失时解析端回退默认值），
 /// 再逐行输出每个进程的原始 /proc/pid/stat（CPU 差值需每轮连续快照）。
+/// docker 扫描（cgroup+容器名映射）开销大，独立成按需段：首帧/周期全量、
+/// 其余轮只增量扫新 PID，名称映射单独缓存——否则整轮超 3s 时限会把磁盘段一起拖垮。
 const METRICS_SCRIPT_BASE: &str = "echo @@STAT@@\nhead -n 1 /proc/stat 2>/dev/null\necho @@LOAD@@\ncat /proc/loadavg 2>/dev/null\necho @@MEM@@\ncat /proc/meminfo 2>/dev/null\necho @@NET@@\ncat /proc/net/dev 2>/dev/null\necho @@PROC@@\ngetconf CLK_TCK 2>/dev/null\ngetconf PAGESIZE 2>/dev/null\nfor p in /proc/[0-9]*; do read -r s < \"$p/stat\" 2>/dev/null && echo \"$s\"; done\n";
+/// docker cgroup 全量扫描段：逐进程提取 cgroup 十六进制容器 ID 并输出
+/// `cgpid:<pid>:<cid>`；一次批量 grep + awk 完成逐进程提取，避免千级进程主机
+/// 逐 PID spawn grep/head 超过整轮 3s 时限（实测 5018ms → 1099ms）。
+/// 全量扫描开销大，日常只对新增 PID 做增量扫描，仅首帧与周期兜底走全量。
+const DOCKER_CGROUP_ALL_SECTION: &str = "echo @@DOCKER@@\ngrep -aHoE '[a-f0-9]{12,64}' /proc/[0-9]*/cgroup 2>/dev/null | awk -F'[:/]' '!seen[$3]++ {print \"cgpid:\" $3 \":\" $NF}'\n";
+/// 容器 ID→容器名映射段：优先 `docker ps`（daemon 查询，不依赖 data-root 路径，
+/// rootless/snap/自定义目录都覆盖），CLI 缺席时才回退枚举 <data-root>/containers/*/config.v2.json。
+/// 名称变化缓慢，collector 只在首次/出现未知容器时查询并跨轮缓存。
+const DOCKER_NAMES_SECTION: &str = "echo @@DOCKERNAMES@@\nif command -v docker >/dev/null 2>&1; then docker ps --no-trunc --format '{{.ID}} {{.Names}}' 2>/dev/null | while read -r cid nm; do [ -n \"$cid\" ] && [ -n \"$nm\" ] && echo \"docker:$cid:$nm\"; done; else dr=''; if [ -f /etc/docker/daemon.json ]; then dr=$(sed -n 's/.*\"data-root\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' /etc/docker/daemon.json | head -1); fi\nfor root in \"$dr\" /var/lib/docker /home/docker \"$HOME/.local/share/docker\"; do [ -n \"$root\" ] && [ -d \"$root/containers\" ] || continue; for f in \"$root\"/containers/*/config.v2.json; do [ -f \"$f\" ] || continue; cid=${f##*/containers/}; cid=${cid%%/*}; name=$(grep -o '\"Name\":\"[^\"]*\"' \"$f\" 2>/dev/null | head -1 | cut -d'\"' -f4); [ -n \"$name\" ] && echo \"docker:$cid:${name#/}\"; done; done; fi\n";
 /// 磁盘低频段：每 [`DISK_INTERVAL_ROUNDS`] 轮夹带一次（df 需枚举挂载点，开销略高）。
 /// df 段脚本：优先 `df -PkT`（GNU/busybox 支持额外输出文件系统类型列，
 /// FinalShell 磁盘表同款信息）；macOS/BSD 的 df 无 -T 会整体失败，
@@ -333,13 +344,60 @@ const DISK_SCRIPT_SECTION: &str = "echo @@DISK@@\ndf -PkT 2>/dev/null || df -Pk 
 ///（nvidia-smi 冷启动 100~300ms，不能每轮白付）。
 const GPU_SCRIPT_SECTION: &str = "echo @@GPU@@\nnvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit --format=csv,noheader,nounits 2>/dev/null\n";
 
+/// docker cgroup 扫描范围：按轮次需要选择全量/增量/仅名称，避免每轮都全量 grep。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DockerScanScope<'a> {
+    /// 本轮不涉及 docker
+    Off,
+    /// 只刷新容器名映射（一次 docker ps），不动 cgroup 归属
+    NamesOnly,
+    /// 全量扫描所有 /proc/<pid>/cgroup（首帧/周期兜底）
+    All,
+    /// 只扫描指定 PID（增量发现新进程），PID 由数字格式化，无注入面
+    Pids(&'a [u32]),
+}
+
+/// 增量扫描段：只 grep 指定 PID 的 cgroup 文件。
+/// `pids` 必须非空（空列表会让 grep 读 stdin 卡到超时）。
+fn docker_cgroup_pids_section(pids: &[u32]) -> String {
+    let mut files = String::new();
+    for pid in pids {
+        files.push_str(&format!("/proc/{pid}/cgroup "));
+    }
+    format!(
+        "grep -aHoE '[a-f0-9]{{12,64}}' {files}2>/dev/null | awk -F'[:/]' '!seen[$3]++ {{print \"cgpid:\" $3 \":\" $NF}}'\n"
+    )
+}
+
 /// 构造单轮采集脚本：一次 exec 取回全部数据，marker 行分段。
-/// `with_disk` 时夹带 `df -Pk` 段；`with_gpu` 时夹带 nvidia-smi 段。
+/// `with_disk` 时夹带 `df -Pk` 段；`docker` 指定 cgroup 扫描范围
+/// （行协议见 DOCKER_MAP_PREFIX/CGPID_PREFIX）；`with_docker_names` 时夹带
+/// 容器名查询段（需同时带 `@@DOCKER@@` 标记，故 scope 不能为 Off）；
+/// `with_gpu` 时夹带 nvidia-smi 段。
 /// 由 `/bin/sh -c` 执行，busybox 兼容。
-pub(crate) fn metrics_script(with_disk: bool, with_gpu: bool) -> String {
+pub(crate) fn metrics_script(
+    with_disk: bool,
+    with_gpu: bool,
+    docker: DockerScanScope<'_>,
+    with_docker_names: bool,
+) -> String {
     let mut s = String::from(METRICS_SCRIPT_BASE);
     if with_disk {
         s.push_str(DISK_SCRIPT_SECTION);
+    }
+    match docker {
+        DockerScanScope::Off => {}
+        DockerScanScope::NamesOnly => s.push_str("echo @@DOCKER@@\n"),
+        DockerScanScope::All => s.push_str(DOCKER_CGROUP_ALL_SECTION),
+        DockerScanScope::Pids(pids) => {
+            s.push_str("echo @@DOCKER@@\n");
+            if !pids.is_empty() {
+                s.push_str(&docker_cgroup_pids_section(pids));
+            }
+        }
+    }
+    if with_docker_names && docker != DockerScanScope::Off {
+        s.push_str(DOCKER_NAMES_SECTION);
     }
     if with_gpu {
         s.push_str(GPU_SCRIPT_SECTION);
@@ -347,6 +405,13 @@ pub(crate) fn metrics_script(with_disk: bool, with_gpu: bool) -> String {
     s.push_str("echo @@END@@");
     s
 }
+
+/// `@@PROC@@` 段实际落输出：`docker:<容器全 ID>:<容器名>`（名可含冒号）
+const DOCKER_MAP_PREFIX: &str = "docker:";
+/// `cgpid:<pid>:<容器ID>`（脚本侧已从 /proc/pid/cgroup 提取十六进制 ID）
+const CGPID_PREFIX: &str = "cgpid:";
+
+
 
 /// /proc/stat 首行的累计 CPU 节拍快照。idle 按惯例包含 iowait。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -740,6 +805,8 @@ pub(crate) struct ProcSnapshot {
     pub cpu_ticks: u64,
     /// 常驻内存页数（字段 24）
     pub rss_pages: u64,
+    /// 所属 docker 容器名（非容器进程为空串；容器识别见 docker_container_id）
+    pub container: String,
 }
 
 /// 进程段原始结果：换算常量 + 全量进程快照（total = 列表长度）
@@ -775,12 +842,15 @@ impl ProcSnapshot {
             name,
             cpu_ticks: utime + stime,
             rss_pages,
+            container: String::new(),
         })
     }
 }
 
 /// 解析 `@@PROC@@` 段：前两行若为纯数字依次为 CLK_TCK/PAGESIZE（缺失回退
-/// 100/4096），其余为 stat 行。段不存在/无有效进程返回 None（collector 沿用缓存）。
+/// 100/4096），其余为 stat 行。docker 行在独立 `@@DOCKER@@` 段，由
+/// [`parse_docker_scan`] 另行消费。
+/// 段不存在/无有效进程返回 None（collector 沿用缓存）。
 pub(crate) fn parse_procs(text: &str) -> Option<ProcRaw> {
     let mut clk_tck = FALLBACK_CLK_TCK;
     let mut page_size = FALLBACK_PAGE_SIZE;
@@ -816,6 +886,59 @@ pub(crate) fn parse_procs(text: &str) -> Option<ProcRaw> {
     })
 }
 
+/// docker 扫描结果（按轮次增量采集，collector 跨轮缓存）：
+/// 进程 pid→容器 ID（cgpid 行）、容器 ID→容器名（docker 行，ID 全小写）。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DockerScan {
+    pub names: std::collections::HashMap<String, String>,
+    pub cg_ids: std::collections::HashMap<u32, String>,
+    /// 本帧是否执行了容器名查询段：true 时 names 是完整快照（可整体替换），
+    /// false 时 names 为空、调用方保留旧缓存
+    pub names_scanned: bool,
+}
+
+/// 容器名查询：全 ID 精确命中优先，其次以 cgpid 的截断 ID 为前缀匹配
+pub(crate) fn container_name_for<'a>(
+    names: &'a std::collections::HashMap<String, String>,
+    cid: &str,
+) -> Option<&'a str> {
+    if let Some(n) = names.get(cid) {
+        return Some(n);
+    }
+    names
+        .iter()
+        .find(|(id, _)| id.starts_with(cid))
+        .map(|(_, n)| n.as_str())
+}
+
+/// 解析 `@@DOCKER@@` 段中的 docker 行：
+/// `docker:<容器全 ID>:<容器名>` 与 `cgpid:<pid>:<容器ID>`。
+/// 段是否存在由 [`parse_metrics_output`] 判定，这里只做行解析。
+pub(crate) fn parse_docker_scan(text: &str) -> DockerScan {
+    let mut scan = DockerScan::default();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix(DOCKER_MAP_PREFIX) {
+            if let Some((id, name)) = rest.split_once(':') {
+                if !id.is_empty() && !name.is_empty() {
+                    scan.names
+                        .insert(id.trim().to_ascii_lowercase(), name.trim().to_string());
+                }
+            }
+        } else if let Some(rest) = trimmed.strip_prefix(CGPID_PREFIX) {
+            if let Some((pid_s, cid)) = rest.split_once(':') {
+                if let Ok(pid) = pid_s.parse::<u32>() {
+                    if !cid.is_empty() {
+                        scan.cg_ids
+                            .insert(pid, cid.trim().to_ascii_lowercase());
+                    }
+                }
+            }
+        }
+    }
+    scan
+}
+
 /// 单轮采集的原始解析结果（尚未与上一轮做差）
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RawMetrics {
@@ -829,6 +952,9 @@ pub(crate) struct RawMetrics {
     pub disks: Option<Vec<DiskMetrics>>,
     /// 进程段每轮都采；None（段缺失/空）时 collector 沿用上一次榜单
     pub procs: Option<ProcRaw>,
+    /// docker 段仅 docker 轮夹带；None 表示本轮未采，collector 沿用缓存。
+    /// Some(空) 表示扫描成功但无容器（或仅名称查询），collector 据此清空归属缓存
+    pub docker: Option<DockerScan>,
     /// GPU 段仅支持的主机夹带；None=本轮未带段，Some(vec![])=带段但无卡/命令失败，
     /// Some(非空)=正常卡列表。collector 据 Some(空) 永久关闭后续 GPU 段
     pub gpus: Option<Vec<GpuItemPayload>>,
@@ -846,6 +972,9 @@ pub(crate) fn parse_metrics_output(text: &str, iface: Option<&str>) -> RawMetric
     let mut proc_lines = String::new();
     let mut disk_lines = String::new();
     let mut disk_present = false;
+    let mut docker_lines = String::new();
+    let mut docker_present = false;
+    let mut docker_names_present = false;
     let mut gpu_lines = String::new();
     let mut gpu_present = false;
 
@@ -857,6 +986,14 @@ pub(crate) fn parse_metrics_output(text: &str, iface: Option<&str>) -> RawMetric
             "@@MEM@@" => section = "mem",
             "@@NET@@" => section = "net",
             "@@PROC@@" => section = "proc",
+            "@@DOCKER@@" => {
+                section = "docker";
+                docker_present = true;
+            }
+            "@@DOCKERNAMES@@" => {
+                section = "docker";
+                docker_names_present = true;
+            }
             "@@DISK@@" => {
                 section = "disk";
                 disk_present = true;
@@ -888,6 +1025,10 @@ pub(crate) fn parse_metrics_output(text: &str, iface: Option<&str>) -> RawMetric
                 proc_lines.push_str(line);
                 proc_lines.push('\n');
             }
+            _ if section == "docker" => {
+                docker_lines.push_str(line);
+                docker_lines.push('\n');
+            }
             _ if section == "disk" => {
                 disk_lines.push_str(line);
                 disk_lines.push('\n');
@@ -902,6 +1043,15 @@ pub(crate) fn parse_metrics_output(text: &str, iface: Option<&str>) -> RawMetric
     let mem = MemMetrics::parse(&mem_lines);
     let net = NetCounters::parse(&net_lines, iface);
     let procs = parse_procs(&proc_lines);
+    // docker 段只在 docker 轮存在：marker 存在即为权威快照（哪怕无容器），
+    // 缺 marker 才是「本轮未采集」；名称段是否执行由 @@DOCKERNAMES@@ 单独标记
+    let docker = if docker_present {
+        let mut scan = parse_docker_scan(&docker_lines);
+        scan.names_scanned = docker_names_present;
+        Some(scan)
+    } else {
+        None
+    };
     // df 段缺失（非夹带轮）或存在但为空（df 失败）都返回 None：
     // 前者本就无新数据，后者按静默降级沿用上一次缓存，不把列表清空。
     let disks = if disk_present {
@@ -925,6 +1075,7 @@ pub(crate) fn parse_metrics_output(text: &str, iface: Option<&str>) -> RawMetric
         net,
         disks,
         procs,
+        docker,
         gpus,
     }
 }
@@ -952,6 +1103,10 @@ pub(crate) struct ProcsPayload {
     /// 主机当前进程总数（/proc/[0-9]* 成功读取数）
     pub total: usize,
     pub top: Vec<ProcItemPayload>,
+    /// 全量进程（按 CPU 降序）：仅进程弹窗打开期间由前端订阅才填充，
+    /// 千级进程主机约 130KB/轮，常态不订阅则一个空数组、不占带宽
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub all: Vec<ProcItemPayload>,
 }
 
 /// 单个 Top 进程
@@ -964,15 +1119,19 @@ pub(crate) struct ProcItemPayload {
     pub cpu: f32,
     /// 常驻内存字节（rss 页数 × 页大小）
     pub rss: u64,
+    /// 所属 docker 容器名（非容器进程为空串；容器识别见 docker_container_id）
+    pub container: String,
 }
 
 /// 依据本轮全量进程快照与上一轮 (采样时刻, 累计节拍) 表计算 Top 榜单。
 /// `prev` 中不存在的进程（本轮新出现）CPU 记 0；节拍倒退/墙钟差非正也记 0。
 /// 排序：CPU 降序 → RSS 降序 → pid 升序（空闲时内存大户优先，次序稳定可测）。
+/// `full` 为真时额外带上全量列表（进程弹窗订阅），否则只留 Top [`TOP_PROCS`]。
 pub(crate) fn build_procs_payload(
     cur: &ProcRaw,
     prev: &HashMap<u32, (Instant, u64)>,
     now: Instant,
+    full: bool,
 ) -> ProcsPayload {
     let mut items: Vec<ProcItemPayload> = cur
         .procs
@@ -996,6 +1155,7 @@ pub(crate) fn build_procs_payload(
                 name: p.name.clone(),
                 cpu,
                 rss: p.rss_pages.saturating_mul(cur.page_size),
+                container: p.container.clone(),
             }
         })
         .collect();
@@ -1006,10 +1166,11 @@ pub(crate) fn build_procs_payload(
             .then_with(|| b.rss.cmp(&a.rss))
             .then_with(|| a.pid.cmp(&b.pid))
     });
-    items.truncate(TOP_PROCS);
+    let top = items.iter().take(TOP_PROCS).cloned().collect();
     ProcsPayload {
         total: cur.procs.len(),
-        top: items,
+        top,
+        all: if full { items } else { Vec::new() },
     }
 }
 
@@ -1533,23 +1694,122 @@ mod metrics_dynamic_tests {
         let empty = parse_metrics_output("@@DISK@@\n@@END@@\n", None);
         assert!(empty.disks.is_none());
 
-        // 脚本构造：默认不带 df/GPU；with_disk/with_gpu 时段在 END 前
-        let base = metrics_script(false, false);
+        // 脚本构造：默认不带 df/GPU/docker；各段在 END 前
+        let base = metrics_script(
+            false,
+            false,
+            DockerScanScope::Off,
+            false,
+        );
         assert!(base.contains("@@NET@@"));
         assert!(!base.contains("@@DISK@@"));
         assert!(!base.contains("@@GPU@@"));
-        // PROC 段每轮都在
         assert!(base.contains("@@PROC@@"));
-        let with_script = metrics_script(true, true);
+        assert!(!base.contains("@@DOCKER@@"));
+        assert!(!base.contains("cgpid:"));
+        let with_script = metrics_script(
+            true,
+            true,
+            DockerScanScope::All,
+            true,
+        );
         let disk_pos = with_script.find("@@DISK@@").expect("disk marker");
         let gpu_pos = with_script.find("@@GPU@@").expect("gpu marker");
         let end_pos = with_script.find("@@END@@").expect("end marker");
         assert!(disk_pos < end_pos);
         assert!(gpu_pos < end_pos);
-        // 只开 GPU 不带磁盘
-        let gpu_only = metrics_script(false, true);
+        assert!(with_script.contains("cgpid:"));
+        assert!(with_script.contains("@@DOCKERNAMES@@"));
+        assert!(with_script.contains("docker ps"));
+        // 只开 GPU 不带磁盘/docker
+        let gpu_only = metrics_script(
+            false,
+            true,
+            DockerScanScope::Off,
+            false,
+        );
         assert!(gpu_only.contains("@@GPU@@"));
         assert!(!gpu_only.contains("@@DISK@@"));
+        assert!(!gpu_only.contains("@@DOCKER@@"));
+    }
+
+    #[test]
+    fn docker_incremental_script_scans_only_given_pids() {
+        // 增量轮只 grep 指定 PID 的 cgroup，绝不出现 /proc/[0-9]* 全量通配
+        let pids = [123u32, 456];
+        let s = metrics_script(
+            false,
+            false,
+            DockerScanScope::Pids(&pids),
+            false,
+        );
+        assert!(s.contains("@@DOCKER@@"));
+        assert!(s.contains("/proc/123/cgroup"));
+        assert!(s.contains("/proc/456/cgroup"));
+        // 进程统计段本来就有 /proc/[0-9]*，这里只断言 cgroup 扫描没用全量通配
+        assert!(!s.contains("/proc/[0-9]*/cgroup"));
+        assert!(!s.contains("@@DOCKERNAMES@@"));
+        // 名称查询只在明确要求且非 Off 时出现
+        let names = metrics_script(
+            false,
+            false,
+            DockerScanScope::NamesOnly,
+            true,
+        );
+        assert!(names.contains("@@DOCKER@@"));
+        assert!(names.contains("@@DOCKERNAMES@@"));
+        assert!(!names.contains("cgpid:"));
+        assert!(!names.contains("/proc/[0-9]*/cgroup"));
+        // Off + 名称要求：名称段必须被忽略（没有 @@DOCKER@@ 标记会丢行）
+        let off = metrics_script(false, false, DockerScanScope::Off, true);
+        assert!(!off.contains("@@DOCKERNAMES@@"));
+    }
+
+    #[test]
+    fn docker_section_presence_and_names_flag() {
+        // 段存在但无任何容器行 → Some(空)，表示「扫描成功、无容器」而非「未扫描」，
+        // 名称未查询时 names_scanned=false，名称缓存不可被空 map 覆盖
+        let raw = parse_metrics_output(
+            "@@DOCKER@@\n@@DOCKERNAMES@@\n@@END@@\n",
+            None,
+        );
+        let scan = raw.docker.expect("docker section present");
+        assert!(scan.cg_ids.is_empty());
+        assert!(scan.names.is_empty());
+        assert!(scan.names_scanned);
+        assert!(container_name_for(&scan.names, "abcdef123456").is_none());
+
+        // 只有 cgroup 段：names_scanned=false，collector 应保留旧名称缓存
+        let raw = parse_metrics_output(
+            "@@DOCKER@@\ncgpid:42:aaaaaaaaaaaa\n@@END@@\n",
+            None,
+        );
+        let scan = raw.docker.expect("docker section present");
+        assert!(!scan.names_scanned);
+        assert_eq!(scan.cg_ids.get(&42).map(String::as_str), Some("aaaaaaaaaaaa"));
+
+        // 完全没有 marker → None（本轮未采集，沿用缓存）
+        let raw = parse_metrics_output("@@PROC@@\n1 (init) S 1 1 1 0 -1\n@@END@@\n", None);
+        assert!(raw.docker.is_none());
+    }
+
+    #[test]
+    fn docker_name_prefix_match() {
+        // docker ps 给全 ID，cgroup 给截断 ID：前缀匹配
+        let raw = parse_metrics_output(
+            "@@DOCKER@@\ncgpid:7:abcdef123456\n@@DOCKERNAMES@@\ndocker:abcdef1234567890:web-1\n@@END@@\n",
+            None,
+        );
+        let scan = raw.docker.expect("docker section present");
+        assert_eq!(
+            container_name_for(&scan.names, "abcdef123456"),
+            Some("web-1")
+        );
+        // 精确命中优先
+        assert_eq!(
+            container_name_for(&scan.names, "abcdef1234567890"),
+            Some("web-1")
+        );
     }
 
     #[test]
@@ -1666,6 +1926,35 @@ mod metrics_dynamic_tests {
     }
 
     #[test]
+    fn build_procs_payload_full_only_when_subscribed() {
+        let raw = ProcRaw {
+            clk_tck: 100,
+            page_size: 4096,
+            procs: (1..=7)
+                .map(|pid| ProcSnapshot {
+                    pid,
+                    name: format!("p{pid}"),
+                    cpu_ticks: 0,
+                    rss_pages: pid as u64,
+                    container: String::new(),
+                })
+                .collect(),
+        };
+        let prev = HashMap::new();
+        let now = Instant::now();
+        let off = build_procs_payload(&raw, &prev, now, false);
+        assert!(off.all.is_empty());
+        assert_eq!(off.top.len(), TOP_PROCS);
+        // 未订阅时帧里不出现 all 键：千级进程主机不多花一个字节
+        assert!(!serde_json::to_string(&off).unwrap().contains("\"all\""));
+
+        let on = build_procs_payload(&raw, &prev, now, true);
+        assert_eq!(on.all.len(), 7);
+        assert_eq!(on.top.as_slice(), &on.all[..TOP_PROCS]);
+        assert!(serde_json::to_string(&on).unwrap().contains("\"all\""));
+    }
+
+    #[test]
     fn build_procs_payload_top_and_delta() {
         fn raw_with(ticks_rss: &[(u32, u64, u64)]) -> ProcRaw {
             ProcRaw {
@@ -1678,6 +1967,7 @@ mod metrics_dynamic_tests {
                         name: format!("p{pid}"),
                         cpu_ticks: ticks,
                         rss_pages,
+                        container: String::new(),
                     })
                     .collect(),
             }
@@ -1705,7 +1995,7 @@ mod metrics_dynamic_tests {
             (7, (now - sec1, 0)),
         ]);
 
-        let payload = build_procs_payload(&cur, &prev, now);
+        let payload = build_procs_payload(&cur, &prev, now, false);
         assert_eq!(payload.total, 7);
         assert_eq!(payload.top.len(), TOP_PROCS);
         let pids: Vec<u32> = payload.top.iter().map(|p| p.pid).collect();
@@ -1725,7 +2015,7 @@ mod metrics_dynamic_tests {
 
         // 首帧（prev 全空）：全部 0%，按 RSS 降序取前 5
         let empty_prev = HashMap::new();
-        let first = build_procs_payload(&cur, &empty_prev, now);
+        let first = build_procs_payload(&cur, &empty_prev, now, false);
         assert_eq!(
             first.top.iter().map(|p| p.pid).collect::<Vec<_>>(),
             vec![1, 4, 3, 2, 5]
@@ -1735,7 +2025,7 @@ mod metrics_dynamic_tests {
         // 节拍倒退（异常快照）saturating 为 0，不出现负百分比
         let mut back = HashMap::new();
         back.insert(1u32, (now - sec1, 9999));
-        let backed = build_procs_payload(&raw_with(&[(1, 100, 1)]), &back, now);
+        let backed = build_procs_payload(&raw_with(&[(1, 100, 1)]), &back, now, false);
         assert_eq!(backed.top[0].cpu, 0.0);
     }
 }

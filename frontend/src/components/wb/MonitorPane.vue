@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { toast } from '../../composables/useToast'
+import { copyText } from '../../stores/keys'
 import {
   METRICS_HEARTBEAT_MS, activeHost, activeHostInfo, activeMetrics, activeNetHist,
   activeReconnectAttempt, activeSession, isExternalSession, monitorVisible,
@@ -8,6 +9,7 @@ import {
   startMetrics, stopMetrics,
 } from '../../stores/session'
 import { savedSettings } from '../../stores/settings'
+import ProcModal from './ProcModal.vue'
 
 /* ---------- 会话时长计时 ---------- */
 const uptime = ref('00:00:00')
@@ -100,6 +102,11 @@ function copyAddr() {
   }).catch(() => {
     toast('复制失败', 'err', 1200)
   })
+}
+
+async function copyProc(text: string, label: string) {
+  const ok = await copyText(text)
+  toast(ok ? `${label}已复制` : '复制失败', ok ? 'ok' : 'err', 1200)
 }
 
 /* ---------- 展开态与图表页签 ---------- */
@@ -212,6 +219,68 @@ function chartArea(arr: number[], max: number) {
 /* ---------- 磁盘（0x06 Metrics.disks；df 低频夹带，非夹带轮沿用缓存） ---------- */
 const liveDisks = computed(() => (connected.value ? activeMetrics.value?.disks ?? [] : []))
 
+/* ---------- 磁盘表列宽拖拽：全列弹性（fr 比例），分隔线精确跟随鼠标 ----
+ * 原理同文件列表：拖动只在分隔线两侧两列之间转移比例（A+B 总和不变）。 */
+type DiskKey = 'path' | 'size'
+const DISK_ORDER: DiskKey[] = ['path', 'size']
+// 大小列要容下最长的「1014 MB / 2177 GB」且不能压到右侧使用率列，
+// 窄栏下宁可让路径列先缩（路径本身可横向拖拽浏览）
+const DISK_MIN: Record<DiskKey, number> = { path: 96, size: 112 }
+const diskG = ref<Record<DiskKey, number>>({ path: 628, size: 115 })
+let diskDrag: { strip: HTMLElement; a: DiskKey; b: DiskKey; sum: number; raf: number; targetG: number } | null = null
+
+const diskTemplate = computed(
+  () => `minmax(96px, ${diskG.value.path}fr) minmax(112px, ${diskG.value.size}fr) 34px`,
+)
+
+function startDiskResize(e: MouseEvent, a: DiskKey, b: DiskKey) {
+  if (e.button !== 0) return
+  e.preventDefault()
+  e.stopPropagation()
+  const strip = (e.currentTarget as HTMLElement).closest('.ri-tbl-head') as HTMLElement | null
+  if (!strip) return
+  const sum = diskG.value[a] + diskG.value[b]
+  diskDrag = { strip, a, b, sum, raf: 0, targetG: diskG.value[a] }
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+  window.addEventListener('mousemove', onDiskMove)
+  window.addEventListener('mouseup', onDiskEnd)
+}
+
+function onDiskMove(e: MouseEvent) {
+  if (!diskDrag) return
+  const { strip, a, b } = diskDrag
+  const rect = strip.getBoundingClientRect()
+  const aEl = strip.children[DISK_ORDER.indexOf(a)] as HTMLElement | undefined
+  const bEl = strip.children[DISK_ORDER.indexOf(b)] as HTMLElement | undefined
+  if (!aEl || !bEl) return
+  const pairW = aEl.offsetWidth + bEl.offsetWidth
+  const clamped = Math.min(pairW - DISK_MIN[b], Math.max(DISK_MIN[a], e.clientX - rect.left - aEl.offsetLeft))
+  // 钳制直接以像素换算 grow（与条宽无关），避免条宽变化导致比例漂移、一拖变大
+  diskDrag.targetG = diskDrag.sum * (clamped / pairW)
+  if (diskDrag.raf) return
+  diskDrag.raf = requestAnimationFrame(() => {
+    if (diskDrag) {
+      diskDrag.raf = 0
+      const g = diskDrag.targetG
+      diskG.value[diskDrag.a] = g
+      diskG.value[diskDrag.b] = diskDrag.sum - g
+    }
+  })
+}
+
+function onDiskEnd() {
+  window.removeEventListener('mousemove', onDiskMove)
+  window.removeEventListener('mouseup', onDiskEnd)
+  if (diskDrag?.raf) {
+    cancelAnimationFrame(diskDrag.raf)
+    diskDrag.raf = 0
+  }
+  document.body.style.cursor = ''
+  document.body.style.userSelect = ''
+  diskDrag = null
+}
+
 /* ---------- 磁盘路径：左右拖拽平移 + 悬浮全路径提示 + 点击复制 ----------
  * 路径列常被截断（docker overlay 路径冗长），横向滚不动就看不到全名：
  * 按住左右拖移浏览；悬停 250ms 弹自定义提示显示全部；单击（无拖动）复制路径。 */
@@ -303,6 +372,8 @@ const liveProcs = computed(() =>
 )
 /** 页签标题上的进程总数 */
 const procTotal = computed(() => liveProcs.value?.total ?? 0)
+/** 进程弹窗：全量列表 + 排序，打开期间才向后端订阅全量 */
+const procModal = ref(false)
 
 /* ---------- GPU（0x06 Metrics.gpus；无 GPU 主机为空数组，区块整体隐藏） ---------- */
 const liveGpus = computed(() =>
@@ -593,6 +664,16 @@ async function onDisconnect() {
         <button class="ri-tab" :class="{ on: chartTab === 'proc' }" @click="chartTab = 'proc'">
           进程 · {{ procTotal }}
         </button>
+        <button
+          v-if="chartTab === 'proc'" class="ri-proc-expand" title="展开全部进程（可排序）"
+          @click="procModal = true"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 4h6v6" /><path d="M20 4l-7 7" />
+            <path d="M10 20H4v-6" /><path d="M4 20l7-7" />
+          </svg>
+        </button>
       </div>
 
       <div v-if="chartTab === 'net'" class="ri-chart">
@@ -622,7 +703,16 @@ async function onDisconnect() {
         <div v-if="!liveProcs || liveProcs.top.length === 0" class="ri-empty">等待采集…</div>
         <div v-for="p in liveProcs?.top ?? []" :key="p.pid" class="ri-proc-row">
           <span class="pname">
-            {{ p.name }}<em>#{{ p.pid }}</em>
+            <span class="pc-name" :title="p.name">{{ p.name }}</span>
+            <button
+              type="button" class="pc-pid" :title="`点击复制进程 ID：${p.pid}`"
+              @click.stop="copyProc(String(p.pid), '进程 ID')"
+            >#{{ p.pid }}</button>
+            <button
+              v-if="p.container" type="button" class="cname"
+              :title="`点击复制容器名称：${p.container.replace(/^\//, '')}`"
+              @click.stop="copyProc(p.container.replace(/^\//, ''), '容器名称')"
+            >{{ p.container.replace(/^\//, '') }}</button>
           </span>
           <span class="num" :class="{ 'cpu-hi': p.cpu >= 10, 'cpu-crit': p.cpu >= 20 }">
             {{ p.cpu.toFixed(1) }}
@@ -632,13 +722,13 @@ async function onDisconnect() {
       </div>
 
       <!-- ⑥ 磁盘：路径 | 可用/大小 | 使用率 密集表格（挂载点多时内部滚动） -->
-      <div class="ri-block">
+      <div class="ri-block" :style="{ '--dt-cols': diskTemplate }">
         <div class="ri-block-head">
           <span>磁盘</span>
           <span class="count">{{ liveDisks.length ? `${liveDisks.length} 个挂载点` : NA }}</span>
         </div>
         <div class="ri-tbl-head">
-          <span>路径</span><span>可用 / 大小</span><span>使用</span>
+          <span>路径<i class="ri-grip" title="拖动调整列宽" @mousedown="startDiskResize($event, 'path', 'size')" @click.stop="() => {}"></i></span><span>可用 / 大小</span><span>使用</span>
         </div>
         <div v-if="liveDisks.length === 0" class="ri-empty">等待采集…</div>
         <div v-else class="ri-tbl-body">
@@ -657,7 +747,7 @@ async function onDisconnect() {
               <span class="mp">{{ d.mount }}</span>
               <i v-if="d.fs" class="fst">{{ d.fs }}</i>
             </span>
-            <span class="s"><i class="sbar" :style="{ width: (d.total > 0 ? (d.available / d.total) * 100 : 0) + '%' }" />{{ fmtBytes(d.available) }} / {{ fmtBytes(d.total) }}</span>
+            <span class="s"><i class="sbar" :style="{ width: (d.total > 0 ? (d.available / d.total) * 100 : 0) + '%' }" /><span class="st">{{ fmtBytes(d.available) }} / {{ fmtBytes(d.total) }}</span></span>
             <span class="u" :class="meterClass(d.pct)">{{ d.pct }}%</span>
           </div>
         </div>
@@ -671,6 +761,9 @@ async function onDisconnect() {
       class="ri-pathtip"
       :style="{ left: `${pathTip.x + 12}px`, top: `${pathTip.y + 16}px` }"
     >{{ pathTip.text }}</div>
+
+    <!-- 进程弹窗：全量进程 + CPU/内存/容器排序，打开期间才订阅全量 -->
+    <ProcModal v-model:visible="procModal" />
   </aside>
 </template>
 
@@ -1102,6 +1195,27 @@ async function onDisconnect() {
   font-weight: 600;
   box-shadow: inset 0 -2px 0 var(--green);
 }
+/* 进程页签右侧的展开按钮：打开全量进程弹窗 */
+.ri-proc-expand {
+  flex: 0 0 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-left: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.ri-proc-expand:hover {
+  color: var(--text);
+  background: var(--veil-weak);
+}
+.ri-proc-expand svg {
+  width: 13px;
+  height: 13px;
+}
 .ri-chart {
   margin-top: 8px;
   padding: 8px 9px 7px;
@@ -1192,6 +1306,11 @@ async function onDisconnect() {
   margin-top: 15px;
   padding-top: 11px;
   border-top: 1px solid var(--border-soft);
+  /* 尾部区块：纵向占满面板剩余高度，表体内部滚动——全屏不再留白 */
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 .ri-block-head {
   display: flex;
@@ -1213,10 +1332,34 @@ async function onDisconnect() {
 .ri-tbl-head,
 .ri-tbl-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto 34px;
+  grid-template-columns: var(--dt-cols, minmax(110px, 1fr) auto 34px);
   gap: 8px;
   align-items: center;
   padding: 0 5px;
+}
+/* 列宽拖拽把手：挂在表头列右缘，悬停显强调色 */
+.ri-tbl-head span {
+  position: relative;
+}
+.ri-grip {
+  /* 正中压在表头右边缘的竖线上 */
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  right: -5px;
+  width: 10px;
+  z-index: 2;
+  cursor: col-resize;
+  touch-action: none;
+}
+.ri-grip:hover {
+  background: rgba(var(--accent-rgb), 0.45);
+}
+.ri-grip:hover::before {
+  content: '';
+  position: absolute;
+  inset: 0 4px 0 5px;
+  border-right: 2px solid rgba(var(--accent-rgb), 0.9);
 }
 .ri-tbl-head {
   padding-top: 4px;
@@ -1231,9 +1374,17 @@ async function onDisconnect() {
   text-align: right;
   font-family: var(--mono);
 }
-/* 挂载点可能几十条（每个容器一条 overlay），表体自身滚动，不把面板撑长 */
+/* 竖线分隔符（FinalShell 表格口径）：只加在表头列头上，内容行不加 */
+.ri-tbl-head span:not(:last-child) {
+  border-right: 1px solid var(--border-soft);
+}
+html[data-theme="light"] .ri-tbl-head span:not(:last-child) {
+  border-right-color: #d9dee6;
+}
+/* 挂载点可能几十条（每个容器一条 overlay），表体固定为剩余高度内滚动 */
 .ri-tbl-body {
-  max-height: 232px;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -1310,8 +1461,17 @@ async function onDisconnect() {
 }
 .ri-tbl-row .s {
   position: relative;
+  min-width: 0;
+  overflow: hidden;
   color: var(--text-soft);
   white-space: nowrap;
+}
+/* 数字层压在图条之上：条只做比例衬底，不遮字；超出列宽时整列裁切，
+ * 绝不溢出到右侧使用率列造成重叠 */
+.ri-tbl-row .s .st {
+  position: relative;
+  z-index: 1;
+  padding: 0 2px;
 }
 /* 薄荷绿条：衬底显示「可用/总计」比例（截图口径），数字盖在条上 */
 .ri-tbl-row .sbar {
@@ -1377,16 +1537,65 @@ async function onDisconnect() {
   font-family: var(--mono);
 }
 .ri-proc-row .pname {
+  display: flex;
+  align-items: center;
+  min-width: 0;
   font-family: var(--mono);
   color: var(--text);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.ri-proc-row .pc-name {
+  flex: 0 0 auto;
+  max-width: 55%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.ri-proc-row .pname em {
+.ri-proc-row .pc-pid,
+.ri-proc-row .pname .cname {
+  border: 0;
+  background: transparent;
+  font: inherit;
+  cursor: copy;
+}
+.ri-proc-row .pc-pid {
+  flex: 0 0 auto;
   margin-left: 5px;
+  padding: 0 2px;
+  border-radius: 3px;
   color: var(--muted-2);
-  font-style: normal;
+}
+.ri-proc-row .pc-pid:hover {
+  background: var(--panel-2);
+  color: var(--text);
+  text-decoration: underline dotted;
+}
+/* 容器归属徽标：窄栏时优先截断容器名，不能把进程名挤没 */
+.ri-proc-row .pname .cname {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 45%;
+  margin-left: 5px;
+  padding: 0 5px;
+  border-radius: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: rgba(94, 156, 214, 0.16);
+  color: #5b9bd5;
+  font-size: 9.5px;
+  line-height: 14px;
+}
+.ri-proc-row .pname .cname:hover { text-decoration: underline dotted; }
+.ri-proc-row .pc-pid:focus-visible,
+.ri-proc-row .pname .cname:focus-visible {
+  outline: 1px solid var(--blue);
+  outline-offset: 1px;
+}
+html[data-theme="light"] .ri-proc-row .pname .cname {
+  background: #eaf3fb;
+  color: #3e7fc0;
 }
 .ri-proc-row .num.cpu-hi {
   color: var(--yellow);
