@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 [中文](./CHANGELOG.zh-CN.md) · **English**
 
+## [2.3.0] - 2026-11-06
+
+This release centres on the monitor pane: processes now report their docker container and come with a sortable popup, while metric collection became incremental so the pane no longer shows bogus 0% / N/A frames.
+
+### Added
+
+- Process → container attribution: the process table resolves each PID's docker container name via cgroup; non-container processes stay blank
+- Process popup: sortable by CPU / memory / image name, with one-click copy for PID and container name; the full process list is streamed only while the popup is open and falls back to the Top list once closed
+- Per-host test-connection timeout: upper bound for the "Test connection" button (default 30s, 0 = unlimited)
+- The "+" in the tab bar now opens a Quick Connect tab, and a new home button returns to the host list
+- File list column widths are drag-resizable and align exactly with the rows
+
+### Changed
+
+- Lighter metric collection: docker container names are queried only on first run or when an unknown container appears; the cgroup scan is incremental per round with a full scan every 40 rounds
+- Bad-frame protection: frames that timed out mid-output or lack CPU/memory sections are dropped, so the pane keeps the last valid frame
+
+### Fixed
+
+- Disk table in the narrow left pane: available/total values overlapped the usage column and digits were hidden behind the progress bar; process names missing at small widths
+- File list column-width dragging (misaligned after a drag, unable to snap back)
+
 ## [2.2.0] - 2026-11-05
 
 ### Added
