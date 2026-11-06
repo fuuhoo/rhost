@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 [中文](./CHANGELOG.zh-CN.md) · **English**
 
+## [2.4.0] - 2026-11-06
+
+This release tightens interaction and appearance: quick connect returns as a dialog, the home title bar keeps a permanent way back to the workbench, the light theme was rebuilt on neutral greys measured from FinalShell with a proportional UI font, and the in-app version now comes from the running binary.
+
+### Added
+
+- Persistent "Back to workbench" button in the home title bar, so returning no longer requires picking a row from the session history
+- Dimensional document icon in the file list: the folded corner now reads, and both themes share one set of neutral overlays
+- Keychain read/write evidence events (ipc.keychain_read / ipc.keychain_write) recording exit status and secret length - never the secret - to diagnose "password required again after an upgrade"
+
+### Changed
+
+- Quick connect is a dialog again instead of a tab: it no longer occupies a tab slot, and search plus recent-first ordering behave as before
+- The sidebar and About card read the version from the running app (Cargo package version plus debug-build flag) instead of the hard-coded 0.1.0, and packaged builds no longer label themselves as a development build
+- Light theme backgrounds, panels, borders and text moved to neutral greys, dropping the blue radial wash behind the body; UI text switched to a proportional font (the terminal keeps its own palette and monospace font, size still 13px)
+
 ## [2.3.0] - 2026-11-06
 
 This release centres on the monitor pane: processes now report their docker container and come with a sortable popup, while metric collection became incremental so the pane no longer shows bogus 0% / N/A frames.
