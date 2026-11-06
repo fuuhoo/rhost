@@ -2086,6 +2086,118 @@ function changeSort(side: 'local' | 'remote', key: SortKey) {
   else s.value = { key, dir: 1 }
 }
 
+/* ---- 表头列宽拖拽：全列弹性（flex-grow 比例），分隔线精确跟随鼠标 ----
+ * 列宽模型（box-sizing:border-box + flex-basis:0，实测校准）：
+ *   列 border-box 宽 = 本列(内边距+边框) + (条宽 − Σ各列(内边距+边框)) × grow / Σgrow
+ * 即 grow 分的只是「内容宽」这一份，每列的内边距/边框是加在上面的定值。
+ * 所以指针给出的目标 border-box 宽必须先扣掉本列的这部分换算成内容宽，
+ * 再按比例写 grow，否则分隔线会恒定差出 7px 以上。
+ * 拖动只在分隔线两侧的两列之间转移 grow（两列内容宽之和不变），
+ * 因此其余列、整条总宽都不受影响，表头永远铺满栏宽、不会溢出。 */
+type ColKey = 'name' | 'size' | 'kind' | 'time' | 'perm' | 'user' | 'group'
+/* 列的最小 border-box 宽，须与 style.css 里各 .lh- 与 .row- 列的 min-width 一致 */
+const COL_MIN: Record<ColKey, number> = {
+  name: 100, size: 50, kind: 54, time: 118, perm: 76, user: 60, group: 60,
+}
+/* grow 基准 = 各列在 1100px 条宽下的内容宽（合计 982 = 1100 − Σ内边距/边框），
+ * 于是默认渲染恰好复刻旧的固定列宽：名称 626 / 大小 64 / 类型 56 / 修改时间 118 /
+ * 权限 84 / 用户 76 / 用户组 76；栏宽变化时各列按比例伸缩。 */
+const colG = ref<Record<ColKey, number>>({
+  name: 609, size: 47, kind: 39, time: 101, perm: 67, user: 59, group: 60,
+})
+let colDrag: {
+  a: ColKey
+  b: ColKey
+  sum: number
+  aLeft: number
+  padA: number
+  pairContent: number
+  minA: number
+  minB: number
+  raf: number
+  targetG: number
+} | null = null
+
+/* 一列 grow 分配之外的固定开销：左右内边距 + 左右边框 */
+function colBoxPad(el: HTMLElement) {
+  const cs = getComputedStyle(el)
+  return parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight)
+    + parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth)
+}
+
+function colPaneStyle() {
+  return {
+    '--cg-name': colG.value.name,
+    '--cg-size': colG.value.size,
+    '--cg-kind': colG.value.kind,
+    '--cg-time': colG.value.time,
+    '--cg-perm': colG.value.perm,
+    '--cg-user': colG.value.user,
+    '--cg-group': colG.value.group,
+  }
+}
+
+function startColResize(e: MouseEvent, a: ColKey, b: ColKey) {
+  if (e.button !== 0) return
+  // mousedown 阻止排序切换；mouseup 按把手 click.stop 吞掉 click，排序免疫
+  e.preventDefault()
+  e.stopPropagation()
+  // 把手挂在左列右缘：父元素 = A 列，下一个兄弟 = B 列
+  const aEl = (e.currentTarget as HTMLElement).parentElement
+  const bEl = aEl ? (aEl.nextElementSibling as HTMLElement | null) : null
+  if (!aEl || !bEl) return
+  const padA = colBoxPad(aEl)
+  const padB = colBoxPad(bEl)
+  const pairContent = aEl.offsetWidth + bEl.offsetWidth - padA - padB
+  if (pairContent <= 0) return
+  // 拖拽期间 A 左缘与两列内容宽之和都不变，一次量好后每次移动零重排
+  colDrag = {
+    a, b,
+    sum: colG.value[a] + colG.value[b],
+    aLeft: aEl.getBoundingClientRect().left,
+    padA,
+    pairContent,
+    minA: Math.max(0, COL_MIN[a] - padA),
+    minB: Math.max(0, COL_MIN[b] - padB),
+    raf: 0,
+    targetG: colG.value[a],
+  }
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+  window.addEventListener('mousemove', onColMove)
+  window.addEventListener('mouseup', onColEnd)
+}
+
+function onColMove(e: MouseEvent) {
+  if (!colDrag) return
+  const { padA, pairContent, minA, minB } = colDrag
+  // 指针 → A 的 border-box 目标宽 → 内容宽；钳制在 [A.min, 配对内容宽 − B.min]
+  const wantContent = e.clientX - colDrag.aLeft - padA
+  const clamped = Math.min(pairContent - minB, Math.max(minA, wantContent))
+  colDrag.targetG = colDrag.sum * (clamped / pairContent)
+  if (colDrag.raf) return
+  colDrag.raf = requestAnimationFrame(applyColGrow)
+}
+
+/* 把本次拖动算出的 grow 落到两列上（配对总和不变） */
+function applyColGrow() {
+  if (!colDrag) return
+  colDrag.raf = 0
+  colG.value[colDrag.a] = colDrag.targetG
+  colG.value[colDrag.b] = colDrag.sum - colDrag.targetG
+}
+
+function onColEnd() {
+  window.removeEventListener('mousemove', onColMove)
+  window.removeEventListener('mouseup', onColEnd)
+  if (colDrag?.raf) cancelAnimationFrame(colDrag.raf)
+  // 松手可能发生在最后一次 mousemove 与下一帧之间，这里补落一次，避免差几像素
+  applyColGrow()
+  document.body.style.cursor = ''
+  document.body.style.userSelect = ''
+  colDrag = null
+}
+
 /* 顶栏刷新：本地与远端（若已连接）同时重载当前目录 */
 function refreshAll() {
   void loadLocal(localPath.value)
@@ -2804,7 +2916,7 @@ onUnmounted(() => {
                  @dblclick="onTreeDblClick"></div>
             <!-- 本地 -->
             <div v-if="showLocalPane" class="pane local"
-                 :style="{ flex: `0 0 calc((100% - ${sftpTreeWidth}px) * ${sftpLocalRatio})` }">
+                 :style="{ flex: `0 0 calc((100% - ${sftpTreeWidth}px) * ${sftpLocalRatio})`, ...colPaneStyle() }">
               <div class="pane-header">
                 <span class="pane-tag">本地</span>
                 <div class="pane-path">
@@ -2845,12 +2957,12 @@ onUnmounted(() => {
                 </button>
               </div>
               <div class="list-header">
-                <div class="lh-name" :class="{ sorted: localSort.key==='name', asc: localSort.dir===1, desc: localSort.dir===-1 }" @click="changeSort('local','name')">文件名</div>
-                <div class="lh-size" :class="{ sorted: localSort.key==='size' }" @click="changeSort('local','size')">大小</div>
-                <div class="lh-kind">类型</div>
-                <div class="lh-time" :class="{ sorted: localSort.key==='mtime' }" @click="changeSort('local','mtime')">修改时间</div>
-                <div class="lh-perm">权限</div>
-                <div class="lh-user">用户</div>
+                <div class="lh-name" :class="{ sorted: localSort.key==='name', asc: localSort.dir===1, desc: localSort.dir===-1 }" @click="changeSort('local','name')">文件名<i class="lh-grip" title="拖动调整列宽" @mousedown="startColResize($event, 'name', 'size')" @click.stop="() => {}"></i></div>
+                <div class="lh-size" :class="{ sorted: localSort.key==='size' }" @click="changeSort('local','size')">大小<i class="lh-grip" title="拖动调整列宽" @mousedown="startColResize($event, 'size', 'kind')" @click.stop="() => {}"></i></div>
+                <div class="lh-kind">类型<i class="lh-grip" title="拖动调整列宽" @mousedown="startColResize($event, 'kind', 'time')" @click.stop="() => {}"></i></div>
+                <div class="lh-time" :class="{ sorted: localSort.key==='mtime' }" @click="changeSort('local','mtime')">修改时间<i class="lh-grip" title="拖动调整列宽" @mousedown="startColResize($event, 'time', 'perm')" @click.stop="() => {}"></i></div>
+                <div class="lh-perm">权限<i class="lh-grip" title="拖动调整列宽" @mousedown="startColResize($event, 'perm', 'user')" @click.stop="() => {}"></i></div>
+                <div class="lh-user">用户<i class="lh-grip" title="拖动调整列宽" @mousedown="startColResize($event, 'user', 'group')" @click.stop="() => {}"></i></div>
                 <div class="lh-group">用户组</div>
               </div>
               <div class="pane-list" @contextmenu="onBlankContext($event, 'local')">
@@ -2940,14 +3052,14 @@ onUnmounted(() => {
             </div>
 
             <!-- 远程：导航（路径条/上一级/新建/上传下载）统一在顶栏，这里只有表头与列表 -->
-            <div class="pane remote">
+            <div class="pane remote" :style="colPaneStyle()">
               <div class="list-header">
-                <div class="lh-name" :class="{ sorted: remoteSort.key==='name', asc: remoteSort.dir===1, desc: remoteSort.dir===-1 }" @click="changeSort('remote','name')">文件名</div>
-                <div class="lh-size" :class="{ sorted: remoteSort.key==='size' }" @click="changeSort('remote','size')">大小</div>
-                <div class="lh-kind">类型</div>
-                <div class="lh-time" :class="{ sorted: remoteSort.key==='mtime' }" @click="changeSort('remote','mtime')">修改时间</div>
-                <div class="lh-perm">权限</div>
-                <div class="lh-user">用户</div>
+                <div class="lh-name" :class="{ sorted: remoteSort.key==='name', asc: remoteSort.dir===1, desc: remoteSort.dir===-1 }" @click="changeSort('remote','name')">文件名<i class="lh-grip" title="拖动调整列宽" @mousedown="startColResize($event, 'name', 'size')" @click.stop="() => {}"></i></div>
+                <div class="lh-size" :class="{ sorted: remoteSort.key==='size' }" @click="changeSort('remote','size')">大小<i class="lh-grip" title="拖动调整列宽" @mousedown="startColResize($event, 'size', 'kind')" @click.stop="() => {}"></i></div>
+                <div class="lh-kind">类型<i class="lh-grip" title="拖动调整列宽" @mousedown="startColResize($event, 'kind', 'time')" @click.stop="() => {}"></i></div>
+                <div class="lh-time" :class="{ sorted: remoteSort.key==='mtime' }" @click="changeSort('remote','mtime')">修改时间<i class="lh-grip" title="拖动调整列宽" @mousedown="startColResize($event, 'time', 'perm')" @click.stop="() => {}"></i></div>
+                <div class="lh-perm">权限<i class="lh-grip" title="拖动调整列宽" @mousedown="startColResize($event, 'perm', 'user')" @click.stop="() => {}"></i></div>
+                <div class="lh-user">用户<i class="lh-grip" title="拖动调整列宽" @mousedown="startColResize($event, 'user', 'group')" @click.stop="() => {}"></i></div>
                 <div class="lh-group">用户组</div>
               </div>
               <div class="pane-list" @contextmenu="onBlankContext($event, 'remote')">

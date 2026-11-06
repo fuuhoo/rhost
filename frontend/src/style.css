@@ -186,6 +186,8 @@ html[data-theme="light"] .ri-text .v{color:#101820}
 html[data-theme="light"] .ri-chart{background:#fff;border-color:#e2e8f0}
 html[data-theme="light"] .ri-proc{background:#fff;border-color:#e2e8f0}
 html[data-theme="light"] .ri-chart-top .ri-iface{color:#7d8898}
+/* 表头竖线在浅色下压深一档，拖拽位一目了然 */
+html[data-theme="light"] .list-header>div:not(:last-child){border-right-color:#d9dee6}
 /* —— 窗口标签条浅色还原截图（FinalShell）色调：浅灰条 + 白色圆角胶囊标签 —— */
 html[data-theme="light"] .tabs-bar{background:#eeeeef}
 html[data-theme="light"] .tab{background:#f7f7f8;border-color:#dcdce0;color:#4a4a52}
@@ -2220,15 +2222,15 @@ body{
 .list-header>div{padding:6px 8px;cursor:pointer;transition:.12s}
 .list-header>div:hover{color:var(--text)}
 .list-header>div.sorted{color:var(--green)}
-/* 列宽（FinalShell「文件」页口径）：名称列弹性（文件名长度方差最大，随栏宽伸缩），
-   其余固定；栏宽不足时整表保持最小总宽，由 .pane-list 出横向滚动条 */
-.lh-name{flex:1;min-width:0}
-.lh-size{flex:0 0 64px;text-align:right}
-.lh-kind{flex:0 0 56px}
-.lh-time{flex:0 0 116px}
-.lh-perm{flex:0 0 84px}
-.lh-user{flex:0 0 76px}
-.lh-group{flex:0 0 76px}
+/* 列宽（FinalShell「文件」页口径）：全列弹性，宽度由 .pane 上的 --cg-* grow 比例分配；
+   栏宽不足时各列按 min-width 钳制，整表保持最小总宽，由 .pane-list 出横向滚动条 */
+.lh-name{flex:var(--cg-name,609) 1 0px;min-width:100px}
+.lh-size{flex:var(--cg-size,47) 1 0px;min-width:50px;text-align:right}
+.lh-kind{flex:var(--cg-kind,39) 1 0px;min-width:54px}
+.lh-time{flex:var(--cg-time,101) 1 0px;min-width:118px}
+.lh-perm{flex:var(--cg-perm,67) 1 0px;min-width:76px}
+.lh-user{flex:var(--cg-user,59) 1 0px;min-width:60px}
+.lh-group{flex:var(--cg-group,60) 1 0px;min-width:60px}
 /* 名称列的排序指示：未排序 ↕（淡），升/降序单箭头；其余列同样可排序但不占标记 */
 .lh-name::after{content:'↕';margin-left:4px;opacity:.38;font-weight:400}
 .lh-name.sorted.asc::after{content:'↑';opacity:.9}
@@ -2237,7 +2239,7 @@ body{
 .list-header>.lh-kind,.list-header>.lh-perm,.list-header>.lh-user,.list-header>.lh-group{cursor:default}
 .list-header>.lh-kind:hover,.list-header>.lh-perm:hover,
 .list-header>.lh-user:hover,.list-header>.lh-group:hover{color:var(--muted-2)}
-/* 472px 固定列 + 名称最小 148px + 内边距余量 */
+/* 栏宽下限时整表出横向滚动：各列 min-width 合计 522px，640px 还给名称列留 ~230px 可读宽 */
 .list-header,.row{min-width:640px}
 .row{
     display:flex;align-items:center;
@@ -2252,8 +2254,11 @@ body{
 .row.selected{background:rgba(var(--accent-rgb),.16)}
 .row.selected .row-text{color:var(--text-strong)}
 .row>div{padding:5px 8px}
+/* 表头每列有 1px 右框，内容行没有：flex-basis:0 时 grow 分的是「条宽 − Σ(内边距+边框)」，
+   两边固定开销不等会让同列在表头与行里错开。内容行补一条等宽透明框，分隔位置才完全对齐 */
+.row>div:not(:last-child){border-right:1px solid transparent}
 .row-name{
-    flex:1;min-width:0;display:flex;align-items:center;gap:7px;
+    flex:var(--cg-name,609) 1 0px;min-width:100px;display:flex;align-items:center;gap:7px;
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
 /* 文件/文件夹图标：截图式填充（黄文件夹、浅灰文档），深浅主题共用 */
@@ -2284,20 +2289,41 @@ body{
     color:var(--fg);font-size:12px;outline:none;
 }
 .rename-input:focus{border-color:var(--blue);box-shadow:0 0 0 2px rgba(59,130,246,.18)}
-.row-perm{flex:0 0 84px;color:var(--muted-2);font-size:10.5px;white-space:nowrap}
-.row-user,.row-group{
-    flex:0 0 76px;color:var(--muted-2);font-size:10.5px;
+.row-perm{flex:var(--cg-perm,67) 1 0px;min-width:76px;color:var(--muted-2);font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row-user{
+    flex:var(--cg-user,59) 1 0px;min-width:60px;color:var(--muted-2);font-size:10.5px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+/* 用户组与用户各自一条 grow：合写会让两列都吃 --cg-user，拖 用户|用户组 时表头动了行不动 */
+.row-group{
+    flex:var(--cg-group,60) 1 0px;min-width:60px;color:var(--muted-2);font-size:10.5px;
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
 .row-kind{
-    flex:0 0 56px;color:var(--muted-2);font-size:10.5px;
+    flex:var(--cg-kind,39) 1 0px;min-width:54px;color:var(--muted-2);font-size:10.5px;
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
 .row-size{
-    flex:0 0 64px;text-align:right;color:var(--muted-2);
+    flex:var(--cg-size,47) 1 0px;min-width:50px;text-align:right;color:var(--muted-2);
     font-size:10.5px;
 }
-.row-time{flex:0 0 116px;color:var(--muted-2);font-size:10.5px;white-space:nowrap}
+/* 时间/权限必须裁剪：栏窄时这两列会压到 min-width，
+   不裁就会让「2020-10-04 20:35」直接盖到右邻列上，看起来像列错位 */
+.row-time{flex:var(--cg-time,101) 1 0px;min-width:118px;color:var(--muted-2);font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* 列宽拖拽把手：挂在表头列的右缘，悬停显强调色；mousedown 起拖后点击免疫排序 */
+.list-header>div{position:relative}
+/* 竖线分隔符（FinalShell 表格口径）：只加在表头列头上，内容行不加 */
+.list-header>div:not(:last-child){border-right:1px solid var(--border-soft)}
+.lh-grip{
+    /* 正中压在表头右边缘的竖线上：右半悬出格外、左半在格内，整条线都可抓 */
+    position:absolute;top:0;bottom:0;right:-5px;width:10px;z-index:2;
+    cursor:col-resize;touch-action:none;
+}
+.lh-grip:hover{background:rgba(var(--accent-rgb),.45)}
+.lh-grip:hover::before{
+    content:'';position:absolute;inset:0 4px 0 4px;
+    border-right:2px solid rgba(var(--accent-rgb),.9);
+}
 .pane-empty{
     padding:36px 20px;text-align:center;color:var(--muted-2);font-size:11.5px;
 }
