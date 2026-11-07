@@ -172,6 +172,8 @@ pub(crate) struct SettingsSection {
     env: Vec<EnvVarSection>,
     /// 「执行命令…」面板里的自定义命令条目（全局一份）
     command_templates: Vec<CommandTemplateSection>,
+    /// 内置命令模板是否已补进磁盘（一次性迁移标记，仅前端读写；Rust 只负责持久化）
+    command_templates_seeded: bool,
     // 快捷键（键名含点，serde 按磁盘 camelCase 名显式 rename）
     #[serde(rename = "key.newTab")]
     key_new_tab: String,
@@ -266,8 +268,19 @@ impl Default for SettingsSection {
                 },
             ],
 
-            // 默认不预置命令模板：与前端 DEFAULT_SETTINGS 一致（自定义命令直接写入远端执行）
-            command_templates: Vec::new(),
+            // 与前端 DEFAULT_SETTINGS 一致：预置只读查询类 docker 命令。
+            // 注意 \\t 必须保持字面反斜杠 + t（docker stats --format 的列分隔转义）
+            command_templates: vec![
+                CommandTemplateSection {
+                    name: "docker 内存".into(),
+                    command: "docker stats --no-stream --format \"table {{.Container}}\\t{{.Name}}\\t{{.MemUsage}}\" | sort -hk 3".into(),
+                },
+                CommandTemplateSection {
+                    name: "docker CPU".into(),
+                    command: "docker stats --no-stream --format \"table {{.Name}}\\t{{.CPUPerc}}\" | sort -k 2 -h".into(),
+                },
+            ],
+            command_templates_seeded: false,
 
             key_new_tab: "⌘+T".into(),
             key_close_tab: "⌘+W".into(),
@@ -767,6 +780,22 @@ mod tests {
         assert_eq!(raw["settings"]["motd"], true); // 默认补齐
         assert_eq!(raw["settings"]["key.newTab"], "⌘+T");
         assert_eq!(raw["settings"]["updateChannel"], "stable");
+        // 预置命令模板随默认值补齐，且 marker 保持 false 交由前端补种
+        assert_eq!(raw["settings"]["commandTemplates"].as_array().unwrap().len(), 2);
+        assert_eq!(raw["settings"]["commandTemplatesSeeded"], false);
+    }
+
+    #[test]
+    fn default_settings_seed_docker_command_templates() {
+        let v = default_settings_value();
+        let tpls = v["commandTemplates"].as_array().expect("应有预置命令模板");
+        assert_eq!(tpls.len(), 2);
+        assert_eq!(tpls[0]["name"], "docker 内存");
+        assert_eq!(tpls[1]["name"], "docker CPU");
+        // docker stats --format 的列分隔必须是字面 \t（反斜杠 + t），不能是真实制表符
+        let mem = tpls[0]["command"].as_str().unwrap();
+        assert!(mem.contains("\\t"), "预置命令丢了字面 \\t：{mem}");
+        assert!(!mem.contains('\t'), "预置命令被转成了真实制表符：{mem}");
     }
 
     #[test]

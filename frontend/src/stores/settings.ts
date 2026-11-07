@@ -84,6 +84,8 @@ export interface AppSettings {
   /** 「执行命令…」面板里的自定义命令条目（全局一份，无占位符）；
    *  仅由前端消费（写终端），Rust 侧只负责持久化 */
   commandTemplates: CommandTemplate[]
+  /** 内置命令模板一次性补种标记：false/缺失表示预置项还没写进磁盘 */
+  commandTemplatesSeeded: boolean
   /* ---- 快捷键 ---- */
   'key.newTab': string
   'key.newWindow': string
@@ -271,9 +273,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   // 预置命令模板（只读查询类，可直接写入终端执行；用户可在设置里增删）
   // 注意：单引号内 \\t 保留为字面 \t（docker stats --format 的列分隔转义），勿写成真实制表符
   commandTemplates: [
-    { name: '内存', command: 'docker stats --no-stream --format "table {{.Container}}\\t{{.Name}}\\t{{.MemUsage}}" | sort -hk 3' },
-    { name: 'CPU', command: 'docker stats --no-stream --format "table {{.Name}}\\t{{.CPUPerc}}" | sort -k 2 -h' },
+    { name: 'docker 内存', command: 'docker stats --no-stream --format "table {{.Container}}\\t{{.Name}}\\t{{.MemUsage}}" | sort -hk 3' },
+    { name: 'docker CPU', command: 'docker stats --no-stream --format "table {{.Name}}\\t{{.CPUPerc}}" | sort -k 2 -h' },
   ],
+  commandTemplatesSeeded: false,
 
   'key.newTab': '⌘+T',
   // 与 FinalShell 默认键位一致（Ctrl+Shift+T 新建终端窗口）
@@ -380,6 +383,17 @@ function applySettingsSection(section: Record<string, unknown>) {
   if (section.termTheme === 'light' && typeof section.termMode !== 'string') section.termBg = 'light'
   delete section.termMode
   Object.assign(savedSettings, section)
+  // 一次性补种内置命令模板：预置项曾只存在于前端 DEFAULT_SETTINGS，任何一次保存
+  // 设置都会被后端按默认值补成空数组写盘，之后每次启动 hydrate 又用空数组覆盖
+  // 前端预置，面板里就再也看不到它们。标记缺省时把预置项补回（已有自建命令则
+  // 保留用户内容），写盘后不再触发；用户之后主动删除也不会复活。
+  if (!savedSettings.commandTemplatesSeeded) {
+    if (!savedSettings.commandTemplates.length) {
+      savedSettings.commandTemplates = cloneDefaults().commandTemplates
+    }
+    savedSettings.commandTemplatesSeeded = true
+    persistSettings()
+  }
 }
 
 /** logs 节字段（磁盘 snake_case，与后端 LogsSection 序列化一致）→ savedSettings 的 log* 字段；
