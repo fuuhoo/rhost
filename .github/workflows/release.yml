@@ -46,13 +46,15 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      # Tauri v2 Linux 构建的系统依赖（webkit2gtk-4.1 为 Tauri 2 基线）
+      # Tauri v2 Linux 构建的系统依赖（webkit2gtk-4.1 为 Tauri 2 基线）；
+      # libdbus-1-dev + pkg-config 供 keyring 的 Secret Service 后端（密码持久化）使用
       - name: Install Linux system deps
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
-            libayatana-appindicator3-dev librsvg2-dev patchelf
+            libayatana-appindicator3-dev librsvg2-dev patchelf \
+            libdbus-1-dev pkg-config
 
       # beforeBuildCommand 会在 frontend/ 里跑 npm run build（含 vue-tsc 类型检查）
       - name: Install frontend deps

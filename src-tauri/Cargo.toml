@@ -1,6 +1,6 @@
 [package]
 name = "rhost"
-version = "2.4.0"
+version = "2.4.1"
 description = "Cross-platform High-performance Remote Host Manager"
 license = "MIT"
 edition = "2024"
@@ -30,7 +30,12 @@ tokio-util = "0.7.19"
 uuid = { version = "1.26.1", features = ["v4"] }
 bytes = "1.12.1"
 thiserror = "2.0.21"
-keyring = "3"
+# keyring 3 没有任何默认平台后端：不显式开平台特性时，Windows/Linux 目标都会静默
+# 退化成 mock 后端（写入只落在内存条目里，进程退出即丢，表现为升级/重启后密码失效）
+# - windows-native：Windows 凭据管理器
+# - sync-secret-service：Linux 走 Secret Service（libdbus 随 tauri 的 tao 依赖已存在；
+#   用同步变体而非 async：keyring 本身始终阻塞调用，异步变体要求独立线程否则会死锁）
+keyring = { version = "3", features = ["windows-native", "sync-secret-service"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 sysinfo = "0.38.4"
 libc = "0.2"

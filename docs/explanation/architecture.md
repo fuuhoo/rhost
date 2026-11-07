@@ -222,7 +222,7 @@ xterm fit → `onResize` → 前端节流（leading 立即发 + 50ms trailing �
 ### 8.5 配置与密码
 
 - 主机非敏感配置：`app_data_dir/connections.json`（带 version，全量写时临时文件 + rename）；
-- 密码 / 私钥口令：仅系统钥匙串（macOS 经 `security` 命令绕 ad-hoc 签名 ACL，其他平台 keyring crate）；前端永不预加载密码，连接时按需读取；
+- 密码 / 私钥口令：仅系统钥匙串（macOS 经 `security` 命令绕 ad-hoc 签名 ACL，其他平台 keyring crate；keyring 3 无默认平台后端，Windows 必须显式启用 `windows-native`、Linux 启用 `sync-secret-service`，否则会静默退化为无持久化的 mock）；前端永不预加载密码，连接时按需读取；
 - 前端偏好（设置）与工作台布局：localStorage（`rhost.settings`、`rhost.layout.v1`），写盘 200ms 防抖，读取失败回退默认。
 
 ## 9. 安全与权限边界

@@ -6,6 +6,12 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.4.1] - 2026-11-07
+
+### 修复
+
+- Windows / Linux 端保存的密码无法跨重启保留（升级后须重输）：keyring 依赖未启用任何平台后端，编译进安装包的是无持久化的 mock 后端，写入看似成功但只落在内存条目里。现启用 Windows 凭据管理器与 Linux Secret Service（GNOME Keyring / KWallet）；升级后需再输入一次密码，之后重装/升级不再要求。无 Secret Service 的纯命令行环境仍会回退为每次询问
+
 ## [2.4.0] - 2026-11-06
 
 本版本收敛交互与观感：快速连接回到弹窗、首页常驻回工作台出口，浅色主题按 FinalShell 实测值重做中性灰阶并改用比例字体，界面版本号取自运行时真值。

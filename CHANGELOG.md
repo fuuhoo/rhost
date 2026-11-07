@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 [中文](./CHANGELOG.zh-CN.md) · **English**
 
+## [2.4.1] - 2026-11-07
+
+### Fixed
+
+- Saved passwords on Windows and Linux did not survive a restart (and so had to be re-entered after every upgrade): the keyring dependency did not enable any platform backend, so builds shipped the non-persistent mock backend where writes appear to succeed but live only in memory. Windows Credential Manager and Linux Secret Service (GNOME Keyring / KWallet) are now enabled; one more password entry after upgrading, then reinstalls and upgrades keep it. Headless systems without a Secret Service provider still fall back to prompting
+
 ## [2.4.0] - 2026-11-06
 
 This release tightens interaction and appearance: quick connect returns as a dialog, the home title bar keeps a permanent way back to the workbench, the light theme was rebuilt on neutral greys measured from FinalShell with a proportional UI font, and the in-app version now comes from the running binary.
