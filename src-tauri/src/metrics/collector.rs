@@ -21,8 +21,8 @@ use crate::applog;
 use crate::applog::events as ev;
 use crate::metrics::{
     CpuMetricsPayload, CpuTimes, DISK_INTERVAL_ROUNDS, DiskMetrics, DockerScanScope,
-    GpuItemPayload, MetricsPayload, NetCounters, NetMetricsPayload, ProcsPayload, RawMetrics,
-    build_procs_payload, byte_rate, container_name_for, cpu_util, metrics_script,
+    GpuItemPayload, MemMetrics, MetricsPayload, NetCounters, NetMetricsPayload, ProcsPayload,
+    RawMetrics, build_procs_payload, byte_rate, container_name_for, cpu_util, metrics_script,
     parse_metrics_output,
 };
 use crate::ssh::frame::{FrameType, encode_frame};
@@ -153,6 +153,17 @@ async fn run(
     }
 
     let mut prev_cpu: Option<CpuTimes> = None;
+    // 各段最近一次有效值：本轮该段缺失/为空时沿用上一次，界面不回落到 0/占位。
+    // 采集失败轮根本不发帧（前端保留上一帧），这里覆盖的是「执行成功但某段空缺」的半坏帧。
+    let mut cpu_util_cache: f32 = 0.0;
+    let mut load_cache: Option<[f32; 3]> = None;
+    let mut mem_cache = MemMetrics::default();
+    let mut net_cache = NetMetricsPayload {
+        rx_rate: 0.0,
+        tx_rate: 0.0,
+        rx_bytes: 0,
+        tx_bytes: 0,
+    };
     // 网卡速率需 (采样时刻, 计数) 二元组做差；墙钟差兼容后台 Tab 节流后的非固定间隔
     let mut prev_net: Option<(Instant, NetCounters)> = None;
     // 磁盘低频夹带：第 0 轮（首帧）立即采，之后每 DISK_INTERVAL_ROUNDS 轮一次；
@@ -269,36 +280,50 @@ async fn run(
                 // exec 成功即解除退避（即使部分 marker 段缺失也算通道健康）
                 consecutive_failures = 0;
                 ever_succeeded = true;
-                // CPU 利用率需相邻两次快照差值；首帧（或本轮缺 stat）util 为 0
+                // CPU 利用率需相邻两次快照差值；首帧（或本轮缺 stat）沿用上一次值
                 let util = match (prev_cpu, raw.cpu) {
                     (Some(p), Some(c)) => cpu_util(p, c),
-                    _ => 0.0,
+                    _ => cpu_util_cache,
                 };
                 if raw.cpu.is_some() {
                     prev_cpu = raw.cpu;
+                    cpu_util_cache = util;
+                }
+                // 负载：loadavg 缺失时沿用上一次，避免界面周期性跳 N/A
+                let load = raw.load.or(load_cache);
+                if raw.load.is_some() {
+                    load_cache = raw.load;
+                }
+                // 内存：MemTotal 为 0 视为本轮内存段缺失，沿用上一次快照（不推 0%）
+                if raw.mem.total > 0 {
+                    mem_cache = raw.mem;
                 }
 
-                // 网络速率同理：首帧（或本轮缺 netdev）速率为 0，只记录快照不算差
-                let mut net = NetMetricsPayload {
-                    rx_rate: 0.0,
-                    tx_rate: 0.0,
-                    rx_bytes: 0,
-                    tx_bytes: 0,
-                };
-                if let Some(cur) = raw.net {
+                // 网络速率同理：缺 netdev 时沿用上一次速率与计数，不把 0 推给界面
+                let net = if let Some(cur) = raw.net {
+                    let mut n = NetMetricsPayload {
+                        rx_rate: 0.0,
+                        tx_rate: 0.0,
+                        rx_bytes: cur.rx_bytes,
+                        tx_bytes: cur.tx_bytes,
+                    };
                     if let Some((prev_at, prev)) = prev_net {
                         let dt = sampled_at.saturating_duration_since(prev_at);
-                        net.rx_rate = byte_rate(prev.rx_bytes, cur.rx_bytes, dt);
-                        net.tx_rate = byte_rate(prev.tx_bytes, cur.tx_bytes, dt);
+                        n.rx_rate = byte_rate(prev.rx_bytes, cur.rx_bytes, dt);
+                        n.tx_rate = byte_rate(prev.tx_bytes, cur.tx_bytes, dt);
                     }
-                    net.rx_bytes = cur.rx_bytes;
-                    net.tx_bytes = cur.tx_bytes;
                     prev_net = Some((sampled_at, cur));
-                }
+                    net_cache = n;
+                    n
+                } else {
+                    net_cache
+                };
 
-                // 磁盘仅夹带轮有新解析结果（df 失败时为 None）；缓存沿用上一次
+                // 磁盘仅夹带轮有新解析结果（df 失败时为 None）；空结果视为本轮失败，沿用缓存
                 if let Some(disks) = raw.disks {
-                    disks_cache = disks;
+                    if !disks.is_empty() {
+                        disks_cache = disks;
+                    }
                 }
 
                 // docker 增量合并：名称段是完整快照才整体替换；
@@ -320,6 +345,10 @@ async fn run(
                         }
                         DockerScanScope::NamesOnly | DockerScanScope::Off => {}
                     }
+                }
+                // 进程段空输出（/proc 不可读等）按本轮失败处理：不推空榜单、不清归属缓存
+                if raw.procs.as_ref().is_some_and(|p| p.procs.is_empty()) {
+                    raw.procs = None;
                 }
                 // 按本轮存活进程裁剪缓存（退出的 PID 自然淘汰），并补齐容器归属标注。
                 // 首轮全量后把当前存活集记为已扫，否则下一轮会把全部旧进程当“新增”再全量一次；
@@ -405,11 +434,8 @@ async fn run(
 
                 let payload = MetricsPayload {
                     seq,
-                    cpu: CpuMetricsPayload {
-                        util,
-                        load: raw.load,
-                    },
-                    mem: raw.mem,
+                    cpu: CpuMetricsPayload { util, load },
+                    mem: mem_cache,
                     net,
                     disks: disks_cache.clone(),
                     procs: procs_cache.clone().unwrap_or(ProcsPayload {

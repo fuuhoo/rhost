@@ -518,7 +518,7 @@ const PANELS: PanelDef[] = [
         rows: [
           { key: 'memInterval', title: '内存采集间隔', desc: '采集 Rhost 主进程驻留内存 (RSS) 用于底部状态栏监控；间隔越短折线越实时，IPC 开销越高', kind: 'select', num: true, width: 150, keywords: '监控 内存 采集 间隔 频率 interval 轮询 秒 性能',
             options: [1, 2, 3, 5, 10, 30, 60].map(v => ({ v: String(v), t: `${v} 秒${v === 2 ? '（默认）' : ''}` })) },
-          { key: 'metricsInterval', title: '主机指标采集间隔', desc: '采集远端服务器的 CPU/内存/网络/磁盘/进程/GPU 并刷新监控面板；间隔越短越实时，对远端与本机开销越高。允许 1~10 秒，默认 2 秒（与 FinalShell 一致）', kind: 'select', num: true, width: 150, keywords: '监控 主机 服务器 指标 cpu 内存 网络 磁盘 进程 gpu 采集 间隔 频率 轮询 秒 性能 ssh',
+          { key: 'metricsInterval', title: '主机指标采集间隔', desc: '采集远端服务器的 CPU/内存/网络/进程/GPU 并刷新监控面板；磁盘挂载路径表按约 60 秒低频刷新。间隔越短越实时，对远端与本机开销越高。允许 1~10 秒，默认 2 秒（与 FinalShell 一致）', kind: 'select', num: true, width: 150, keywords: '监控 主机 服务器 指标 cpu 内存 网络 磁盘 进程 gpu 采集 间隔 频率 轮询 秒 性能 ssh',
             options: [1, 2, 3, 5, 10].map(v => ({ v: String(v), t: `${v} 秒${v === 2 ? '（默认）' : ''}` })) },
           { key: 'memPauseHidden', title: '不可见时暂停采集', desc: '回到首页或窗口最小化时停止内存采集以降低后台开销；关闭后无论面板是否可见均持续采集', kind: 'switch', keywords: '暂停 后台 隐藏 最小化 不可见 pause 采集 cpu 开销' },
         ],

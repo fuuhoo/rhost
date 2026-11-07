@@ -334,6 +334,7 @@ const DOCKER_CGROUP_ALL_SECTION: &str = "echo @@DOCKER@@\ngrep -aHoE '[a-f0-9]{1
 /// 名称变化缓慢，collector 只在首次/出现未知容器时查询并跨轮缓存。
 const DOCKER_NAMES_SECTION: &str = "echo @@DOCKERNAMES@@\nif command -v docker >/dev/null 2>&1; then docker ps --no-trunc --format '{{.ID}} {{.Names}}' 2>/dev/null | while read -r cid nm; do [ -n \"$cid\" ] && [ -n \"$nm\" ] && echo \"docker:$cid:$nm\"; done; else dr=''; if [ -f /etc/docker/daemon.json ]; then dr=$(sed -n 's/.*\"data-root\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' /etc/docker/daemon.json | head -1); fi\nfor root in \"$dr\" /var/lib/docker /home/docker \"$HOME/.local/share/docker\"; do [ -n \"$root\" ] && [ -d \"$root/containers\" ] || continue; for f in \"$root\"/containers/*/config.v2.json; do [ -f \"$f\" ] || continue; cid=${f##*/containers/}; cid=${cid%%/*}; name=$(grep -o '\"Name\":\"[^\"]*\"' \"$f\" 2>/dev/null | head -1 | cut -d'\"' -f4); [ -n \"$name\" ] && echo \"docker:$cid:${name#/}\"; done; done; fi\n";
 /// 磁盘低频段：每 [`DISK_INTERVAL_ROUNDS`] 轮夹带一次（df 需枚举挂载点，开销略高）。
+/// 60s 量级足够——容量变化慢，且非夹带轮沿用缓存，界面不会空窗。
 /// df 段脚本：优先 `df -PkT`（GNU/busybox 支持额外输出文件系统类型列，
 /// FinalShell 磁盘表同款信息）；macOS/BSD 的 df 无 -T 会整体失败，
 /// `||` 回落到纯 `df -Pk`（解析端兼容两种列布局）。
@@ -588,9 +589,9 @@ pub(crate) fn byte_rate(prev: u64, cur: u64, dt: Duration) -> f64 {
     cur.saturating_sub(prev) as f64 / secs
 }
 
-/// 磁盘采集夹带间隔（轮）：默认 3s 一轮时约每 30s 刷新一次磁盘。
+/// 磁盘（挂载路径表）低频夹带轮次：默认 2s 间隔下约每 60s 一次。
 /// 首帧（第 0 轮）无条件采一次，面板打开即有磁盘数据。
-pub(crate) const DISK_INTERVAL_ROUNDS: u32 = 10;
+pub(crate) const DISK_INTERVAL_ROUNDS: u32 = 30;
 
 /// 单个挂载点磁盘用量（字节），取自 `df -PkT`/`df -Pk` 行；百分比由后端按 used/total 算好。
 #[derive(Debug, Clone, Serialize, PartialEq)]

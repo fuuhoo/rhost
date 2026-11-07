@@ -34,7 +34,7 @@
 |---|---|---|---|
 | 静态 | 系统信息 | 连接时 **1 次** | `/etc/os-release`（PRETTY_NAME）、`uname -srm`、`nproc`、`/proc/cpuinfo`（model name 去重）、`/proc/uptime`、`date +%z %Z`、默认路由 iface/IP（MOTD 已有）、GPU 能力探测 |
 | 动态 | CPU/内存/Swap、GPU、网络、进程 | 2–3s | `/proc/stat`（两次差值）、`/proc/loadavg`、`/proc/meminfo`（MemTotal/**MemAvailable**/SwapTotal/SwapFree）、`/proc/net/dev`（字节差值算速率）、遍历 `/proc/[0-9]*/stat`、`nvidia-smi --query-gpu`（AMD 回退 `rocm-smi`） |
-| 低频 | 磁盘 | 30s（每 10 轮夹带一次） | `df -PkT`（GNU/busybox 支持时附文件系统类型列，失败回退 `df -Pk`；POSIX、KB 精确值），仅滤零容量内核伪 fs 与容器注入单文件挂载，tmpfs/devtmpfs/overlay 全保留（全挂载点列表，对齐 FinalShell） |
+| 低频 | 磁盘（挂载路径表） | 60s（每 30 轮夹带一次，默认 2s 间隔） | `df -PkT`（GNU/busybox 支持时附文件系统类型列，失败回退 `df -Pk`；POSIX、KB 精确值），仅滤零容量内核伪 fs 与容器注入单文件挂载，tmpfs/devtmpfs/overlay 全保留（全挂载点列表，对齐 FinalShell） |
 
 口径要点：
 
@@ -157,7 +157,7 @@ echo @@END@@'
 - POSIX sh + `/proc/[0-9]*` glob，busybox/Alpine 通用；每条命令体外层统一 `/bin/sh -c`，兼容 fish/tcsh 用户 shell（沿用 MOTD 既有做法）。
 - `@@DISK@@` 段按轮次计数夹带（脚本接受参数控制是否跑 df），默认不跑。
 - `nvidia-smi` 启动开销 100–300ms 是主要成本：静态阶段探测一次，无 GPU/无命令的主机**后续轮次不带 GPU 段**。
-- 任意一段失败只导致该段缺失（marker 缺失即该区块 N/A），其余照常；总超时 3s 覆盖慢主机。
+- 任意一段失败只导致该段本轮缺失，其余照常；各段均有「上一次有效值」缓存，缺失/空结果沿用上次、不把 0 或占位推给界面（整轮 exec 失败则不发帧，前端保留上一帧）；总超时 3s 覆盖慢主机。
 - 单引号转义复用 MOTD 的 `body.replace('\'', "'\\''")` 包装。
 
 ### 4.3 MetricsCollector 状态机（每会话一个）
