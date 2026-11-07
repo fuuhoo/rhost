@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 [中文](./CHANGELOG.zh-CN.md) · **English**
 
+## [2.4.2] - 2026-11-07
+
+### Fixed
+
+- The docker memory / docker CPU presets in the "Run command…" panel disappeared: the presets existed only in the frontend defaults, and any settings save made the backend write an empty array based on its own defaults, which then overwrote the frontend presets on every launch. The first launch after upgrading re-seeds them when the list is empty (existing custom commands are kept), and later deliberate deletions stay deleted
+- Metrics occasionally fell back to 0 or "waiting for collection" when a collection round failed: a failed round now keeps the previous frame, and a missing or empty section (CPU, load, memory, network, disk, processes) reuses that section's last valid value
+
+### Changed
+
+- The disk mount-path table now refreshes every 30 rounds (about 60 seconds at the default 2-second interval), cutting remote df overhead; the first frame is still collected immediately
+
 ## [2.4.1] - 2026-11-07
 
 ### Fixed
