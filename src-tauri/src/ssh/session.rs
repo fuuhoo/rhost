@@ -820,6 +820,38 @@ enum WriteReq {
     Resize { cols: u32, rows: u32 },
 }
 
+/// 容器交互终端（`docker exec -it`）的写入口。
+///
+/// 独立于主终端 PTY：输入/尺寸变更各自排队，输出经独立帧通道交给调用方
+/// 转发到前端专用 Channel；关闭时只取消本终端的子令牌，不影响会话本身。
+pub struct DockerTerm {
+    write_tx: mpsc::Sender<WriteReq>,
+    cancel: CancellationToken,
+}
+
+impl DockerTerm {
+    pub async fn write(&self, data: Vec<u8>) -> Result<(), SshError> {
+        self.write_tx
+            .send(WriteReq::Data(data))
+            .await
+            .map_err(|_| SshError::Closed)
+    }
+
+    pub async fn resize(&self, cols: u32, rows: u32) -> Result<(), SshError> {
+        if cols == 0 || rows == 0 {
+            return Ok(());
+        }
+        self.write_tx
+            .send(WriteReq::Resize { cols, rows })
+            .await
+            .map_err(|_| SshError::Closed)
+    }
+
+    pub fn close(&self) {
+        self.cancel.cancel();
+    }
+}
+
 /// 会话断开日志状态：read_task（异常断开）与 shutdown（主动关闭）竞争，
 /// 原子 swap 保证仅首次产出 `ssh.disconnect` 事件。
 struct DisconnectState {
@@ -1524,6 +1556,56 @@ impl SshSession {
             .map_err(|_| SshError::Closed)
     }
 
+    /// 在独立通道上启动 `docker exec -it` 交互终端，返回写入口与帧接收端。
+    ///
+    /// 与主终端 PTY 完全隔离：自申请 PTY、自建读写半通道，输出走独立
+    /// `mpsc<Vec<u8>>`（帧编码由调用方完成）。子令牌挂在会话取消上，
+    /// 会话断开时终端任务随之退出；`close` 只影响本终端。
+    pub async fn open_docker_terminal(
+        &self,
+        command: String,
+        cols: u32,
+        rows: u32,
+    ) -> Result<(DockerTerm, mpsc::Receiver<Vec<u8>>), SshError> {
+        if self.single_channel {
+            return Err(SshError::Channel(
+                "EXTERNAL_SINGLE_CHANNEL: 外部连接不开放额外通道".into(),
+            ));
+        }
+        if self.sftp_only {
+            return Err(SshError::Channel("该连接没有终端会话".into()));
+        }
+
+        let channel = {
+            let handle = self.handle.lock().await;
+            let channel = handle
+                .channel_open_session()
+                .await
+                .map_err(|e| SshError::Channel(e.to_string()))?;
+            channel
+                .request_pty(true, TERM_TYPE, cols.max(1), rows.max(1), 0, 0, &[])
+                .await
+                .map_err(|e| SshError::Channel(e.to_string()))?;
+            channel
+                .exec(true, command)
+                .await
+                .map_err(|e| SshError::Channel(e.to_string()))?;
+            channel
+        };
+
+        let cancel = self.cancel.child_token();
+        let (read_half, write_half) = channel.split();
+        let (frame_tx, frame_rx) = mpsc::channel::<Vec<u8>>(FRAME_QUEUE);
+        let (write_tx, write_rx) = mpsc::channel::<WriteReq>(WRITE_QUEUE);
+        tokio::spawn(docker_term_read_task(
+            read_half,
+            frame_tx,
+            cancel.clone(),
+        ));
+        tokio::spawn(write_task(write_half, write_rx, cancel.clone()));
+        Ok((DockerTerm { write_tx, cancel }, frame_rx))
+    }
+
     /// SFTP → Shell 方向同步：把远端交互式 shell 的工作目录切到 `path`。
     ///
     /// 经 PTY 写入通道发送 `cd '<quoted>'\\n`，shell 执行后提示符即反映新目录，
@@ -1572,6 +1654,27 @@ impl SshSession {
     pub async fn exec_collect(
         &self,
         script_body: &str,
+        timeout: Duration,
+    ) -> Result<ExecOutput, SshError> {
+        self.exec_collect_impl(script_body, None, timeout).await
+    }
+
+    /// 同 [`Self::exec_collect`]，但在 exec 后把 `stdin` 写入通道并立即 EOF。
+    /// 仅用于把 sudo 密码经管道交给 `sudo -S`：密码绝不拼进命令行，
+    /// 也不出现在任何日志字段里。
+    pub async fn exec_collect_with_stdin(
+        &self,
+        script_body: &str,
+        stdin: &[u8],
+        timeout: Duration,
+    ) -> Result<ExecOutput, SshError> {
+        self.exec_collect_impl(script_body, Some(stdin), timeout).await
+    }
+
+    async fn exec_collect_impl(
+        &self,
+        script_body: &str,
+        stdin: Option<&[u8]>,
         timeout: Duration,
     ) -> Result<ExecOutput, SshError> {
         // 单通道会话（堡垒机外部连接）：只允许业务真正需要的那条通道，
@@ -1626,6 +1729,16 @@ impl SshSession {
         let mut out = Vec::new();
         let mut exit_code = None;
         let mut timed_out = false;
+        if let Some(bytes) = stdin {
+            if !bytes.is_empty() {
+                ch.data(bytes)
+                    .await
+                    .map_err(|e| SshError::Channel(e.to_string()))?;
+            }
+            ch.eof()
+                .await
+                .map_err(|e| SshError::Channel(e.to_string()))?;
+        }
         // deadline-based 循环内超时：逐次 ch.wait 竞速剩余时间，
         // 超时时 break 并保留 out 中已收到的部分片段
         loop {
@@ -1802,6 +1915,71 @@ impl SshSession {
     /// 端口转发管理器引用（供 manager/ipc 层转发 tunnel_start/tunnel_stop、e2e 直连调用）
     pub fn tunnel(&self) -> &TunnelManager {
         &self.tunnel
+    }
+}
+
+/// Docker exec 终端读任务：输出编码为 Data 帧，结束时发一帧 Exit
+/// （payload 为 JSON `{"code": <u32|null>, "reason": <文本>}`）。
+/// 取消（前端关闭浮层）与远端进程退出都会走到 Exit，由前端决定是否提示。
+async fn docker_term_read_task(
+    mut read_half: russh::ChannelReadHalf,
+    frame_tx: mpsc::Sender<Vec<u8>>,
+    cancel: CancellationToken,
+) {
+    let mut exit_code: Option<u32> = None;
+    let mut reason: Option<String> = None;
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                let payload = serde_json::json!({ "code": exit_code, "reason": "终端已关闭" });
+                let bytes = serde_json::to_vec(&payload).unwrap_or_default();
+                let _ = frame_tx.send(encode_frame(FrameType::Exit, &bytes)).await;
+                break;
+            }
+            msg = read_half.wait() => {
+                match msg {
+                    Some(ChannelMsg::Data { data }) => {
+                        if frame_tx
+                            .send(encode_frame(FrameType::Data, &data))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Some(ChannelMsg::ExtendedData { data, .. }) => {
+                        if frame_tx
+                            .send(encode_frame(FrameType::Data, &data))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Some(ChannelMsg::ExitStatus { exit_status }) => {
+                        exit_code = Some(exit_status);
+                        reason = Some(format!("退出码 {exit_status}"));
+                    }
+                    Some(ChannelMsg::ExitSignal { signal_name, .. }) => {
+                        reason = Some(format!("被信号 {signal_name:?} 终止"));
+                    }
+                    Some(ChannelMsg::Eof) if reason.is_some() => {
+                        let payload = serde_json::json!({ "code": exit_code, "reason": reason });
+                        let bytes = serde_json::to_vec(&payload).unwrap_or_default();
+                        let _ = frame_tx.send(encode_frame(FrameType::Exit, &bytes)).await;
+                        break;
+                    }
+                    Some(ChannelMsg::Eof) => {}
+                    Some(ChannelMsg::Close) | None => {
+                        let payload = serde_json::json!({ "code": exit_code, "reason": reason });
+                        let bytes = serde_json::to_vec(&payload).unwrap_or_default();
+                        let _ = frame_tx.send(encode_frame(FrameType::Exit, &bytes)).await;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 }
 

@@ -191,6 +191,28 @@ pub const TUNNEL_STATUS_PUSH_FAILED: &str = "tunnel.status_push_failed";
 pub const TUNNEL_LISTENER_RETRY: &str = "tunnel.listener_retry";
 pub const TUNNEL_LISTENER_FAILED: &str = "tunnel.listener_failed";
 
+/* ---- 工具箱（target: toolbox） ---- */
+/// 端口列表采集完成（kv 带 tool/count/elevated/elapsed_ms，不含口令）
+pub const TOOLBOX_PORTS_LIST: &str = "toolbox.ports.list";
+/// 防火墙状态/规则读取完成
+pub const TOOLBOX_FIREWALL_LIST: &str = "toolbox.firewall.list";
+/// 防火墙规则变更（添加/删除/启停）
+pub const TOOLBOX_FIREWALL_CHANGE: &str = "toolbox.firewall.change";
+/// 公钥下发到远端 authorized_keys（kv 只带目标用户/类型/路径，不含公钥内容）
+pub const TOOLBOX_PUBKEY_DEPLOY: &str = "toolbox.pubkey.deploy";
+/// Docker 容器与镜像列表读取完成
+pub const TOOLBOX_DOCKER_LIST: &str = "toolbox.docker.list";
+/// Docker 容器 / 镜像操作（启停、重启、删除）
+pub const TOOLBOX_DOCKER_ACTION: &str = "toolbox.docker.action";
+/// Docker 容器日志读取（kv 只带容器/行数/字符数，不含日志正文）
+pub const TOOLBOX_DOCKER_LOGS: &str = "toolbox.docker.logs";
+/// Docker 镜像导入 / 导出（kv 带方向/路径/大小）
+pub const TOOLBOX_DOCKER_TRANSFER: &str = "toolbox.docker.transfer";
+/// Docker 配置读取 / 保存（daemon.json 的 data-root 与镜像源）
+pub const TOOLBOX_DOCKER_CONFIG: &str = "toolbox.docker.config";
+/// 容器交互式终端会话开关
+pub const TOOLBOX_DOCKER_TERMINAL: &str = "toolbox.docker.terminal";
+
 /// 前端上报允许的 event_id 域（report_app_log 校验白名单）：
 /// web.* 前端通用事件 + sftp.* 传输队列事件（队列管理逻辑在前端，§7.3）
 /// + ai.plan.* 计划判定埋点（事件产生点在前端裁决处，见 ai-plan-trigger-design §6.9）
@@ -337,6 +359,16 @@ mod tests {
             AI_CHAT_PERSIST_FAILED,
             AI_TEST_OK,
             AI_TEST_FAILED,
+            TOOLBOX_PORTS_LIST,
+            TOOLBOX_FIREWALL_LIST,
+            TOOLBOX_FIREWALL_CHANGE,
+            TOOLBOX_PUBKEY_DEPLOY,
+            TOOLBOX_DOCKER_LIST,
+            TOOLBOX_DOCKER_ACTION,
+            TOOLBOX_DOCKER_LOGS,
+            TOOLBOX_DOCKER_TRANSFER,
+            TOOLBOX_DOCKER_CONFIG,
+            TOOLBOX_DOCKER_TERMINAL,
         ];
         for id in all {
             assert!(
@@ -348,7 +380,8 @@ mod tests {
             let domain = parts.next().unwrap();
             assert!(
                 [
-                    "app", "ssh", "sftp", "metrics", "ipc", "web", "external", "tunnel", "ai"
+                    "app", "ssh", "sftp", "metrics", "ipc", "web", "external", "tunnel", "ai",
+                    "toolbox",
                 ]
                 .contains(&domain),
                 "未知 domain: {id}"

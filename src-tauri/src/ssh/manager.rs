@@ -8,7 +8,7 @@ use log::debug;
 use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
 
-use super::session::{ExecOutput, SshSession};
+use super::session::{DockerTerm, ExecOutput, SshSession};
 use super::sftp::{RemoteDirListing, TransferPolicy, TransferProgress};
 use super::{SessionConfig, SshError};
 use tauri::ipc::Channel;
@@ -16,6 +16,8 @@ use tauri::ipc::Channel;
 /// 会话池：session_id (uuid v4) → 会话句柄
 pub struct SessionManager {
     sessions: Arc<RwLock<HashMap<String, Arc<SshSession>>>>,
+    /// 每会话最多一个容器交互终端：session_id → 终端句柄
+    docker_terms: Arc<RwLock<HashMap<String, Arc<DockerTerm>>>>,
 }
 
 impl Default for SessionManager {
@@ -28,6 +30,7 @@ impl SessionManager {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            docker_terms: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -88,6 +91,87 @@ impl SessionManager {
         match session {
             Some(s) => s.exec_collect(script, timeout).await,
             None => Err(SshError::NotFound),
+        }
+    }
+
+    /// 经 exec channel 执行命令并把 `stdin` 写入通道后 EOF。
+    /// 工具箱的 sudo 提权用它传密码（密码不进命令行、不落日志）。
+    pub async fn exec_collect_with_stdin(
+        &self,
+        session_id: &str,
+        script: &str,
+        stdin: &[u8],
+        timeout: Duration,
+    ) -> Result<ExecOutput, SshError> {
+        let session = {
+            let sessions = self.sessions.read().await;
+            sessions.get(session_id).cloned()
+        };
+        match session {
+            Some(s) => s.exec_collect_with_stdin(script, stdin, timeout).await,
+            None => Err(SshError::NotFound),
+        }
+    }
+
+    /// 启动容器交互终端：同会话已有终端则先关闭旧的（UI 一次只开一个）。
+    /// 返回终端句柄与帧接收端，帧的转发由调用方完成。
+    pub async fn open_docker_terminal(
+        &self,
+        session_id: &str,
+        command: String,
+        cols: u32,
+        rows: u32,
+    ) -> Result<(Arc<DockerTerm>, mpsc::Receiver<Vec<u8>>), SshError> {
+        let session = {
+            let sessions = self.sessions.read().await;
+            sessions.get(session_id).cloned()
+        };
+        let Some(session) = session else {
+            return Err(SshError::NotFound);
+        };
+        let (term, frame_rx) = session.open_docker_terminal(command, cols, rows).await?;
+        let term = Arc::new(term);
+        let mut terms = self.docker_terms.write().await;
+        if let Some(old) = terms.insert(session_id.to_string(), term.clone()) {
+            old.close();
+        }
+        Ok((term, frame_rx))
+    }
+
+    pub async fn docker_terminal_write(
+        &self,
+        session_id: &str,
+        data: Vec<u8>,
+    ) -> Result<(), SshError> {
+        let term = self.docker_terms.read().await.get(session_id).cloned();
+        match term {
+            Some(t) => t.write(data).await,
+            None => Err(SshError::NotFound),
+        }
+    }
+
+    pub async fn docker_terminal_resize(
+        &self,
+        session_id: &str,
+        cols: u32,
+        rows: u32,
+    ) -> Result<(), SshError> {
+        let term = self.docker_terms.read().await.get(session_id).cloned();
+        match term {
+            Some(t) => t.resize(cols, rows).await,
+            None => Err(SshError::NotFound),
+        }
+    }
+
+    /// 关闭容器终端（从表中移除并取消子任务；会话本身不受影响）
+    pub async fn close_docker_terminal(&self, session_id: &str) -> bool {
+        let term = self.docker_terms.write().await.remove(session_id);
+        match term {
+            Some(t) => {
+                t.close();
+                true
+            }
+            None => false,
         }
     }
 
@@ -454,6 +538,10 @@ impl SessionManager {
 
     /// 断开并移除会话：触发取消令牌，后台任务自行收尾退出
     pub async fn disconnect(&self, session_id: &str) -> bool {
+        let term = self.docker_terms.write().await.remove(session_id);
+        if let Some(t) = term {
+            t.close();
+        }
         let session = self.sessions.write().await.remove(session_id);
         if let Some(s) = session {
             debug!("会话注销: {session_id}");
@@ -466,6 +554,9 @@ impl SessionManager {
 
     /// 关闭全部会话（应用退出时调用），返回关闭数量
     pub async fn shutdown_all(&self) -> usize {
+        for (_, t) in self.docker_terms.write().await.drain() {
+            t.close();
+        }
         let mut sessions = self.sessions.write().await;
         let count = sessions.len();
         for (_, s) in sessions.drain() {

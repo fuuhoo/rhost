@@ -14,6 +14,7 @@ mod motd;
 pub mod ssh;
 mod store;
 mod sysmon;
+mod toolbox;
 
 use applog::events as ev;
 use ssh::manager::SessionManager;
@@ -446,6 +447,27 @@ pub fn run() {
             ai::ai_extract_memories,
             ai::ai_exec_tool,
             ai::ai_cancel_execs,
+            toolbox::toolbox_list_ports,
+            toolbox::toolbox_firewall_status,
+            toolbox::toolbox_firewall_add,
+            toolbox::toolbox_firewall_remove,
+            toolbox::toolbox_firewall_toggle,
+            toolbox::toolbox_deploy_pubkey,
+            toolbox::toolbox_docker_list,
+            toolbox::toolbox_docker_action,
+            toolbox::toolbox_docker_logs,
+            toolbox::toolbox_docker_logs_save,
+            toolbox::toolbox_docker_export,
+            toolbox::toolbox_docker_export_local,
+            toolbox::toolbox_docker_import,
+            toolbox::toolbox_docker_import_local,
+            toolbox::toolbox_docker_pull,
+            toolbox::toolbox_docker_config_get,
+            toolbox::toolbox_docker_config_save,
+            toolbox::toolbox_docker_terminal_open,
+            toolbox::toolbox_docker_terminal_write,
+            toolbox::toolbox_docker_terminal_resize,
+            toolbox::toolbox_docker_terminal_close,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

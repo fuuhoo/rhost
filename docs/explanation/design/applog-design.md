@@ -92,7 +92,7 @@
 **`event_id` 命名规范**（每条日志必填，与 `msg` 解耦）：
 
 - 格式：`domain.action[.subaction]`，全小写蛇形，如 `ssh.connect.start`、`sftp.transfer.complete`；
-- `domain` 与 `target` 同源（`app`/`ssh`/`sftp`/`metrics`/`ipc`/`web`/`ai`）；
+- `domain` 与 `target` 同源（`app`/`ssh`/`sftp`/`metrics`/`ipc`/`web`/`tunnel`/`toolbox`/`ai`）；
 - **为什么需要**：`msg` 是中文人类可读文案，不可作为机器筛选键（文案调整/未来 i18n 会破坏日志聚合规则、测试断言与告警）；`event_id` 是恒定的事件类型标识，`jq 'select(.event_id=="ssh.auth.failed")'` 精确匹配；
 - **集中定义**：后端 `applog/events.rs` 以常量形式注册全部 event_id（编译期防手误）；前端 `stores/applog.ts` 同步同一份常量表（`web.*` 域，加上 §4.6 的 `ai.plan.*` 域），文档本节表格即事实清单，三者必须同步；
 - **面板默认不显示** event_id（保持纯文本简洁），stores 层保留字段供筛选/搜索扩展，后续可加"显示事件 ID"调试开关。
@@ -247,7 +247,22 @@
 | 监听器重试 | `tunnel.listener_retry` | INFO | local_port、attempt |
 | 监听器失败 | `tunnel.listener_failed` | ERROR | local_port、err |
 
-### 4.6 AI 助手（target: `ai`，带 scope 标签）
+### 4.6 工具箱（target: `toolbox`，带会话标签）
+
+| 事件 | event_id | 级别 | 消息与 kv |
+|---|---|---|---|
+| 端口列表采集完成 | `toolbox.ports.list` | INFO/WARN | 完成：tool（ss/netstat/lsof）、count、with_user、with_pid、with_container（带容器名的行数）、uid、docker_cli、cgroup_entries、container_names、published_ports（发布端口映射条数）、elevated、elapsed_ms、timed_out；解析失败 WARN 记 exit_code、timed_out、err。**kv 不含 sudo 口令** |
+| 防火墙规则读取完成 | `toolbox.firewall.list` | INFO/WARN | 完成：backend、enabled、count、elapsed_ms、timed_out；解析失败 WARN 记 exit_code、err |
+| 防火墙规则变更 | `toolbox.firewall.change` | INFO | 新增/删除：op（add/remove）、port、protocol、action、origin、has_source、exit_code、elapsed_ms；启停：op（enable/disable）、backend、ssh_port、ssh_port_auto_opened |
+| 公钥下发 | `toolbox.pubkey.deploy` | INFO/WARN | 完成：target_user、key_type、path、added、elevated、exit_code、elapsed_ms；失败 WARN 记 err。**kv 不含公钥内容与 sudo 口令** |
+| Docker 列表读取完成 | `toolbox.docker.list` | INFO/WARN | 完成：containers、running（运行中容器数）、images、elevated、elapsed_ms、timed_out；读取失败 WARN 记 exit_code、timed_out、err。**kv 不含 sudo 口令** |
+| Docker 操作 | `toolbox.docker.action` | INFO/WARN | 完成：kind（container/image）、action（start/stop/restart/remove）、target（容器名或镜像引用）、elevated、exit_code、elapsed_ms；失败 WARN 记 err |
+| 容器日志读取 | `toolbox.docker.logs` | INFO/WARN | 读取完成：container、tail、chars、truncated、elevated、elapsed_ms；失败 WARN 记 tail、timestamps、exit_code、err。下载：op=save、path（本地）、bytes。**kv 不含日志正文** |
+| 镜像拉取 / 导入导出 | `toolbox.docker.transfer` | INFO/WARN | 完成：op（pull/import/export/import_local/export_local）、image（拉取或导出）、path（远端导入 / 导出）、local（本地文件路径）、bytes（本地文件字节数）、tag（自定义标签）、size（导出，人读大小）、tagged、elevated、elapsed_ms；失败 WARN 记 op、path/local、exit_code、err（含上传 / 下载失败与拉取成功但打标签失败） |
+| Docker 配置 | `toolbox.docker.config` | INFO/WARN | 读取：op=get、version、mirrors（条目数）、data_root、keys（daemon.json 顶层键列表）、daemon_json（是否取到）；保存：op=save、keys（写入的顶层键列表）、bytes（写入字节数）、elapsed_ms，失败 WARN 记 exit_code、timed_out、err（含重启失败） |
+| 容器终端 | `toolbox.docker.terminal` | INFO | 打开：op=open、container、sudo（none/passwordless/password）、cols、rows、elapsed_ms；关闭：op=close。**kv 不含 sudo 口令** |
+
+### 4.7 AI 助手（target: `ai`，带 scope 标签）
 
 | 事件 | event_id | 级别 | 消息与 kv |
 |---|---|---|---|
@@ -287,7 +302,7 @@
 
 `ai.plan.*` 一组事件产生于前端裁决处（计划提案建卡、用户确认/拒绝、强制轮收尾、步骤失败、重规划、终止、完成），由前端 `stores/applog.ts` 的 `report()` 经 `report_app_log` 上报，target 固定 `web`（事件名保留 `ai.` 前缀以便聚合检索，§7.2 白名单已纳入 `ai.*`）。埋点字段仅含枚举、布尔与数值，不含任何用户消息、计划内容或命令原文；仅本地落盘，无网络上报（判定口径与字段见 ai-plan-trigger-design §6.9）。
 
-### 4.7 明确不记录（黑名单）
+### 4.8 明确不记录（黑名单）
 
 - 密码、私钥内容/指纹外的任何密钥材料、passphrase
 - PTY 输入输出字节流（命令、回显）

@@ -42,6 +42,7 @@ export default defineConfig({
           { text: '主机与密钥管理', link: '/guides/host-management' },
           { text: 'SSH 终端', link: '/guides/ssh-terminal' },
           { text: 'SFTP 文件传输', link: '/guides/sftp' },
+          { text: '工具箱（防火墙 / 端口 / 公钥 / Docker）', link: '/guides/toolbox' },
           { text: '从堡垒机打开（外部连接）', link: '/guides/bastion-launch' },
           { text: '配置导入导出', link: '/guides/config-import-export' },
           {
@@ -117,6 +118,7 @@ export default defineConfig({
           { text: '主机与密钥管理', link: '/guides/host-management' },
           { text: 'SSH 终端', link: '/guides/ssh-terminal' },
           { text: 'SFTP 文件传输', link: '/guides/sftp' },
+          { text: '工具箱（防火墙 / 端口 / 公钥 / Docker）', link: '/guides/toolbox' },
           { text: '从堡垒机打开（外部连接）', link: '/guides/bastion-launch' },
           { text: '配置导入导出', link: '/guides/config-import-export' },
           {

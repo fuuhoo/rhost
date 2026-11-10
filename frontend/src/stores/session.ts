@@ -10,6 +10,7 @@ import { getSnapshot, onConfigLoad, patchUiState } from './appConfig'
 import { promptPassword } from '../composables/usePasswordPrompt'
 import { confirmHostKey, parseHostKeyError } from '../composables/useHostKeyPrompt'
 import { toast } from '../composables/useToast'
+import { forgetSudo } from '../lib/toolboxSudo'
 
 export type SessionState = 'idle' | 'connecting' | 'online' | 'reconnecting' | 'offline'
 export type AppView = 'home' | 'workbench'
@@ -595,6 +596,7 @@ function handleFrame(id: string, frame: Uint8Array) {
     if (deadId && isTauri) {
       void invoke('disconnect_session', { sessionId: deadId }).catch(() => {})
     }
+    forgetSudo(deadId)
     if (s) s.backendId = undefined
     // 重连途中旧会话的 EXIT：静默收尾，不写关闭提示、不覆盖 reconnecting 状态
     if (s?.state === 'reconnecting') return
@@ -627,6 +629,7 @@ function handleFrame(id: string, frame: Uint8Array) {
     if (deadId && isTauri) {
       void invoke('disconnect_session', { sessionId: deadId }).catch(() => {})
     }
+    forgetSudo(deadId)
     if (s) {
       s.backendId = undefined
       s.retryAt = null
@@ -1141,6 +1144,7 @@ export async function reconnectBackend(id: string) {
   pendingFrames.delete(id)
   if (s.backendId && isTauri) {
     await invoke('disconnect_session', { sessionId: s.backendId }).catch(() => {})
+    forgetSudo(s.backendId)
     s.backendId = undefined
   }
   const size = termSizes.get(id) ?? { cols: 120, rows: 32 }
@@ -1396,6 +1400,7 @@ export function closeSession(id: string) {
   if (s.backendId && isTauri) {
     void invoke('disconnect_session', { sessionId: s.backendId }).catch(() => {})
   }
+  forgetSudo(s.backendId)
   // 外部连接：关闭标签即抹掉内存中的凭据引用（不落盘、不写钥匙串）
   wipeExternalSecrets(s.host)
   termSinks.delete(id)
@@ -1535,6 +1540,7 @@ export async function disconnectSession(id: string): Promise<boolean> {
   if (s.backendId && isTauri) {
     const backendId = s.backendId
     s.backendId = undefined // 立即置空：断开的转发循环残留的 EXIT 帧不会重复处理
+    forgetSudo(backendId)
     try {
       await invoke('disconnect_session', { sessionId: backendId })
     } catch (e) {

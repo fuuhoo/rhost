@@ -15,6 +15,7 @@ import PasswordModal from './components/PasswordModal.vue'
 import HostKeyModal from './components/HostKeyModal.vue'
 import ConfirmModal from './components/ConfirmModal.vue'
 import PaletteModal from './components/PaletteModal.vue'
+import ToolboxModal from './components/wb/ToolboxModal.vue'
 import AppToast from './components/AppToast.vue'
 import { installGlobalShortcuts } from './lib/shortcuts'
 import { startExternalLinks } from './lib/externalLinks'
@@ -120,6 +121,7 @@ onMounted(async () => {
     <SettingsModal />
     <GroupModal />
     <KeysModal />
+    <ToolboxModal />
     <PasswordModal />
     <HostKeyModal />
     <ConfirmModal />

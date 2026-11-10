@@ -3,10 +3,10 @@ import { appWindow, detectPlatform } from '../../lib/tauri'
 import AppLogo from '../AppLogo.vue'
 import { showNewConn } from '../../stores/hosts'
 import { showSettings } from '../../stores/settings'
-import { showPalette } from '../../lib/uiBus'
+import { showPalette, showToolbox } from '../../lib/uiBus'
 import { toast } from '../../composables/useToast'
 import {
-  appView, dockVisible, monitorVisible, openDock, rightPanelVisible, searchTick, toggleDock,
+  activeSession, appView, dockVisible, monitorVisible, openDock, rightPanelVisible, searchTick, toggleDock,
 } from '../../stores/session'
 
 // macOS 由原生 Overlay 红绿灯渲染（左侧安全区）；Windows/Linux 前端自绘右侧窗口按钮
@@ -38,6 +38,10 @@ function onSearch() {
 function onSftp() {
   openDock('sftp')
   toast('已打开「文件」面板', 'info', 1600)
+}
+
+function onToolbox() {
+  showToolbox.value = true
 }
 
 function onPaletteClick() {
@@ -77,6 +81,20 @@ function onSettings() {
     <!-- SFTP -->
     <button class="tb-btn" title="打开文件面板（SFTP）" @click="onSftp">
       <svg viewBox="0 0 24 24"><path d="M4 7a2 2 0 012-2h3l2 2h7a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2V7z"/></svg>
+    </button>
+
+    <!-- 工具箱：防火墙 / 端口 / 公钥 / Docker -->
+    <button
+      class="tb-btn" :disabled="!activeSession"
+      :title="activeSession ? '工具箱：防火墙 / 端口 / 公钥 / Docker' : '连接主机后可用'"
+      @click="onToolbox"
+    >
+      <svg viewBox="0 0 24 24">
+        <rect x="3" y="9" width="18" height="11" rx="2"/>
+        <path d="M8.5 9V7a2 2 0 012-2h3a2 2 0 012 2v2"/>
+        <path d="M3 13h18"/>
+        <path d="M9.5 13v2.5h5V13"/>
+      </svg>
     </button>
 
     <div class="tb-spacer"></div>

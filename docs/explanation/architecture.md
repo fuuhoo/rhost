@@ -58,6 +58,7 @@ rhost/
 │       ├── ssh/               # frame / session / manager / sftp
 │       ├── metrics/           # 远端指标解析（纯函数）+ collector（周期采集）
 │       ├── motd/              # MOTD 结构化指令生成
+│       ├── toolbox/           # 工具箱：端口查看 / 防火墙管理 / 公钥下发 / Docker 管理（独立 exec 通道，按需 sudo）
 │       ├── store.rs           # connections.json + 系统钥匙串
 │       ├── localfs.rs         # 本地文件系统命令
 │       └── sysmon.rs          # 本机内存采集
@@ -108,6 +109,7 @@ rhost/
 | `ssh/sftp.rs` | 每会话懒加载一个 `RawSftpSession`；列目录解析 longname；64KB 流式传输；`TransferCtl`（取消令牌 + 暂停 watch）；管理操作 per-session Mutex 串行 | 一条 SSH 连接同一时刻只有一个 SFTP 通道，传输队列因此串行 |
 | `metrics/` | `HostInfo`（连接时一次）与 `Metrics`（周期）解析；全是输入命令文本的纯函数 | 任何解析失败降级为 `N/A`/0，不影响主连接 |
 | `motd/` | 生成结构化指令 `[{t,text,cls}]`，前端渲染为 ANSI | 后端不下发终端字节，只下发结构化数据 |
+| `toolbox/` | 端口列表（ss → netstat → lsof，补进程用户与 docker 容器名：cgroup 归属 / docker-proxy 发布端口）、防火墙（ufw → firewalld → iptables）读取/增删/启停、公钥下发（解析目标用户 home，去重追加 `authorized_keys`），以及 Docker 容器 / 镜像列表与启停 / 重启 / 删除、容器日志（复制 / 本地下载）、容器内交互终端（独立 PTY）、镜像拉取 / 打标签 / tar 导入导出（本地文件与文件夹经 SFTP 在远端 `/tmp` 中转并即时清理）、`daemon.json` 可视化配置（`data-root` 与镜像加速源，保存预览可直接编辑完整 JSON） | 走独立 exec 通道（终端为独立 SSH 通道 + PTY）；需要 root 的操作先试 `sudo -n`，失败返回哨兵由前端弹窗，口令只经 stdin、不落日志；端口/协议/来源/公钥/用户名/容器与镜像目标/自定义标签/远端与本地路径/镜像源全部后端校验后重建命令，daemon.json 保存内容由后端解析校验结构后重建写入脚本 |
 | `store.rs` | `connections.json`（原子写：临时文件 + rename）+ 系统钥匙串 | 密码/口令绝不入 JSON |
 | `localfs.rs` | 本地侧目录列举与文件操作（供 SFTP 面板本地栏） | |
 | `sysmon.rs` | Rhost 主进程 RSS，驱动底部状态栏 | |
