@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 [中文](./CHANGELOG.zh-CN.md) · **English**
 
+## [2.5.0] - 2026-11-10
+
+### Added
+
+- Toolbox: a new title-bar entry (enabled once a host is connected) that gathers firewall, port, public-key and Docker management in one modal
+  - Firewall: detects ufw / firewalld / iptables, shows status and rules, and supports adding / removing rules and enabling / disabling the firewall (the current SSH port is allowed automatically when toggling)
+  - Ports: probes listening ports via ss → netstat → lsof and enriches rows with process, user and Docker container names (including docker-proxy published ports); the root view shows ports of all users
+  - Public keys: appends a local key to the target user's authorized_keys, deduplicated and keeping the original file
+  - Docker: container and image lists, start / stop / restart / remove, image pull / tag / remove; container log copy and local download; an interactive terminal inside a container (dedicated SSH channel + PTY); image tar import / export (remote paths, or local files / folders relaying over SFTP); a visual editor for `data-root` and `registry-mirrors` in daemon.json
+  - Root operations elevate on demand: passwordless sudo is tried first, then a password prompt; the password only travels over stdin and is never logged
+- The save preview on the Docker config page is now an editable daemon.json editor: other keys such as `log-driver` can be added or removed directly and the edited content is what gets saved. Editing the form afterwards syncs the matching keys, and the edit can be reverted to the generated content. The backend validates the JSON structure and the `data-root` / `registry-mirrors` values before saving
+- Host cards now show the group they belong to
+
+### Fixed
+
+- Selecting text in the new-connection modal and releasing the mouse over the mask no longer closes the modal: only clicks that start on the mask count
+
 ## [2.4.2] - 2026-11-07
 
 ### Fixed

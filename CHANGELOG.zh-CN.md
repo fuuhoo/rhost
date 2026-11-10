@@ -6,6 +6,23 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.5.0] - 2026-11-10
+
+### 新增
+
+- 工具箱：顶栏新增工具箱入口（连接主机后可用），一个弹窗覆盖防火墙、端口、公钥与 Docker 管理
+  - 防火墙：自动识别 ufw / firewalld / iptables，读取状态与规则，可增删规则、启停防火墙（启停时自动放行当前 SSH 端口）
+  - 端口：按 ss → netstat → lsof 依次探测监听端口，补全进程、用户与 Docker 容器名（含 docker-proxy 发布端口），root 视图展示全部用户端口
+  - 公钥：把本机密钥写入远端目标用户的 authorized_keys，去重追加并保留原文件
+  - Docker：容器与镜像列表、启停 / 重启 / 删除、镜像拉取 / 打标签 / 删除；容器日志复制与本地下载；容器内交互终端（独立 SSH 通道 + PTY）；镜像 tar 导入导出（远端路径，或本地文件 / 文件夹经 SFTP 中转）；daemon.json 可视化配置 `data-root` 与 `registry-mirrors`
+  - root 操作按需提权：先试免密 sudo，失败再询问口令；口令只经 stdin 传递、不落日志
+- Docker 配置页的保存预览改为可编辑的 daemon.json 编辑器：可直接增删 `log-driver` 等其他键，保存以编辑内容为准；手工编辑后再改上方表单会同步对应配置项，也可撤销编辑回到表单生成内容。后端保存前校验 JSON 结构与 `data-root` / `registry-mirrors` 取值
+- 主机卡片显示所属分组标签
+
+### 修复
+
+- 新建连接弹窗中拖选文本、鼠标松开落在遮罩上时会误关闭弹窗：现在只认在遮罩上按下的点击
+
 ## [2.4.2] - 2026-11-07
 
 ### 修复
