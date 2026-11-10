@@ -22,15 +22,17 @@ const dupError = ref('')
 const shaking = ref(false)
 const inputEl = ref<HTMLInputElement | null>(null)
 
-watch(showGroupModal, v => {
-  if (!v) return
+function openGroup() {
   name.value = editingGroup.value?.name ?? ''
   // 新建时默认色按现有分组数轮转，避免同色扎堆
   picked.value = editingGroup.value?.color ?? COLORS[allGroups.value.length % COLORS.length]!
   nameInvalid.value = false
   dupError.value = ''
   nextTick(() => setTimeout(() => inputEl.value?.focus(), 180))
-})
+}
+watch(showGroupModal, v => { if (v) openGroup() })
+// 懒挂载：开屏初始化放 onMounted（setup 完成后），immediate watch 会引用后声明的 const 触发 TDZ
+onMounted(() => { if (showGroupModal.value) openGroup() })
 
 function onInput() {
   nameInvalid.value = false

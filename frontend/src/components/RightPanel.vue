@@ -1,10 +1,15 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, defineAsyncComponent, watch } from 'vue'
 import HostsPane from './wb/HostsPane.vue'
 import HistoryPane from './wb/HistoryPane.vue'
-import AiChatPanel from './AiChatPanel.vue'
 import { appView, activeSession, rightPanelMaximized, rightPanelTab, rightPanelVisible, rightPanelWidth } from '../stores/session'
 import { savedSettings } from '../stores/settings'
+
+// AI 面板懒加载闩锁：首次切到 ai 页签才挂载/解析（201KB 拆出主包），
+// 之后保持挂载以保留聊天历史与流式状态，仅用 v-show 显隐。
+const AiChatPanel = defineAsyncComponent(() => import('./AiChatPanel.vue'))
+const aiMounted = ref(false)
+watch(rightPanelTab, t => { if (t === 'ai') aiMounted.value = true }, { immediate: true })
 
 /** 头部标题：AI 固定；hosts 页签在首页显示「历史会话」，工作台显示「主机」 */
 const panelTitle = computed(() => {
@@ -141,7 +146,7 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
       <!-- hosts 页签按视图切换：工作台显示主机列表，首页显示历史会话（都常驻，仅显隐） -->
       <HostsPane v-show="rightPanelTab === 'hosts' && !isHome" />
       <HistoryPane v-show="rightPanelTab === 'hosts' && isHome" />
-      <AiChatPanel v-show="rightPanelTab === 'ai'" />
+      <AiChatPanel v-if="aiMounted" v-show="rightPanelTab === 'ai'" />
     </div>
   </div>
 </template>

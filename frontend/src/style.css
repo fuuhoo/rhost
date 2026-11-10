@@ -245,6 +245,17 @@ body{
 .app.platform-macos.is-fullscreen{--tb-safe-left:14px}
 .app.platform-windows,
 .app.platform-linux{--tb-safe-right:8px}
+/* ---------- 毛玻璃平台门控 ----------
+ * backdrop-filter 模糊只有在「透明窗口 + 窗口底原生模糊材质」下才透出桌面形成毛玻璃，
+ * 而这仅 macOS 成立：lib.rs 只在 macOS 开 transparent，ipc.rs set_window_glass 非 macOS 幂等跳过。
+ * Windows/Linux 窗口不透明，backdrop-filter 模糊的是应用自身不透明底（--glass-a 默认 .96），
+ * 视觉几乎无收益，却为每个模糊面分配全窗口背板读取 + 多级模糊中间表面，实测占 ~258MB GPU 合成内存。
+ * 故非 macOS 一律关闭 backdrop-filter（玻璃 tint 仍由 --glass-* 半透明底色表达，观感不变）；
+ * 降低 blur 半径无效（成本在背板读取机制而非核大小）。门控挂 html[data-platform]（index.html 首帧注入），
+ * 覆盖 Teleport 到 body 的弹窗/菜单。 */
+html:not([data-platform="macos"]) *{
+    backdrop-filter:none!important;
+}
 /* ---------- 标题栏 ---------- */
 .titlebar{
     height:42px;flex-shrink:0;
@@ -802,7 +813,7 @@ body{
     opacity:0;pointer-events:none;
     transition:opacity .2s;
 }
-.mask.show{opacity:1;pointer-events:auto}
+.mask.show{opacity:1;pointer-events:auto;animation:mask-in .2s}
 .modal{
     width:820px;max-width:calc(100vw - 32px);
     height:min(640px, calc(100vh - 60px));
@@ -819,7 +830,10 @@ body{
     overflow:hidden;
     position:relative;
 }
-.mask.show .modal{transform:none}
+.mask.show .modal{transform:none;animation:modal-in .22s cubic-bezier(.2,.9,.3,1.2)}
+/* v-if 懒挂载弹窗挂载时 .show 已为 true，transition 不触发；用 animation 补入场 fade/scale */
+@keyframes mask-in{from{opacity:0}to{opacity:1}}
+@keyframes modal-in{from{transform:translateY(12px) scale(.97)}to{transform:none}}
 /* 弹窗顶部装饰条 */
 .modal::before{
     content:'';position:absolute;

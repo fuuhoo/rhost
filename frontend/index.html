@@ -29,6 +29,10 @@
         var op = typeof boot && typeof boot.opacity === 'number' ? boot.opacity : 96
         op = Math.min(100, Math.max(60, op))
         document.documentElement.style.setProperty('--glass-a', String(op / 100))
+        // 平台同步到 html：毛玻璃 backdrop-filter 仅 macOS 透明窗口有意义（见 style.css 门控），
+        // 挂 documentElement 而非 .app，覆盖 Teleport 到 body 的弹窗/菜单。首帧前生效避免闪跳。
+        var plat = boot && boot.platform
+        if (plat) document.documentElement.dataset.platform = plat
       } catch (e) {}
     </script>
     <style>

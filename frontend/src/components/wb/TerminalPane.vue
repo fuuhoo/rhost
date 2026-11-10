@@ -18,7 +18,7 @@ import { hosts, showNewConn } from '../../stores/hosts'
 import { clampBgImgBlur, clampBgImgOpacity, resolveTerminalFontFamily, savedSettings, termBgImageTint, termPalette } from '../../stores/settings'
 import { resolveTermBgImage } from '../../lib/termThemes'
 import {
-  activeReconnectAttempt, activeSession, activeSessionId, attachTerminal,
+  activeReconnectAttempt, activeSession, activeSessionId, appView, attachTerminal,
   autoReconnectDelayMs, clearRecentConnections, detachTerminal, disconnectSession, isBlankSession, openSession, recentConnections, reconnectBackend,
   reconnectTick, resizeTerminal, sendInput, sessions,
 } from '../../stores/session'
@@ -37,6 +37,8 @@ interface TermInst {
   search: SearchAddon
   /** WebGL 渲染器实例；null 表示使用 xterm 内置（DOM）渲染 */
   webgl: WebglAddon | null
+  /** 上下文丢失后置 true：回退内置渲染，直到改设置才重试（避免黑屏循环） */
+  webglBlocked?: boolean
   disposables: Array<{ dispose(): void }>
 }
 
@@ -284,8 +286,14 @@ function wantWebgl(): boolean {
   return !!savedSettings.gpuAccel && savedSettings.renderer === 'webgl'
 }
 
-function applyRenderer(inst: TermInst) {
-  const want = wantWebgl()
+/** 仅活跃 tab 且工作台可见时才值得持有 GPU 上下文；隐藏 tab/回首页释放显存 */
+function webglAllowed(id: string): boolean {
+  return wantWebgl() && !termInsts.get(id)?.webglBlocked
+    && id === activeSessionId.value && appView.value === 'workbench'
+}
+
+function applyRenderer(id: string, inst: TermInst) {
+  const want = webglAllowed(id)
   if (want && !inst.webgl) {
     const addon = new WebglAddon()
     // WebGL 上下文丢失（休眠/驱动重置/显存不足）时主动卸载回退内置渲染，
@@ -293,6 +301,7 @@ function applyRenderer(inst: TermInst) {
     addon.onContextLoss(() => {
       addon.dispose()
       inst.webgl = null
+      inst.webglBlocked = true
     })
     inst.term.loadAddon(addon)
     inst.webgl = addon
@@ -304,7 +313,13 @@ function applyRenderer(inst: TermInst) {
 
 // 改设置即时生效于已开终端（term.dispose 会回收加载的 addon，无需单独清理）
 watch(() => `${savedSettings.gpuAccel}|${savedSettings.renderer}`, () => {
-  for (const inst of termInsts.values()) applyRenderer(inst)
+  for (const [id, inst] of termInsts) { inst.webglBlocked = false; applyRenderer(id, inst) }
+})
+
+// 切 tab / 进出工作台：隐藏方释放 webgl、可见活跃方重挂（xterm 实例与回看保留）
+watch([activeSessionId, appView], async () => {
+  await nextTick()
+  for (const [id, inst] of termInsts) applyRenderer(id, inst)
 })
 
 /** v-for 容器 ref 收集 */
@@ -419,8 +434,8 @@ function mountTerminal(id: string) {
     ],
   })
   safeFit(id)
-  // 按当前设置决定是否挂 GPU 渲染器（新实例创建时是内置渲染）
-  applyRenderer(termInsts.get(id)!)
+  // 按当前设置与可见性决定是否挂 GPU 渲染器（新实例创建时是内置渲染）
+  applyRenderer(id, termInsts.get(id)!)
 
   // 注册数据回调（sink）并触发后端 SSH 连接；connect 时带上当前终端尺寸
   attachTerminal(id, bytes => term.write(bytes), term.cols, term.rows)

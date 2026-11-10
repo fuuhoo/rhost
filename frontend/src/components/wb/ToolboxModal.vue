@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { Channel, invoke } from '@tauri-apps/api/core'
 import { showToolbox } from '../../lib/uiBus'
 import { cachedSudo, forgetSudo, rememberSudo } from '../../lib/toolboxSudo'
@@ -1251,8 +1251,7 @@ function loadCurrentTab() {
 
 /* 打开时只拉当前页；切会话时重新拉，避免展示上一台主机的数据 */
 let openedOnce = false
-watch(showToolbox, v => {
-  if (!v) return
+function openToolbox() {
   if (!openedOnce) openedOnce = true
   firewall.value = null
   ports.value = null
@@ -1260,7 +1259,10 @@ watch(showToolbox, v => {
   resetPubkeyForm()
   resetDocker()
   loadCurrentTab()
-})
+}
+watch(showToolbox, v => { if (v) openToolbox() })
+// 懒挂载：开屏初始化放 onMounted（setup 完成后），immediate watch 会引用后声明的 const 触发 TDZ
+onMounted(() => { if (showToolbox.value) openToolbox() })
 watch(backendId, () => {
   if (!showToolbox.value) return
   firewall.value = null

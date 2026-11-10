@@ -666,8 +666,7 @@ watch(() => draft.aiProvider, (v, old) => {
   if (!draft.aiBaseUrl || draft.aiBaseUrl === prev) draft.aiBaseUrl = next
 })
 
-watch(showSettings, v => {
-  if (!v) return
+function openSettings() {
   Object.assign(draft, JSON.parse(JSON.stringify(savedSettings)))
   query.value = ''
   // 其他入口（命令面板空态行）指定过页签就去那一页，消费后清空避免下次打开还停在原地
@@ -680,8 +679,11 @@ watch(showSettings, v => {
   void refreshFontAvail()
   // 编辑器候选同理：装/删编辑器后重开设置即更新
   void refreshEditorCandidates()
-  nextTick(() => searchEl.value?.focus())
-})
+  setTimeout(() => searchEl.value?.focus(), 0)
+}
+watch(showSettings, v => { if (v) openSettings() })
+// 懒挂载：开屏初始化放 onMounted（setup 完成后），immediate watch 会引用后声明的 const 触发 TDZ
+onMounted(() => { if (showSettings.value) openSettings() })
 
 // 切到 AI 页签时拉取一次技能/规则目录清单与记忆列表（手动重拉走「刷新列表」按钮）
 watch(activePanelId, id => {

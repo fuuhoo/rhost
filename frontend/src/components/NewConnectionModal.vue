@@ -555,8 +555,7 @@ TYPES.forEach(t => initType(t.v))
 /* =========================================================
    打开 / 关闭 / 快捷键
    ========================================================= */
-watch(showNewConn, async v => {
-  if (!v) return
+async function openNewConn() {
   const h = editingHost.value
   TYPES.forEach(t => initType(t.v))
   Object.keys(fieldErrors).forEach(k => delete fieldErrors[k])
@@ -611,7 +610,10 @@ watch(showNewConn, async v => {
     const el = modalEl.value?.querySelector('.content-pane input:not([type=hidden])') as HTMLElement | null
     el?.focus()
   }, 180))
-})
+}
+watch(showNewConn, v => { if (v) void openNewConn() })
+// 懒挂载：开屏初始化放 onMounted（setup 完成后），immediate watch 会引用后声明的 const 触发 TDZ
+onMounted(() => { if (showNewConn.value) void openNewConn() })
 
 function close() {
   showNewConn.value = false

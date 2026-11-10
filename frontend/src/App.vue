@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import TitleBar from './components/TitleBar.vue'
 import WbTitleBar from './components/wb/WbTitleBar.vue'
 import HomeView from './views/HomeView.vue'
@@ -7,24 +7,29 @@ import Workbench from './views/Workbench.vue'
 import StatusBar from './components/wb/StatusBar.vue'
 import RightIconRail from './components/RightIconRail.vue'
 import RightPanel from './components/RightPanel.vue'
-import NewConnectionModal from './components/NewConnectionModal.vue'
-import SettingsModal from './components/SettingsModal.vue'
-import GroupModal from './components/GroupModal.vue'
 import KeysModal from './components/KeysModal.vue'
 import PasswordModal from './components/PasswordModal.vue'
 import HostKeyModal from './components/HostKeyModal.vue'
 import ConfirmModal from './components/ConfirmModal.vue'
-import PaletteModal from './components/PaletteModal.vue'
-import ToolboxModal from './components/wb/ToolboxModal.vue'
 import AppToast from './components/AppToast.vue'
 import { installGlobalShortcuts } from './lib/shortcuts'
 import { startExternalLinks } from './lib/externalLinks'
 import { appView, restoreSessions, rightPanelMaximized, rightPanelVisible } from './stores/session'
-import { loadHosts } from './stores/hosts'
-import { savedSettings } from './stores/settings'
+import { loadHosts, showNewConn } from './stores/hosts'
+import { savedSettings, showSettings } from './stores/settings'
+import { showGroupModal } from './stores/groups'
+import { showPalette, showToolbox } from './lib/uiBus'
 import { loadAppConfig } from './stores/appConfig'
 import { initGlobalErrorReporting, syncLogConfig } from './stores/applog'
 import { appWindow, detectPlatform } from './lib/tauri'
+
+// 大弹窗懒加载：关闭时不挂载（不占 DOM）、代码拆出主包延迟解析；
+// 打开标志置 true 才挂载，配合各弹窗 watch immediate 完成开屏初始化。
+const NewConnectionModal = defineAsyncComponent(() => import('./components/NewConnectionModal.vue'))
+const SettingsModal = defineAsyncComponent(() => import('./components/SettingsModal.vue'))
+const GroupModal = defineAsyncComponent(() => import('./components/GroupModal.vue'))
+const PaletteModal = defineAsyncComponent(() => import('./components/PaletteModal.vue'))
+const ToolboxModal = defineAsyncComponent(() => import('./components/wb/ToolboxModal.vue'))
 
 // 标题栏跨平台策略：根节点按平台挂 class，CSS 据此切换安全区方向
 // - platform-macos：左侧为原生红绿灯预留安全区（Overlay 模式）
@@ -117,15 +122,15 @@ onMounted(async () => {
     <!-- 状态栏提升到 App 层横贯全窗：右侧栏/图标栏底部对齐状态栏上沿，不再覆盖状态栏高度带 -->
     <StatusBar v-if="appView === 'workbench'" />
 
-    <NewConnectionModal />
-    <SettingsModal />
-    <GroupModal />
+    <NewConnectionModal v-if="showNewConn" />
+    <SettingsModal v-if="showSettings" />
+    <GroupModal v-if="showGroupModal" />
     <KeysModal />
-    <ToolboxModal />
+    <ToolboxModal v-if="showToolbox" />
     <PasswordModal />
     <HostKeyModal />
     <ConfirmModal />
-    <PaletteModal />
+    <PaletteModal v-if="showPalette" />
     <AppToast />
   </div>
 </template>

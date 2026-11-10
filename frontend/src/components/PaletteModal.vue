@@ -213,12 +213,15 @@ watch([filtered, enabledList], () => {
   }
 })
 
-watch(showPalette, v => {
-  if (!v) return
+function openPalette() {
   query.value = ''
   cursor.value = 0
-  void nextTick(() => inputEl.value?.select())
-})
+  // 懒挂载时 immediate watch 跑在 setup 期（ref 尚空），用宏任务确保挂载后聚焦
+  setTimeout(() => { inputEl.value?.focus(); inputEl.value?.select() }, 0)
+}
+watch(showPalette, v => { if (v) openPalette() })
+// 懒挂载：开屏初始化放 onMounted（setup 完成后），immediate watch 会引用后声明的 const 触发 TDZ
+onMounted(() => { if (showPalette.value) openPalette() })
 
 function move(delta: number) {
   const list = filtered.value
