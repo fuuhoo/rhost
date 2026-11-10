@@ -761,6 +761,31 @@ function closeTnlEditor() {
   tnlEditingId.value = null
 }
 
+// 拖选文本时 mousedown 在弹窗内、mouseup 落在遮罩上，click 会被派发到两者
+// 公共祖先（遮罩），仅凭 click.self 会把拖选误判为点击外部。这里只认遮罩上按下的点击。
+let mainMaskPressed = false
+let tnlMaskPressed = false
+
+function onMainMaskDown(e: MouseEvent) {
+  mainMaskPressed = e.target === e.currentTarget
+}
+
+function onMainMaskClick() {
+  if (!mainMaskPressed) return
+  mainMaskPressed = false
+  close()
+}
+
+function onTnlMaskDown(e: MouseEvent) {
+  tnlMaskPressed = e.target === e.currentTarget
+}
+
+function onTnlMaskClick() {
+  if (!tnlMaskPressed) return
+  tnlMaskPressed = false
+  closeTnlEditor()
+}
+
 function validTnlPort(raw: string): number | null {
   const n = Number(raw)
   return raw && Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null
@@ -1234,7 +1259,7 @@ async function save() {
 </script>
 
 <template>
-  <div class="mask" :class="{ show: showNewConn }" @click.self="close">
+  <div class="mask" :class="{ show: showNewConn }" @mousedown="onMainMaskDown" @click.self="onMainMaskClick">
     <div ref="modalEl" class="modal" role="dialog" aria-modal="true" aria-labelledby="newConnTitle">
       <!-- 头部 -->
       <div class="modal-head">
@@ -1568,7 +1593,7 @@ async function save() {
     </div>
 
     <!-- 隧道规则编辑子弹窗 -->
-    <div v-if="tnlEditorOpen" class="tnl-mask" @click.self="closeTnlEditor">
+    <div v-if="tnlEditorOpen" class="tnl-mask" @mousedown="onTnlMaskDown" @click.self="onTnlMaskClick">
       <div ref="tnlModalEl" class="tnl-modal" role="dialog" aria-modal="true" @keydown.enter.exact.prevent="saveTnlRule">
         <div class="tnl-modal-head">
           <span>{{ tnlEditingId ? '编辑转发规则' : '新建转发规则' }}</span>
