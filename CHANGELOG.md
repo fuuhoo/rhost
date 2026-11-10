@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 [中文](./CHANGELOG.zh-CN.md) · **English**
 
+## [2.5.1] - 2026-11-10
+
+### Changed
+
+- Lower startup memory: backdrop-filter (frosted glass) is disabled on non-macOS platforms, cutting WebView GPU process private memory on Windows from about 508 MB to about 228 MB with no visual or interaction change
+- The new-connection, settings, group, palette and toolbox modals plus the AI chat panel are now lazy-loaded on demand: the main JS bundle drops from about 1302 KB to about 754 KB; unopened modals no longer keep DOM resident, reducing startup DOM nodes from about 4692 to 3717 and the JS heap from about 7.2 MB to 5.2 MB
+- Terminals using the WebGL renderer only hold a GPU context while their tab is active and the workbench is visible; the context is released when hidden and rebuilt when shown again
+
+### Fixed
+
+- First-open initialization of lazy-loaded modals (search-box focus, font and editor candidate refresh) now runs after mount, fixing focus and list refresh being skipped due to initialization timing
+
 ## [2.5.0] - 2026-11-10
 
 ### Added
