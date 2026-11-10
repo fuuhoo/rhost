@@ -71,6 +71,8 @@ onUnmounted(clearConfirm)
               <span>{{ h.user }}@{{ h.ip }}:{{ h.port }}</span>
               <span class="sep">·</span>
               <span>{{ h.os }}</span>
+              <span class="sep">·</span>
+              <span>{{ h.group }}</span>
             </div>
           </div>
           <div class="proj-actions" @mouseleave="clearConfirm">
@@ -193,6 +195,7 @@ onUnmounted(clearConfirm)
           <div class="proj-icon" :class="'icon-' + h.color">{{ h.label }}</div>
           <div class="proj-name">{{ h.id }}</div>
           <div class="proj-tagline">{{ h.ip }}</div>
+          <span class="proj-group">{{ h.group }}</span>
         </div>
       </template>
 
@@ -209,6 +212,7 @@ onUnmounted(clearConfirm)
           <div class="proj-addr">{{ h.user }}@{{ h.ip }}:{{ h.port }}</div>
           <div class="proj-os">{{ h.os }}</div>
           <span class="proj-tag">{{ h.tag }}</span>
+          <span class="proj-tag">{{ h.group }}</span>
           <span class="proj-actions" @mouseleave="clearConfirm">
             <button type="button" class="proj-act" title="编辑连接" @click="onEdit($event, h)">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"

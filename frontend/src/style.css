@@ -638,6 +638,14 @@ body{
     font-size:9.5px;color:var(--muted-2);
     margin-top:3px;letter-spacing:.2px;
 }
+.view-grid .proj-group{
+    margin-top:5px;max-width:100%;
+    font-size:9px;padding:1px 5px;border-radius:4px;
+    background:var(--veil);color:var(--muted);
+    border:1px solid var(--border-soft);
+    letter-spacing:.3px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
 .view-grid .proj-actions{
     display:none;
     position:absolute;top:5px;right:5px;z-index:2;
