@@ -166,6 +166,10 @@ html[data-theme="light"] .row.selected{background:#dfecf4}
 html[data-theme="light"] .file-tree{background:#fff}
 html[data-theme="light"] .tree-row.active{background:#dfecf4}
 html[data-theme="light"] .row-icon{fill:#d9d9d9}
+/* 网格视图浅色还原截图：白底 + 深灰蓝文档大图标（列表小图标仍保持浅灰），淡蓝选中 */
+html[data-theme="light"] .grid-cell:hover{background:#f0f0f0}
+html[data-theme="light"] .grid-cell.selected{background:#dfecf4;border-color:#bcd6ea}
+html[data-theme="light"] .grid-cell .row-icon{fill:#3d4451}
 html[data-theme="light"] .row-kind,
 html[data-theme="light"] .row-size,
 html[data-theme="light"] .row-time,
@@ -2261,9 +2265,38 @@ html[data-theme="light"] .tab-home{color:#3b82f6}
 /* 文件夹为渐变双层填充（后盖深金/前盖亮金带描边），路径自带 fill；svg 继承 fill 只服务文档图标 */
 .link-badge{
     width:11px;height:11px;flex-shrink:0;
-    color:var(--muted-2);opacity:.7;
+    color:var(--muted-2);opacity:.85;
 }
 .row-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 网格视图（FinalShell 平铺口径）：大图标在上、名称居中在下，自动换行铺满栏宽；
+   与列表共用选择/双击/右键交互，仅渲染形态不同 */
+.pane-grid{
+    display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));
+    gap:2px;padding:10px 8px;align-content:start;
+}
+.grid-cell{
+    display:flex;flex-direction:column;align-items:center;gap:7px;
+    padding:10px 4px 8px;border-radius:6px;border:1px solid transparent;
+    cursor:pointer;user-select:none;transition:background .08s;
+}
+.grid-cell:hover{background:var(--panel-2)}
+.grid-cell.selected{background:rgba(var(--accent-rgb),.16);border-color:rgba(var(--accent-rgb),.35)}
+.grid-cell .row-icon{width:46px;height:46px}
+.grid-icon-wrap{position:relative;line-height:0}
+/* 符号链接徽标：圆形底托 + 右上箭头（快捷方式约定），压在图标右下角 */
+.grid-link{position:absolute;right:-5px;bottom:-1px;width:16px;height:16px;filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.28))}
+.grid-link-bg{fill:var(--panel);stroke:var(--border-strong);stroke-width:1}
+.grid-link-arrow{stroke:rgb(var(--accent-rgb))}
+html[data-theme="light"] .grid-link{filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.16))}
+html[data-theme="light"] .grid-link-arrow{stroke:var(--blue)}
+.grid-name{
+    max-width:100%;font-size:12px;line-height:1.35;text-align:center;color:var(--text);
+    overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+    word-break:break-all;
+}
+.grid-cell.selected .grid-name{color:var(--text-strong)}
+/* 网格里的重命名/新建输入框：名称位置原位编辑，宽度撑满单元格 */
+.grid-edit-input{width:100%;text-align:center}
 /* 新建文件夹：行内编辑行 */
 .mkdir-row .row-icon{stroke:none}
 .mkdir-input{

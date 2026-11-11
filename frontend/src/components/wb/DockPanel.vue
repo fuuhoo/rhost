@@ -4,7 +4,7 @@ import { invoke, Channel } from '@tauri-apps/api/core'
 import { tempDir } from '@tauri-apps/api/path'
 import { open } from '@tauri-apps/plugin-dialog'
 import { revealItemInDir } from '@tauri-apps/plugin-opener'
-import { activeHost, activeSession, activeSftpCwd, closeDock, connected, dockCollapsed, dockHeight, DOCK_DEFAULT_HEIGHT, dockTab, dockVisible, searchTick, sessions, sftpLocalRatio, sftpTreeWidth } from '../../stores/session'
+import { activeHost, activeSession, activeSftpCwd, closeDock, connected, dockCollapsed, dockHeight, DOCK_DEFAULT_HEIGHT, dockTab, dockVisible, searchTick, sessions, sftpLocalRatio, sftpTreeWidth, sftpViewMode } from '../../stores/session'
 import { savedSettings } from '../../stores/settings'
 import { toast } from '../../composables/useToast'
 import { confirmDialog } from '../../composables/useConfirm'
@@ -2836,6 +2836,18 @@ onUnmounted(() => {
                 </svg>
                 新建
               </button>
+              <button class="sftp-btn" :title="sftpViewMode === 'list' ? '切换为网格视图' : '切换为列表视图'"
+                      @click="sftpViewMode = sftpViewMode === 'list' ? 'grid' : 'list'">
+                <svg v-if="sftpViewMode === 'list'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
+                  <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
+                </svg>
+                <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01" stroke-width="3"/>
+                </svg>
+              </button>
             </div>
 
             <div class="sftp-side right">
@@ -2957,7 +2969,7 @@ onUnmounted(() => {
                   </svg>
                 </button>
               </div>
-              <div class="list-header">
+              <div v-if="sftpViewMode==='list'" class="list-header">
                 <div class="lh-name" :class="{ sorted: localSort.key==='name', asc: localSort.dir===1, desc: localSort.dir===-1 }" @click="changeSort('local','name')">文件名<i class="lh-grip" title="拖动调整列宽" @mousedown="startColResize($event, 'name', 'size')" @click.stop="() => {}"></i></div>
                 <div class="lh-size" :class="{ sorted: localSort.key==='size' }" @click="changeSort('local','size')">大小<i class="lh-grip" title="拖动调整列宽" @mousedown="startColResize($event, 'size', 'kind')" @click.stop="() => {}"></i></div>
                 <div class="lh-kind">类型<i class="lh-grip" title="拖动调整列宽" @mousedown="startColResize($event, 'kind', 'time')" @click.stop="() => {}"></i></div>
@@ -2974,7 +2986,7 @@ onUnmounted(() => {
                   </svg>
                   <div>{{ localLoading ? '加载中…' : '此文件夹为空' }}</div>
                 </div>
-                <template v-else>
+                <template v-else-if="sftpViewMode==='list'">
                   <div
                     v-for="e in localEntries"
                     :key="e.name"
@@ -2994,8 +3006,7 @@ onUnmounted(() => {
                              @blur="confirmEdit" />
                       <span v-else class="row-text">{{ e.name }}</span>
                       <svg v-if="e.isSymlink" class="link-badge" viewBox="0 0 16 16" title="符号链接">
-                        <path d="M7 2H4a3 3 0 0 0 0 6h2" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/>
-                        <path d="M9 14h3a3 3 0 0 0 0-6h-2" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+                        <path d="M4.5 11.5 11.5 4.5M6.5 4.5h5v5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
                       </svg>
                     </div>
                     <div class="row-size">{{ e.type==='dir' ? '—' : fmtSize(e.size) }}</div>
@@ -3018,6 +3029,42 @@ onUnmounted(() => {
                     </div>
                   </div>
                 </template>
+                <!-- 网格视图：大图标 + 名称在下，选择/双击/右键与列表行同一套交互 -->
+                <div v-else class="pane-grid">
+                  <div
+                    v-for="e in localEntries"
+                    :key="e.name"
+                    class="grid-cell"
+                    :class="{ selected: localSelected.has(e.name) }"
+                    :title="e.name"
+                    @click="onRowClick('local', e, $event)"
+                    @dblclick="onRowDblClick('local', e)"
+                    @contextmenu.stop="onRowContext($event, 'local', e)"
+                  >
+                    <div class="grid-icon-wrap">
+                      <FileIcon :dir="e.type==='dir'" />
+                      <svg v-if="e.isSymlink" class="grid-link" viewBox="0 0 16 16" title="符号链接">
+                        <circle class="grid-link-bg" cx="8" cy="8" r="7"/>
+                        <path class="grid-link-arrow" d="M5.6 10.4 10.4 5.6M6.6 5.6h3.8v3.8" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+                      </svg>
+                    </div>
+                    <input v-if="edit && edit.side==='local' && edit.kind==='rename' && edit.origName===e.name"
+                           ref="editInput" v-model="editName" class="rename-input grid-edit-input"
+                           @keydown.enter.prevent="confirmEdit"
+                           @keydown.esc.prevent="cancelEdit"
+                           @blur="confirmEdit" />
+                    <span v-else class="grid-name">{{ e.name }}</span>
+                  </div>
+                  <div v-if="edit && edit.side==='local' && (edit.kind==='mkdir' || edit.kind==='mkfile')"
+                       class="grid-cell">
+                    <FileIcon :dir="edit.kind==='mkdir'" />
+                    <input ref="editInput" v-model="editName" class="mkdir-input grid-edit-input"
+                           :placeholder="edit.kind==='mkdir' ? '输入文件夹名，回车确认' : '输入文件名，回车确认'"
+                           @keydown.enter.prevent="confirmEdit"
+                           @keydown.esc.prevent="cancelEdit"
+                           @blur="confirmEdit" />
+                  </div>
+                </div>
               </div>
               <div class="pane-stats">
                 <b>{{ localEntries.filter(e=>e.type==='dir').length }}</b> 目录 /
@@ -3028,7 +3075,7 @@ onUnmounted(() => {
 
             <!-- 远程：导航（路径条/上一级/新建/上传下载）统一在顶栏，这里只有表头与列表 -->
             <div class="pane remote" :style="colPaneStyle()">
-              <div class="list-header">
+              <div v-if="sftpViewMode==='list'" class="list-header">
                 <div class="lh-name" :class="{ sorted: remoteSort.key==='name', asc: remoteSort.dir===1, desc: remoteSort.dir===-1 }" @click="changeSort('remote','name')">文件名<i class="lh-grip" title="拖动调整列宽" @mousedown="startColResize($event, 'name', 'size')" @click.stop="() => {}"></i></div>
                 <div class="lh-size" :class="{ sorted: remoteSort.key==='size' }" @click="changeSort('remote','size')">大小<i class="lh-grip" title="拖动调整列宽" @mousedown="startColResize($event, 'size', 'kind')" @click.stop="() => {}"></i></div>
                 <div class="lh-kind">类型<i class="lh-grip" title="拖动调整列宽" @mousedown="startColResize($event, 'kind', 'time')" @click.stop="() => {}"></i></div>
@@ -3045,7 +3092,7 @@ onUnmounted(() => {
                   </svg>
                   <div>{{ !connected ? '未连接到远程主机' : remoteLoading ? '加载中…' : '此文件夹为空' }}</div>
                 </div>
-                <template v-else>
+                <template v-else-if="sftpViewMode==='list'">
                   <div
                     v-for="e in remoteEntries"
                     :key="e.name"
@@ -3064,8 +3111,7 @@ onUnmounted(() => {
                              @blur="confirmEdit" />
                       <span v-else class="row-text">{{ e.name }}</span>
                       <svg v-if="e.isSymlink" class="link-badge" viewBox="0 0 16 16" title="符号链接">
-                        <path d="M7 2H4a3 3 0 0 0 0 6h2" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/>
-                        <path d="M9 14h3a3 3 0 0 0 0-6h-2" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+                        <path d="M4.5 11.5 11.5 4.5M6.5 4.5h5v5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
                       </svg>
                     </div>
                     <div class="row-size">{{ e.type==='dir' ? '—' : fmtSize(e.size) }}</div>
@@ -3088,6 +3134,42 @@ onUnmounted(() => {
                     </div>
                   </div>
                 </template>
+                <!-- 网格视图：大图标 + 名称在下，选择/双击/右键与列表行同一套交互 -->
+                <div v-else class="pane-grid">
+                  <div
+                    v-for="e in remoteEntries"
+                    :key="e.name"
+                    class="grid-cell"
+                    :class="{ selected: remoteSelected.has(e.name) }"
+                    :title="e.name"
+                    @click="onRowClick('remote', e, $event)"
+                    @dblclick="onRowDblClick('remote', e)"
+                    @contextmenu.stop="onRowContext($event, 'remote', e)"
+                  >
+                    <div class="grid-icon-wrap">
+                      <FileIcon :dir="e.type==='dir'" />
+                      <svg v-if="e.isSymlink" class="grid-link" viewBox="0 0 16 16" title="符号链接">
+                        <circle class="grid-link-bg" cx="8" cy="8" r="7"/>
+                        <path class="grid-link-arrow" d="M5.6 10.4 10.4 5.6M6.6 5.6h3.8v3.8" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+                      </svg>
+                    </div>
+                    <input v-if="edit && edit.side==='remote' && edit.kind==='rename' && edit.origName===e.name"
+                           ref="editInput" v-model="editName" class="rename-input grid-edit-input"
+                           @keydown.enter.prevent="confirmEdit"
+                           @keydown.esc.prevent="cancelEdit"
+                           @blur="confirmEdit" />
+                    <span v-else class="grid-name">{{ e.name }}</span>
+                  </div>
+                  <div v-if="edit && edit.side==='remote' && (edit.kind==='mkdir' || edit.kind==='mkfile')"
+                       class="grid-cell">
+                    <FileIcon :dir="edit.kind==='mkdir'" />
+                    <input ref="editInput" v-model="editName" class="mkdir-input grid-edit-input"
+                           :placeholder="edit.kind==='mkdir' ? '输入文件夹名，回车确认' : '输入文件名，回车确认'"
+                           @keydown.enter.prevent="confirmEdit"
+                           @keydown.esc.prevent="cancelEdit"
+                           @blur="confirmEdit" />
+                  </div>
+                </div>
               </div>
               <div class="pane-stats">
                 <b>{{ remoteEntries.filter(e=>e.type==='dir').length }}</b> 目录 /

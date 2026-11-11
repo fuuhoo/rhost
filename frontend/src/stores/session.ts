@@ -92,6 +92,8 @@ export const recentConnections = ref<RecentConnection[]>([])
 export const sftpLocalRatio = ref(0.5)
 /** 「文件」页左侧远程目录树宽度（px）；拖拽右缘调整，夹取 132~420 */
 export const sftpTreeWidth = ref(200)
+/** 「文件」页列表/网格视图（本地与远程两栏共用） */
+export const sftpViewMode = ref<'list' | 'grid'>('list')
 
 /* ---- 历史会话操作 ---- */
 
@@ -158,13 +160,14 @@ onConfigLoad(snap => {
   const savedTreeW = num(ui.sftpTreeWidth)
   sftpTreeWidth.value =
     savedTreeW !== null ? Math.min(420, Math.max(132, savedTreeW)) : 200
+  sftpViewMode.value = ui.sftpViewMode === 'grid' ? 'grid' : 'list'
   layoutHydrated = true
 })
 
 /** 状态变化经 ui_state 合并写落盘（patchUiState 内部 300ms 防抖合并连续变更） */
 watch(
   [rightPanelVisible, rightPanelTab, rightPanelWidth, rightPanelMaximized, dockVisible, dockCollapsed, dockTab, dockHeight, sftpLocalRatio,
-   sftpTreeWidth, monitorVisible, monitorWidth],
+   sftpTreeWidth, sftpViewMode, monitorVisible, monitorWidth],
   () => {
     if (!isTauri || !layoutHydrated) return
     patchUiState({
@@ -178,6 +181,7 @@ watch(
       dockHeight: dockHeight.value,
       sftpLocalRatio: sftpLocalRatio.value,
       sftpTreeWidth: sftpTreeWidth.value,
+      sftpViewMode: sftpViewMode.value,
       monitorVisible: monitorVisible.value,
       monitorWidth: monitorWidth.value,
     })
