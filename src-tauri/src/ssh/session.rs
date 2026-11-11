@@ -356,6 +356,14 @@ const SHELL_QUIET: Duration = Duration::from_millis(120);
 /// 开头存在，且 probe 是本次会话独有的随机路径，不会误伤正常输出。
 const LATE_ECHO_TTL: Duration = Duration::from_secs(10);
 
+/// SFTP→Shell cd 同步的回显剥离窗口时长。回显在注入后一个 RTT 内到达，2s 足够
+/// 覆盖慢链路；窗口越短，误剥用户手动敲出的同内容 cd 行的概率越低。
+const CD_ECHO_TTL: Duration = Duration::from_secs(2);
+
+/// cd 回显行剥除后原位写入的序列：回车 + 清至行尾。旧提示符已上屏，清行后
+/// 紧随的新目录提示符正好落在原行——终端只看到目录变化，无 cd 命令、无空行。
+const CD_CLEAR_LINE: &[u8] = b"\r\x1b[K";
+
 /// 初始化 hold 状态：PTY 输出先攒在 buf 不上屏；cmd 为 Some 表示等静默注入，
 /// None 表示已注入、等脚本末尾 marker。`probe` 是注入命令里的临时文件路径，
 /// 用于在攒下的字节里定位并剥掉那一行回显（见 [`late_gate`]）。
@@ -883,6 +891,10 @@ pub struct SshSession {
     /// Shell 当前工作目录：由 merge_task 解析 PTY 中的 OSC 6667 序列更新，
     /// sftp_list_dir 无参数时以此为默认目录，保持 Shell 与 SFTP CWD 一致。
     pub(super) cwd: Arc<Mutex<Option<String>>>,
+    /// SFTP→Shell cd 同步的回显剥离窗口（probe=注入的 cd 行字节，until=到期时刻）。
+    /// 写侧 sync_shell_cd 武装，读侧 merge_task/flush 消费（见 [`cd_gate`]）。
+    /// 用 Vec 而非单槽：连续快速切目录时多条 cd 的回显都要剥。
+    pub(super) cd_strip: Arc<Mutex<Vec<(Vec<u8>, Instant)>>>,
     /// 端口转发管理器：与 ClientHandler 共享 RemoteRegistry / 全局闸门，
     /// 与 SFTP 子系统、metrics 采集器平级，共用同一条已认证主连接
     tunnel: TunnelManager,
@@ -1405,6 +1417,7 @@ impl SshSession {
             logged: AtomicBool::new(false),
         });
         let cwd = Arc::new(Mutex::new(None));
+        let cd_strip = Arc::new(Mutex::new(Vec::new()));
 
         let metrics_frame_tx = if cfg.sftp_only {
             drop(event_tx);
@@ -1462,6 +1475,7 @@ impl SshSession {
                 cancel.clone(),
                 init_inject,
                 cwd.clone(),
+                cd_strip.clone(),
             ));
             tokio::spawn(write_task(write_half, write_rx, cancel.clone()));
             metrics_frame_tx
@@ -1519,6 +1533,7 @@ impl SshSession {
                 metrics: StdMutex::new(None),
                 sftp,
                 cwd,
+                cd_strip,
                 tunnel,
                 dc_state,
                 init_script_path,
@@ -1611,6 +1626,11 @@ impl SshSession {
     /// 经 PTY 写入通道发送 `cd '<quoted>'\\n`，shell 执行后提示符即反映新目录，
     /// 随后 init_script 注入的 CWD 钩子会上报新路径，形成闭环。路径含单引号
     /// 时按 shell 规则转义（`'` → `'\''`），避免注入。
+    ///
+    /// 发送前武装回显剥离窗口（[`cd_gate`]）：终端不显示这条 cd，旧提示符行
+    /// 被新目录提示符原位替换。窗口按内容匹配，用户手动敲的同内容 cd 在窗口
+    /// 期内也会被剥（2s，纯观感、概率极低）；shell 正忙时注入排队、窗口过期
+    /// 后回显照显——与未剥离前的行为一致，不会更糟。
     pub(crate) async fn sync_shell_cd(&self, path: &str) -> Result<(), SshError> {
         // 没有 PTY 就没有 shell 可同步（SFTP 面板会忽略本返回值）
         if self.sftp_only {
@@ -1618,6 +1638,15 @@ impl SshSession {
         }
         let quoted = format!("'{}'", path.replace('\'', "'\\''"));
         let cmd = format!("cd {quoted}\n");
+        {
+            let mut probes = self.cd_strip.lock().await;
+            probes.push((format!("cd {quoted}").into_bytes(), Instant::now() + CD_ECHO_TTL));
+            // 只保留最近 4 条：更早的回显要么已剥、要么已过期
+            let overflow = probes.len().saturating_sub(4);
+            if overflow > 0 {
+                probes.drain(..overflow);
+            }
+        }
         self.write_tx
             .send(WriteReq::Data(cmd.into_bytes()))
             .await
@@ -2118,6 +2147,7 @@ async fn merge_task(
     cancel: CancellationToken,
     init_inject: Option<(Vec<u8>, Vec<u8>, mpsc::Sender<WriteReq>)>,
     cwd: Arc<Mutex<Option<String>>>,
+    cd_strip: Arc<Mutex<Vec<(Vec<u8>, Instant)>>>,
 ) {
     let mut buf = BytesMut::with_capacity(MERGE_BYTES * 2);
     // 合并窗口定时器：仅在窗口开启时参与 select
@@ -2133,6 +2163,8 @@ async fn merge_task(
     });
     // 放行后仍在生效的回显剥离窗口（见 LATE_ECHO_TTL）；无注入则为 None，零开销
     let mut late: Option<(Vec<u8>, Instant)> = None;
+    // cd 同步窗口扣留的半行/半个 probe（见 cd_gate），下一轮 flush 拼回再裁决
+    let mut cd_hold = BytesMut::new();
     // 静默计时（等 PS1 刷完）与 hold 硬超时，仅在对应阶段参与 select
     let quiet = time::sleep(SHELL_QUIET);
     tokio::pin!(quiet);
@@ -2184,7 +2216,7 @@ async fn merge_task(
                             window_open = true;
                         }
                         if buf.len() >= MERGE_BYTES {
-                            flush(&mut buf, &frame_tx, &mut late).await;
+                            flush(&mut buf, &frame_tx, &mut late, &cd_strip, &mut cd_hold).await;
                             window_open = false;
                         }
                     }
@@ -2192,7 +2224,7 @@ async fn merge_task(
                         if let Some(h) = hold.take() {
                             buf.extend_from_slice(&h.buf[..]);
                         }
-                        flush(&mut buf, &frame_tx, &mut late).await;
+                        flush(&mut buf, &frame_tx, &mut late, &cd_strip, &mut cd_hold).await;
                         // 结构化 payload：reason 展示用，lost 指示前端是否可自动重连
                         let payload = serde_json::json!({
                             "reason": reason.unwrap_or_default(),
@@ -2209,13 +2241,13 @@ async fn merge_task(
                         if let Some(h) = hold.take() {
                             buf.extend_from_slice(&h.buf[..]);
                         }
-                        flush(&mut buf, &frame_tx, &mut late).await;
+                        flush(&mut buf, &frame_tx, &mut late, &cd_strip, &mut cd_hold).await;
                         break;
                     }
                 }
             }
             _ = &mut window, if window_open => {
-                flush(&mut buf, &frame_tx, &mut late).await;
+                flush(&mut buf, &frame_tx, &mut late, &cd_strip, &mut cd_hold).await;
                 window_open = false;
             }
             // 阶段 1→2：静默确认 shell 就绪，注入 source 命令
@@ -2236,7 +2268,7 @@ async fn merge_task(
                     }
                     late = Some((h.probe, Instant::now() + LATE_ECHO_TTL));
                     buf.extend_from_slice(&h.buf[..]);
-                    flush(&mut buf, &frame_tx, &mut late).await;
+                    flush(&mut buf, &frame_tx, &mut late, &cd_strip, &mut cd_hold).await;
                     window_open = false;
                 }
             }
@@ -2315,19 +2347,37 @@ fn longest_suffix_prefix(buf: &[u8], probe: &[u8]) -> usize {
 /// 把累积缓冲区封装为 Data 帧发出（空缓冲不发）。
 /// 发出前若回显剥离窗口仍开着，先经 [`late_gate`] 裁决：命中则剥整行（可多处）；
 /// 半行/半个 probe 则扣留待拼接（其余照发），窗口到期后全部直通。
+/// cd 同步窗口（[`cd_gate`]）独立裁决：剥行后原位清行，扣留字节存 cd_hold。
 async fn flush(
     buf: &mut BytesMut,
     frame_tx: &mpsc::Sender<Vec<u8>>,
     late: &mut Option<(Vec<u8>, Instant)>,
+    cd_strip: &Mutex<Vec<(Vec<u8>, Instant)>>,
+    cd_hold: &mut BytesMut,
 ) {
-    if buf.is_empty() {
+    if buf.is_empty() && cd_hold.is_empty() {
         return;
+    }
+    // 拼回上轮扣留的半行，保证 cd 回显跨 flush 边界也能完整命中
+    if !cd_hold.is_empty() {
+        let mut combined = std::mem::take(cd_hold);
+        combined.extend_from_slice(&buf[..]);
+        *buf = combined;
     }
     if let Some((probe, until)) = late.take() {
         if Instant::now() < until {
             if late_gate(buf, &probe) {
                 *late = Some((probe, until));
             }
+        }
+    }
+    {
+        let mut probes = cd_strip.lock().await;
+        probes.retain(|(_, until)| Instant::now() < *until);
+        if !probes.is_empty() {
+            let owned: Vec<Vec<u8>> = probes.iter().map(|(p, _)| p.clone()).collect();
+            let sendable = cd_gate(buf, &owned);
+            *cd_hold = buf.split_off(sendable);
         }
     }
     if buf.is_empty() {
@@ -2338,6 +2388,69 @@ async fn flush(
     if frame_tx.send(frame).await.is_err() {
         warn!("帧输出通道已关闭，丢弃 PTY 数据");
     }
+}
+
+/// SFTP cd 同步的回显裁决：返回本轮可放行的前缀长度，其余为扣留的半行/半个
+/// probe（调用方存入 cd_hold 待下一轮拼接）。与 [`late_gate`] 的纯剥除不同，
+/// 完整回显行原位替换为 [`CD_CLEAR_LINE`]——旧提示符行被清掉，紧随的新目录
+/// 提示符落在原行，终端无 cd 命令、无空行。
+///
+/// 一次性处理全部 probe（连续快速切目录时多条 cd 并存）：在原始快照上按 `\n`
+/// 定位行边界、重建输出。不能边剥边扫——替换序列不含 `\n`，剥掉第一行后
+/// 后续行的行首边界就丢了，会把前一行的清行序列也吃掉。
+///
+/// 三种形态与 late_gate 一致：完整行（probe + 行尾换行）替换；probe 已现但
+/// 换行未到，从行首起扣留；probe 未现则只扣留末尾的 probe 真前缀。
+/// 替换而非追加到缓冲末尾：回显行与新提示符常在同一批字节里，追加会把
+/// 新提示符一起清掉。
+fn cd_gate(buf: &mut BytesMut, probes: &[Vec<u8>]) -> usize {
+    if probes.is_empty() {
+        return buf.len();
+    }
+    let src = buf.clone();
+    let mut out = BytesMut::with_capacity(src.len());
+    let mut pos = 0;
+    while pos < src.len() {
+        // 取位置最靠前的 probe 命中（多条 cd 按到达顺序处理）
+        let mut best: Option<usize> = None;
+        for p in probes {
+            if p.is_empty() {
+                continue;
+            }
+            if let Some(rel) = src[pos..].windows(p.len()).position(|w| w == &p[..]) {
+                let hit = pos + rel;
+                if best.map_or(true, |h| hit < h) {
+                    best = Some(hit);
+                }
+            }
+        }
+        let Some(hit) = best else {
+            out.extend_from_slice(&src[pos..]);
+            let keep = probes
+                .iter()
+                .map(|p| longest_suffix_prefix(&out, p))
+                .max()
+                .unwrap_or(0);
+            *buf = out;
+            return buf.len() - keep;
+        };
+        let row_start = src[..hit]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |p| p + 1);
+        out.extend_from_slice(&src[pos..row_start]);
+        // 行尾换行未到：半行，放行行首之前的字节，其余扣留待拼接
+        let Some(off) = src[hit..].iter().position(|&b| b == b'\n') else {
+            let sendable = out.len();
+            out.extend_from_slice(&src[row_start..]);
+            *buf = out;
+            return sendable;
+        };
+        out.extend_from_slice(CD_CLEAR_LINE);
+        pos = hit + off + 1;
+    }
+    *buf = out;
+    buf.len()
 }
 
 /// 写任务：串行处理前端输入与尺寸变更（均通过写半通道发出）。
@@ -2512,7 +2625,7 @@ mod gate_tests {
 #[cfg(test)]
 mod env_export_tests {
     use super::{
-        env_export_lines, init_script, late_gate, locale_login_cmd, INIT_DONE_MARKER,
+        cd_gate, env_export_lines, init_script, late_gate, locale_login_cmd, INIT_DONE_MARKER,
     };
     use bytes::BytesMut;
 
@@ -2740,6 +2853,100 @@ mod env_export_tests {
             !String::from_utf8_lossy(&buf).contains(".ri-baf1d674"),
             "切开的回显拼接后同样剥得干净"
         );
+    }
+
+    /// 测试辅助：把字节串列表转成 cd_gate 需要的 probe 向量
+    fn cd_probes(list: &[&[u8]]) -> Vec<Vec<u8>> {
+        list.iter().map(|p| p.to_vec()).collect()
+    }
+
+    #[test]
+    fn cd_gate_replaces_echo_row_with_clear_line_keeps_prompt() {
+        // 回显行与新提示符同批到达：原位替换（不是追加到末尾），新提示符不能被清掉
+        let probes = cd_probes(&[b"cd '/root'"]);
+        let mut buf = BytesMut::from("cd '/root'\r\nroot@localhost:/root# ");
+        let sendable = cd_gate(&mut buf, &probes);
+        assert_eq!(sendable, buf.len(), "完整行替换后全部放行");
+        assert_eq!(
+            &buf[..],
+            &BytesMut::from("\r\x1b[Kroot@localhost:/root# ")[..],
+            "回显行原位换成清行序列，新提示符紧随其后落在原行"
+        );
+    }
+
+    #[test]
+    fn cd_gate_keeps_preceding_output_row() {
+        let probes = cd_probes(&[b"cd '/root'"]);
+        let mut buf = BytesMut::from("file1\r\ncd '/root'\r\nPS1");
+        let sendable = cd_gate(&mut buf, &probes);
+        assert_eq!(sendable, buf.len());
+        assert_eq!(
+            &buf[..],
+            &BytesMut::from("file1\r\n\r\x1b[KPS1")[..],
+            "回显行之前的正常输出不能被吃掉"
+        );
+    }
+
+    #[test]
+    fn cd_gate_withholds_partial_row_until_line_completes() {
+        let probes = cd_probes(&[b"cd '/root'"]);
+        // probe 本身被切一半：末尾真前缀扣留，之前的输出放行
+        let mut buf = BytesMut::from("hello\r\ncd '/ro");
+        let sendable = cd_gate(&mut buf, &probes);
+        assert_eq!(sendable, 7, "hello\\r\\n 放行，半个 probe 扣留");
+        let mut hold = buf.split_off(sendable);
+        assert_eq!(&buf[..], &BytesMut::from("hello\r\n")[..]);
+        // 下一轮 flush：拼回扣留 + 新字节，整行替换
+        let mut next = std::mem::take(&mut hold);
+        next.extend_from_slice("ot'\r\nPS1".as_bytes());
+        let sendable = cd_gate(&mut next, &probes);
+        assert_eq!(sendable, next.len());
+        assert_eq!(&next[..], &BytesMut::from("\r\x1b[KPS1")[..]);
+    }
+
+    #[test]
+    fn cd_gate_withholds_complete_probe_without_newline() {
+        let probes = cd_probes(&[b"cd '/root'"]);
+        let mut buf = BytesMut::from("cd '/root'");
+        assert_eq!(cd_gate(&mut buf, &probes), 0, "行尾换行未到，整行扣留");
+        buf.extend_from_slice("\r\nPS1".as_bytes());
+        let sendable = cd_gate(&mut buf, &probes);
+        assert_eq!(sendable, buf.len());
+        assert_eq!(&buf[..], &BytesMut::from("\r\x1b[KPS1")[..]);
+    }
+
+    #[test]
+    fn cd_gate_strips_both_echo_copies() {
+        // 同一条 cd 被回显两次（内核 + readline）：两行都替换，清行序列不能互相吃掉
+        let probes = cd_probes(&[b"cd '/root'"]);
+        let mut buf = BytesMut::from("cd '/root'\r\ncd '/root'\r\nPS1");
+        let sendable = cd_gate(&mut buf, &probes);
+        assert_eq!(sendable, buf.len());
+        assert_eq!(&buf[..], &BytesMut::from("\r\x1b[K\r\x1b[KPS1")[..]);
+    }
+
+    #[test]
+    fn cd_gate_multiple_probes_strip_their_own_rows() {
+        // 连续快速切目录：两条 probe 一次裁决各自剥行（原始快照定边界）
+        let probes = cd_probes(&[b"cd '/a'", b"cd '/b'"]);
+        let mut buf = BytesMut::from("cd '/a'\r\ncd '/b'\r\nPS1");
+        let sendable = cd_gate(&mut buf, &probes);
+        assert_eq!(sendable, buf.len());
+        assert_eq!(&buf[..], &BytesMut::from("\r\x1b[K\r\x1b[KPS1")[..]);
+    }
+
+    #[test]
+    fn cd_gate_passthrough_without_probe_and_empty_probe() {
+        let probes = cd_probes(&[b"cd '/root'"]);
+        let mut buf = BytesMut::from("ls\r\nfile1\r\n");
+        let snapshot = buf.clone();
+        assert_eq!(cd_gate(&mut buf, &probes), buf.len());
+        assert_eq!(&buf[..], &snapshot[..], "不含 probe 原样放行");
+        assert_eq!(cd_gate(&mut buf, &[]), buf.len());
+        assert_eq!(&buf[..], &snapshot[..], "空 probe 表绝不错删");
+        let empty = cd_probes(&[b""]);
+        assert_eq!(cd_gate(&mut buf, &empty), buf.len());
+        assert_eq!(&buf[..], &snapshot[..], "空 probe 绝不错删");
     }
 
     #[test]
