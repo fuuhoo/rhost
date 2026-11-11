@@ -261,6 +261,8 @@
 | 镜像拉取 / 导入导出 | `toolbox.docker.transfer` | INFO/WARN | 完成：op（pull/import/export/import_local/export_local）、image（拉取或导出）、path（远端导入 / 导出）、local（本地文件路径）、bytes（本地文件字节数）、tag（自定义标签）、size（导出，人读大小）、tagged、elevated、elapsed_ms；失败 WARN 记 op、path/local、exit_code、err（含上传 / 下载失败与拉取成功但打标签失败） |
 | Docker 配置 | `toolbox.docker.config` | INFO/WARN | 读取：op=get、version、mirrors（条目数）、data_root、keys（daemon.json 顶层键列表）、daemon_json（是否取到）；保存：op=save、keys（写入的顶层键列表）、bytes（写入字节数）、elapsed_ms，失败 WARN 记 exit_code、timed_out、err（含重启失败） |
 | 容器终端 | `toolbox.docker.terminal` | INFO | 打开：op=open、container、sudo（none/passwordless/password）、cols、rows、elapsed_ms；关闭：op=close。**kv 不含 sudo 口令** |
+| 系统日志来源探测 | `toolbox.syslog.sources` | INFO/WARN | 完成：os、distro、count（来源数）、journal（是否含 journald）、elapsed_ms、timed_out；失败 WARN 记 exit_code、err。**kv 不含日志正文** |
+| 系统日志读取 / 保存 | `toolbox.syslog.read` | INFO/WARN | 读取完成：source（来源 id）、tail、since/until（时间段，可空）、chars、truncated、elevated、elapsed_ms；失败 WARN 记 source、tail、since/until、exit_code、timed_out、err。保存：op=save、path（本地）、bytes。**kv 不含日志正文与 sudo 口令** |
 
 ### 4.7 AI 助手（target: `ai`，带 scope 标签）
 
