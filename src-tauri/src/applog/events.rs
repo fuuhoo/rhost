@@ -212,6 +212,10 @@ pub const TOOLBOX_DOCKER_TRANSFER: &str = "toolbox.docker.transfer";
 pub const TOOLBOX_DOCKER_CONFIG: &str = "toolbox.docker.config";
 /// 容器交互式终端会话开关
 pub const TOOLBOX_DOCKER_TERMINAL: &str = "toolbox.docker.terminal";
+/// 系统日志来源探测（kv 带 os/发行版/来源数，不含日志正文）
+pub const TOOLBOX_SYSLOG_SOURCES: &str = "toolbox.syslog.sources";
+/// 系统日志读取 / 保存（kv 只带来源/行数/字符数，不含日志正文与口令）
+pub const TOOLBOX_SYSLOG_READ: &str = "toolbox.syslog.read";
 
 /// 前端上报允许的 event_id 域（report_app_log 校验白名单）：
 /// web.* 前端通用事件 + sftp.* 传输队列事件（队列管理逻辑在前端，§7.3）
@@ -369,6 +373,8 @@ mod tests {
             TOOLBOX_DOCKER_TRANSFER,
             TOOLBOX_DOCKER_CONFIG,
             TOOLBOX_DOCKER_TERMINAL,
+            TOOLBOX_SYSLOG_SOURCES,
+            TOOLBOX_SYSLOG_READ,
         ];
         for id in all {
             assert!(

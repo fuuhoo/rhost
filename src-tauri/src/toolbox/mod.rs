@@ -13,6 +13,7 @@ mod docker;
 mod firewall;
 mod ports;
 mod pubkey;
+mod syslog;
 
 use std::time::{Duration, Instant};
 
@@ -86,6 +87,25 @@ async fn run_docker(
     }
     let plain = exec_plain(manager, session_id, script, timeout).await?;
     if plain.out.output.contains(docker::DOCKER_PERMISSION_DENIED) {
+        exec_root(manager, session_id, script, None, timeout).await
+    } else {
+        Ok(plain)
+    }
+}
+
+/// 执行系统日志读取脚本：有密码直接提权；否则先普通执行，受保护日志读不了再用免密 sudo 重试。
+async fn run_syslog(
+    manager: &SessionManager,
+    session_id: &str,
+    script: &str,
+    password: Option<&str>,
+    timeout: Duration,
+) -> Result<ToolExec, String> {
+    if password.is_some() {
+        return exec_root(manager, session_id, script, password, timeout).await;
+    }
+    let plain = exec_plain(manager, session_id, script, timeout).await?;
+    if plain.out.output.contains(syslog::SYSLOG_PERMISSION_DENIED) {
         exec_root(manager, session_id, script, None, timeout).await
     } else {
         Ok(plain)
@@ -1464,4 +1484,143 @@ pub async fn toolbox_firewall_toggle(
         status,
         ssh_port_auto_opened: ssh_auto,
     })
+}
+
+/* =========================================================
+ *  系统日志
+ * ========================================================= */
+
+/// 探测远端可用的系统日志来源（按发行版差异组装；只读，无需提权）。
+#[tauri::command]
+pub async fn toolbox_syslog_sources(
+    session_id: String,
+    manager: State<'_, SessionManager>,
+) -> Result<syslog::SyslogInfo, String> {
+    let started = Instant::now();
+    let exec = exec_plain(
+        &manager,
+        &session_id,
+        &syslog::sources_script(),
+        LIST_TIMEOUT,
+    )
+    .await?;
+    let info = syslog::parse_sources(&exec.out.output).map_err(|e| {
+        applog::emit(
+            log::Level::Warn,
+            "toolbox",
+            ev::TOOLBOX_SYSLOG_SOURCES,
+            Some(&session_id),
+            "系统日志来源探测失败",
+            Some(serde_json::json!({
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+                "exit_code": exec.out.exit_code,
+                "timed_out": exec.out.timed_out,
+                "err": e,
+            })),
+        );
+        e
+    })?;
+    applog::emit(
+        log::Level::Info,
+        "toolbox",
+        ev::TOOLBOX_SYSLOG_SOURCES,
+        Some(&session_id),
+        "系统日志来源探测完成",
+        Some(serde_json::json!({
+            "os": info.os,
+            "distro": info.distro,
+            "count": info.sources.len(),
+            "journal": info.sources.iter().any(|s| s.kind == "journal"),
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+            "timed_out": exec.out.timed_out,
+        })),
+    );
+    Ok(info)
+}
+
+/// 读取某个来源的末尾 N 行（受保护日志按需提权）。
+/// `since`/`until` 仅 journald 源服务端生效，文件源/macOS 由前端按时间戳过滤。
+#[tauri::command]
+pub async fn toolbox_syslog_read(
+    session_id: String,
+    source: String,
+    tail: u32,
+    since: Option<String>,
+    until: Option<String>,
+    sudo_password: Option<String>,
+    manager: State<'_, SessionManager>,
+) -> Result<syslog::SyslogReadResult, String> {
+    let started = Instant::now();
+    let script = syslog::build_read_script(&source, tail, since.as_deref(), until.as_deref())?;
+    let exec = run_syslog(
+        &manager,
+        &session_id,
+        &script,
+        sudo_password.as_deref(),
+        LOGS_TIMEOUT,
+    )
+    .await?;
+    let result = syslog::parse_read(&exec.out).map_err(|e| {
+        applog::emit(
+            log::Level::Warn,
+            "toolbox",
+            ev::TOOLBOX_SYSLOG_READ,
+            Some(&session_id),
+            "系统日志读取失败",
+            Some(serde_json::json!({
+                "source": source,
+                "tail": tail,
+                "since": since,
+                "until": until,
+                "elevated": exec.elevated,
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+                "exit_code": exec.out.exit_code,
+                "timed_out": exec.out.timed_out,
+                "err": e,
+            })),
+        );
+        e
+    })?;
+    applog::emit(
+        log::Level::Info,
+        "toolbox",
+        ev::TOOLBOX_SYSLOG_READ,
+        Some(&session_id),
+        "系统日志读取完成",
+        Some(serde_json::json!({
+            "source": source,
+            "tail": tail,
+            "since": since,
+            "until": until,
+            "chars": result.output.chars().count(),
+            "truncated": result.truncated,
+            "elevated": exec.elevated,
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+        })),
+    );
+    Ok(result)
+}
+
+/// 把前端展示的系统日志写到本地文件（内容来自已读取的日志，不重新执行远端命令）。
+#[tauri::command]
+pub async fn toolbox_syslog_save(path: String, content: String) -> Result<String, String> {
+    if content.len() as u64 > MAX_LOG_SAVE_BYTES {
+        return Err("日志内容过大，无法保存".into());
+    }
+    let p = std::path::PathBuf::from(&path);
+    std::fs::write(&p, content.as_bytes()).map_err(|e| format!("保存日志失败：{e}"))?;
+    let abs = std::fs::canonicalize(&p).unwrap_or(p);
+    applog::emit(
+        log::Level::Info,
+        "toolbox",
+        ev::TOOLBOX_SYSLOG_READ,
+        None,
+        "系统日志已保存",
+        Some(serde_json::json!({
+            "op": "save",
+            "path": abs.display().to_string(),
+            "bytes": content.len(),
+        })),
+    );
+    Ok(abs.display().to_string())
 }

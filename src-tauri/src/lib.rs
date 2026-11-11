@@ -468,6 +468,9 @@ pub fn run() {
             toolbox::toolbox_docker_terminal_write,
             toolbox::toolbox_docker_terminal_resize,
             toolbox::toolbox_docker_terminal_close,
+            toolbox::toolbox_syslog_sources,
+            toolbox::toolbox_syslog_read,
+            toolbox::toolbox_syslog_save,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
