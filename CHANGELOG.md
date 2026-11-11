@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 [中文](./CHANGELOG.zh-CN.md) · **English**
 
+## [2.6.0] - 2026-11-11
+
+### Added
+
+- A new "Logs" tab in the toolbox: automatically detects the log source for the distribution (journald first, then `/var/log` text files, and the unified log on macOS) and reads the last N lines
+  - Filter by keyword, level and time range, sort by time ascending or descending, and follow in real time
+  - The time range is entered as plain text `YYYY-MM-DD HH:MM[:SS]`; journald trims server-side via `--since/--until`, while file sources and macOS filter by line-leading timestamps within the loaded window
+  - Copy the currently visible content or download it as a local file; the log path (restricted to `/var/log/`), line count and time format are all validated by the backend
+- The SFTP file list gains a grid view: a title-bar button toggles between list and grid and remembers the choice. The grid shows large icons above centered names as tiles that wrap to the pane width; sorting, multi-select, double-click, context menu and inline renaming behave exactly as in the list view
+
+### Fixed
+
+- Switching directories in the SFTP panel no longer echoes the injected `cd` into the terminal: the old prompt is erased in place and the new one lands on the same line, while commands typed manually still echo normally
+
 ## [2.5.1] - 2026-11-10
 
 ### Changed
