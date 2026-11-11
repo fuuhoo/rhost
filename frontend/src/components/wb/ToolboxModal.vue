@@ -11,6 +11,7 @@ import { toast } from '../../composables/useToast'
 import { copyText, keys } from '../../stores/keys'
 import type { SshKey } from '../../types'
 import DockerTerminal, { type DockerTermChannel } from './DockerTerminal.vue'
+import SyslogPanel from './SyslogPanel.vue'
 
 interface PortRow {
   port: number
@@ -96,7 +97,7 @@ interface DockerConfig {
   dataRoot: string | null
 }
 
-type Tab = 'firewall' | 'ports' | 'pubkey' | 'docker'
+type Tab = 'firewall' | 'ports' | 'pubkey' | 'docker' | 'syslog'
 type DockerView = 'containers' | 'images' | 'config'
 
 const SUDO_REQUIRED = 'SUDO_PASSWORD_REQUIRED'
@@ -1306,7 +1307,7 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
           </div>
           <div class="modal-title">
             <h2 id="tbxTitle">工具箱</h2>
-            <p>{{ sessionLabel }} · Docker、防火墙、端口与公钥</p>
+            <p>{{ sessionLabel }} · Docker、防火墙、端口、公钥与系统日志</p>
           </div>
           <button class="modal-close" title="关闭 (Esc)" @click="close">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
@@ -1330,6 +1331,9 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
           <button class="tbx-tab" :class="{ active: tab === 'pubkey' }" @click="switchTab('pubkey')">
             公钥
           </button>
+          <button class="tbx-tab" :class="{ active: tab === 'syslog' }" @click="switchTab('syslog')">
+            日志
+          </button>
         </div>
 
         <div class="tbx-body">
@@ -1339,6 +1343,13 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
             <span>{{ error }}</span>
             <button class="tbx-link" @click="retryCurrent">{{ tab === 'pubkey' ? '重试写入' : '重试' }}</button>
           </div>
+
+          <!-- 系统日志（自持来源探测 / 筛选 / 跟随 / 错误处理） -->
+          <SyslogPanel
+            v-if="sessionReady && tab === 'syslog'"
+            :session-id="backendId ?? ''"
+            :run-elevated="runElevated"
+          />
 
           <!-- 防火墙 -->
           <template v-if="sessionReady && tab === 'firewall'">

@@ -83,10 +83,10 @@ function onSettings() {
       <svg viewBox="0 0 24 24"><path d="M4 7a2 2 0 012-2h3l2 2h7a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2V7z"/></svg>
     </button>
 
-    <!-- 工具箱：防火墙 / 端口 / 公钥 / Docker -->
+    <!-- 工具箱：防火墙 / 端口 / 公钥 / Docker / 系统日志 -->
     <button
       class="tb-btn" :disabled="!activeSession"
-      :title="activeSession ? '工具箱：防火墙 / 端口 / 公钥 / Docker' : '连接主机后可用'"
+      :title="activeSession ? '工具箱：防火墙 / 端口 / 公钥 / Docker / 系统日志' : '连接主机后可用'"
       @click="onToolbox"
     >
       <svg viewBox="0 0 24 24">
