@@ -13,6 +13,7 @@ import HostKeyModal from './components/HostKeyModal.vue'
 import ConfirmModal from './components/ConfirmModal.vue'
 import AppToast from './components/AppToast.vue'
 import { installGlobalShortcuts } from './lib/shortcuts'
+import { installPageCopy } from './lib/pageCopy'
 import { startExternalLinks } from './lib/externalLinks'
 import { appView, restoreSessions, rightPanelMaximized, rightPanelVisible } from './stores/session'
 import { loadHosts, showNewConn } from './stores/hosts'
@@ -69,10 +70,15 @@ function clampSplashMs(v: unknown): number {
 
 // 设置驱动的全局快捷键（设置 → 快捷键）在 App 层唯一注册，避免与组件内监听重复派发
 let uninstallShortcuts: (() => void) | undefined
+let uninstallPageCopy: (() => void) | undefined
 onMounted(() => {
   uninstallShortcuts = installGlobalShortcuts()
+  uninstallPageCopy = installPageCopy()
 })
-onBeforeUnmount(() => uninstallShortcuts?.())
+onBeforeUnmount(() => {
+  uninstallShortcuts?.()
+  uninstallPageCopy?.()
+})
 
 // 启动流程：先注册全局错误上报；然后从后端拉取全节配置快照（localStorage 已下线，
 // app_config.json 为唯一真相源）并 hydrate 各 store → 下发日志配置（热生效项立即一致；
