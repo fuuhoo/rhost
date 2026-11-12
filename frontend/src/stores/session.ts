@@ -1,12 +1,12 @@
 import { computed, reactive, ref, shallowRef, triggerRef, watch } from 'vue'
 import { Channel, invoke } from '@tauri-apps/api/core'
 import type { Host } from '../types'
-import { hosts } from './hosts'
+import { hosts, setHostOs } from './hosts'
 import { savedSettings, termPalette } from './settings'
 import { hexToSgr, type TermPalette } from '../lib/termThemes'
 import { clearSessionTunnels, handleTunnelFrame, restoreOnReconnect, startSavedOnConnect, tunnelSnapshots } from './tunnels'
 import { isTauri } from '../lib/tauri'
-import { getSnapshot, onConfigLoad, patchUiState } from './appConfig'
+import { onConfigLoad, patchUiState } from './appConfig'
 import { promptPassword } from '../composables/usePasswordPrompt'
 import { confirmHostKey, parseHostKeyError } from '../composables/useHostKeyPrompt'
 import { toast } from '../composables/useToast'
@@ -522,6 +522,11 @@ function handleFrame(id: string, frame: Uint8Array) {
     try {
       const info = JSON.parse(textDecoder.decode(payload)) as HostInfoData
       hostInfoMap.set(id, info)
+      // 探测到的 PRETTY_NAME 比新建主机时的占位串准确，回写主机列表
+      // （外部连接不落盘；N/A 表示远端无 /etc/os-release，保留占位）
+      const s = sessions.value.find(x => x.id === id)
+      const distro = info.distro?.trim()
+      if (s && !s.host.external && distro && distro !== 'N/A') setHostOs(s.host.id, distro)
     } catch {
       // 单帧解析失败不影响终端主流程
     }
@@ -1157,68 +1162,10 @@ export async function reconnectBackend(id: string) {
 
 /* ---- 会话管理 ---- */
 
-/* ---- 会话持久化（冷/热启动分离）：SessionEntry[] 存 ui_state.sessions，恢复时用持久化 sessionId ---- */
-
-function persistSessions() {
-  if (!isTauri) return
-  patchUiState({
-    // 外部连接会话不落盘：重启后 restoreSessions 无从恢复（连密码也没有）
-  sessions: sessions.value
-    // 外部连接会话不落盘：重启后 restoreSessions 无从恢复（连密码也没有）；
-    // 空白标签（新建窗口）不落盘：占位主机无从恢复，也无需恢复
-    .filter(s => !isExternalSession(s) && !isBlankSession(s))
-      .map(s => ({
-        sessionId: s.id,
-        hostId: s.host.id,
-        alias: s.alias,
-      })),
-  })
-}
-
-/** 启动时恢复上次未关闭的会话；有则直接进入工作台并自动重连（热启动）。
- *  持久化格式为 SessionEntry[] = [{ sessionId, hostId, alias }]；
- *  旧 string[] 格式读取失败直接清空（不迁移，会话为临时状态）。
- *  不再按 hostId 去重——同一主机的多个会话逐条恢复。 */
-export function restoreSessions() {
-  const raw = getSnapshot()?.uiState.sessions
-  interface StoredEntry { sessionId: string; hostId: string; alias: string }
-  const entries: StoredEntry[] = []
-  if (Array.isArray(raw)) {
-    for (const x of raw) {
-      if (x && typeof x === 'object' && 'sessionId' in x && 'hostId' in x) {
-        const o = x as Record<string, unknown>
-        entries.push({
-          sessionId: typeof o.sessionId === 'string' ? o.sessionId : '',
-          hostId: typeof o.hostId === 'string' ? o.hostId : '',
-          alias: typeof o.alias === 'string' ? o.alias : '',
-        })
-      }
-    }
-  }
-  const valid = entries.filter(e => e.sessionId && e.hostId && hosts.value.some(h => h.id === e.hostId))
-  if (!valid.length) return
-  // 懒连接：仅活跃会话（最后打开的）立即建连，其余恢复为 idle（灰点"空闲"），切 tab 时再连
-  const restored: Session[] = valid.map((e, i) => ({
-    id: e.sessionId,
-    host: hosts.value.find(h => h.id === e.hostId)!,
-    state: (i === valid.length - 1 ? 'connecting' : 'idle') as SessionState,
-    startedAt: Date.now(),
-    disconnectReason: '',
-    retryAt: null,
-    resetSeq: 0,
-    alias: e.alias,
-  }))
-  const activeId = restored[restored.length - 1]!.id
-  sessions.value = restored
-  activeSessionId.value = activeId
-  appView.value = 'workbench'
-}
-
 /* ---- 新建终端窗口（FinalShell Ctrl+Shift+T 语义的空白标签） ----
  * 空白标签 = 一条尚未选择主机的会话：占位 host 仅为满足 Session 结构，
  * 永不发起连接；用户双击主机列表时由 openSession 把激活中的空白标签
- * 原地「转正」为真实主机连接（复用同 id，已挂载的 xterm 实例与画面原样保留）。
- * 空白标签不落盘（persistSessions 过滤），重启后无从恢复也无需恢复。 */
+ * 原地「转正」为真实主机连接（复用同 id，已挂载的 xterm 实例与画面原样保留）。 */
 
 /** 空白标签占位主机：仅满足 Session.host 类型；id 同时是标签标题 */
 const BLANK_HOST: Host = {
@@ -1289,38 +1236,32 @@ export function openSession(hostId: string) {
     blank.disconnectReason = ''
     const size = termSizes.get(blank.id) ?? termSizeMap.get(blank.id) ?? { cols: 120, rows: 32 }
     void connectBackend(blank, size.cols, size.rows)
-    persistSessions()
     return
   }
-  // 同一主机复用已打开的会话，不重复建连
-  const existing = sessions.value.find(s => s.host.id === hostId)
-  if (existing) {
-    activeSessionId.value = existing.id
-    return
-  }
+  // 同一主机支持多开：每次点击都新建独立标签（连接/终端缓冲/指标缓存均按会话 id 隔离）
   const id = crypto.randomUUID()
   sessions.value.push({
     id, host, state: 'connecting', startedAt: Date.now(),
     disconnectReason: '', retryAt: null, resetSeq: 0, alias: '',
   })
   activeSessionId.value = id
-  persistSessions()
 }
 
-/** 主机被编辑（可能改名/替换对象）后，同步更新已打开会话的主机引用 */
+/** 主机被编辑（可能改名/替换对象）后，同步更新该主机全部已打开会话的引用 */
 export function rehostSession(oldHostId: string, host: Host) {
-  const s = sessions.value.find(x => x.host.id === oldHostId)
-  if (!s) return
-  s.host = host
-  persistSessions()
+  for (const s of sessions.value) {
+    if (s.host.id === oldHostId) {
+      s.host = host
+    }
+  }
 }
 
 /* ============================================================
  * 堡垒机外部连接（ssh:// / sftp:// 链接拉起的不保存会话）
  *
  * 与常规会话的三点不同，全部由 host.external 单一标记驱动：
- * 1. 主机不进 hosts store，因此不落盘、不出现在主机列表，也不会被
- *    persistSessions 写进 ui_state（重启不恢复）；
+ * 1. 主机不进 hosts store，因此不落盘、不出现在主机列表，
+ *    重启后也不会恢复；
  * 2. 密码只存在于内存（host.password），既不读也不写系统钥匙串；
  * 3. 后端只开一条通道（single_channel），MOTD / 初始化脚本 / 指标 /
  *    端口转发等一切需要额外 exec 子通道的能力在前后端两侧同时关闭。
@@ -1427,10 +1368,16 @@ export function closeSession(id: string) {
     // 关闭最后一个 Tab 留在工作台空态，不回首页
     activeSessionId.value = rest.length ? rest[rest.length - 1]!.id : null
   }
-  persistSessions()
 }
 
 /* ---- 批量关闭（全部复用 closeSession，禁止另写清理路径） ---- */
+
+/** 关闭某主机的全部会话（同一主机可多开，删除主机时逐条关闭）；返回关闭数量 */
+export function closeHostSessions(hostId: string): number {
+  const ids = sessions.value.filter(s => s.host.id === hostId).map(s => s.id)
+  ids.forEach(closeSession)
+  return ids.length
+}
 
 /** 关闭除 id 外的全部会话；完成后激活 id */
 export function closeOtherSessions(id: string) {
@@ -1471,7 +1418,6 @@ export function setSessionAlias(sessionId: string, alias: string) {
   const item = sessions.value.find(s => s.id === sessionId)
   if (!item) return
   item.alias = alias
-  persistSessions()
 }
 
 /* ---- 复制会话 ---- */
@@ -1513,7 +1459,6 @@ export async function duplicateSession(sourceSessionId: string): Promise<string 
     })
     activeSessionId.value = newId
     appView.value = 'workbench'
-    persistSessions()
     return newId
   } finally {
     clearTimeout(timer)

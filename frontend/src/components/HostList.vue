@@ -2,7 +2,7 @@
 import { onUnmounted, ref } from 'vue'
 import { toast } from '../composables/useToast'
 import { filtered, openEdit, removeHost, viewStyle } from '../stores/hosts'
-import { closeSession, openSession } from '../stores/session'
+import { closeHostSessions, openSession } from '../stores/session'
 import { COLOR_MAP } from '../data/mockHosts'
 import type { Host } from '../types'
 
@@ -37,8 +37,8 @@ function onDeleteClick(e: MouseEvent, h: Host) {
   e.stopPropagation()
   if (confirmingId.value === h.id) {
     clearConfirm()
-    void removeHost(h.id) // 若工作台中已打开该会话，一并关闭
-    closeSession(h.id)
+    void removeHost(h.id) // 若工作台中已打开该主机的会话（可能多开），一并关闭
+    closeHostSessions(h.id)
     toast(`已删除连接「${h.id}」`, 'ok', 2200)
     return
   }

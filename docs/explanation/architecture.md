@@ -132,8 +132,9 @@ rhost/
 
 | 模块 | 内容 |
 |---|---|
-| `stores/session.ts`（最大，~840 行） | 会话列表/活动会话、布局状态持久化、**二进制帧解析与分发**、建连/重连/断开、终端 sink 注册补发、resize 节流、指标/心跳 |
+| `stores/session.ts`（最大，~840 行） | 会话列表/活动会话、布局状态持久化（会话本身不落盘，重启不恢复标签）、**二进制帧解析与分发**、建连/重连/断开、终端 sink 注册补发、resize 节流、指标/心跳 |
 | `stores/hosts.ts` | 主机列表、筛选、与后端 `StoredHost` 的双向转换、增删改 |
+| `stores/hostDisplay.ts` | 主机页分组 / 平铺视角开关（持久化于 `ui_state.groupedView`） |
 | `stores/settings.ts` | `AppSettings` 接口 + 默认值 + localStorage 持久化 + 强调色应用 |
 | `stores/groups.ts` / `stores/keys.ts` | 分组、密钥管理 |
 | `lib/externalLinks.ts` | 堡垒机外部连接入口：监听 `external-open` → `take_external_links` 领取链接 → `openExternalSession`（`stores/session.ts`）开不保存会话；解析失败的原因以 toast 呈现 |

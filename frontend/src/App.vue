@@ -15,7 +15,7 @@ import AppToast from './components/AppToast.vue'
 import { installGlobalShortcuts } from './lib/shortcuts'
 import { installPageCopy } from './lib/pageCopy'
 import { startExternalLinks } from './lib/externalLinks'
-import { appView, restoreSessions, rightPanelMaximized, rightPanelVisible } from './stores/session'
+import { appView, rightPanelMaximized, rightPanelVisible } from './stores/session'
 import { loadHosts, showNewConn } from './stores/hosts'
 import { savedSettings, showSettings } from './stores/settings'
 import { showGroupModal } from './stores/groups'
@@ -82,7 +82,8 @@ onBeforeUnmount(() => {
 
 // 启动流程：先注册全局错误上报；然后从后端拉取全节配置快照（localStorage 已下线，
 // app_config.json 为唯一真相源）并 hydrate 各 store → 下发日志配置（热生效项立即一致；
-// logStoragePath 下次重启生效）→ 加载主机配置 → 恢复上次未关闭的会话（热启动）。
+// logStoragePath 下次重启生效）→ 加载主机配置。会话不持久化：每次启动都从主机列表开始，
+// 不恢复上次打开的标签。
 // 交接时机：最短展示与启动任务二者取晚完成后撤掉 splash（docs/splash-design.md §5）；
 // 其余启动任务挂起不阻塞交接，3s 后强制放行（业务容错自理，见 §6）——
 // 该兜底只截断任务等待，不截断用户配置的最短展示时长
@@ -98,9 +99,6 @@ onMounted(async () => {
   const restBoot = (async () => {
     syncLogConfig()
     await loadHosts()
-    restoreSessions()
-    // 堡垒机外部连接（ssh:// / sftp://）入口：必须在 restoreSessions 之后——
-    // 恢复会话是整体赋值，先打开外部标签会被它抹掉
     void startExternalLinks()
   })()
   await Promise.all([

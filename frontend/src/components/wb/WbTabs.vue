@@ -340,7 +340,7 @@ onMounted(() => {
     window.addEventListener('resize', update)
   }
   update()
-  // 初始定位（如 restoreSessions 已恢复标签）用瞬时滚动，不在启动时放动画
+  // 初始定位（如已有恢复或新开的标签）用瞬时滚动，不在启动时放动画
   ensureVisible(activeSessionId.value, 'auto')
 })
 
