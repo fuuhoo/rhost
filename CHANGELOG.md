@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 [中文](./CHANGELOG.zh-CN.md) · **English**
 
+## [2.7.0] - 2026-11-12
+
+### Added
+
+- The hosts page and the groups page are merged: a "Groups" button in the top-right toggles between flat and grouped views, sharing the same hosts, groups and search box
+  - In the grouped view, expanding a group lists its hosts (name, user@address, online state) and clicking a host connects directly; groups matching the search expand automatically and show only matching hosts
+  - The flat view gains a group dropdown that narrows results together with the keyword search; hovering "→" on a group row jumps straight to that group
+  - The old "Groups" navigation entry is gone, and a previous navigation state is migrated to the hosts page
+- A host can now be opened multiple times: each click creates an independent tab, with terminal buffers and metrics caches isolated per session
+- The distribution name detected from MOTD is written back to the host record, replacing the placeholder set at creation time
+- Double-clicking a file in SFTP opens it in the editor by default (same for local and remote panes; double-clicking a directory still enters it); the context menu "Edit" and `⌘↵` do the same, and multi-selection opens in batch
+
+### Fixed
+
+- The monitor panel CPU usage occasionally dropped to zero: a restarted collector now reuses the last valid value instead of reporting 0% with no previous sample
+- The always-on status pulse ring now animates on the compositor, cutting idle CPU from about 30% to about 7%
+- Text selected outside the terminal can be copied normally (page-level `⌘C`), while selections inside the terminal still use xterm's own copy
+- WebKit's built-in auto-fill / show-password icons no longer overlap the app's own eye button in password fields; the system decorations are hidden
+
+### Changed
+
+- Sessions are no longer restored across restarts: every launch starts from the host list
+
 ## [2.6.0] - 2026-11-11
 
 ### Added
