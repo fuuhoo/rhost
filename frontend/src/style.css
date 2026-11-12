@@ -1015,6 +1015,16 @@ html:not([data-platform="macos"]) *{
 /* 密码可见切换 */
 .pw-wrap{position:relative}
 .pw-wrap input{padding-right:38px}
+/* 屏蔽 WebKit/macOS 自带的密码字段装饰按钮（自动填充/显示密码）：
+   系统图标与应用自己的眼睛按钮叠在输入框同一位置，会显示成「双眼睛」 */
+.pw-wrap input::-webkit-credentials-auto-fill-button,
+.pw-wrap input::-webkit-strong-password-auto-fill-button,
+.pw-wrap input::-webkit-textfield-decoration-container,
+.pw-wrap input::-webkit-caps-lock-indicator{
+    display:none !important;
+    visibility:hidden !important;
+    pointer-events:none !important;
+}
 .pw-toggle{
     position:absolute;right:5px;top:50%;transform:translateY(-50%);
     width:26px;height:24px;border-radius:5px;
