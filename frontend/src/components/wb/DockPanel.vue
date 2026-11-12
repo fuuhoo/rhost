@@ -1572,6 +1572,33 @@ async function openInEditor(entries: FsEntry[]) {
   if (failed.length) toast(`打开失败：${failed[0]}`, 'warn', 3200)
 }
 
+/** 本机文件直接交给编辑器：就是本地路径，无需临时副本，也不存在回写跟踪 */
+async function openLocalInEditor(entries: FsEntry[]) {
+  const files = entries.filter(e => e.type !== 'dir')
+  if (!files.length) return
+  if (!isTauri) { toast('浏览器模式下无法调用本机编辑器', 'warn'); return }
+  const paths = files.map(f => joinPath(localPath.value, f.name))
+  try {
+    const editor = await invoke<string>('open_in_editor', {
+      paths,
+      command: String(savedSettings.sftpEditorCommand ?? '').trim() || null,
+    })
+    for (const p of paths) {
+      reportLog('info', SFTP_EDIT_OPEN, '编辑器打开本机文件', { side: 'local', path: p, editor })
+    }
+    toast(`已在 ${editor} 打开 ${paths.length} 个文件`, 'ok', 2200)
+  } catch (e) {
+    toast(`拉起编辑器失败：${e}`, 'err', 3200)
+  }
+}
+
+/** 双击/菜单/⌘↵ 的统一入口：本机文件直接编辑，远端文件先取副本再跟踪回写 */
+function openEntriesInEditor(side: Side, entries: FsEntry[]) {
+  if (!entries.length) return
+  if (side === 'local') void openLocalInEditor(entries)
+  else void openInEditor(entries)
+}
+
 /** 一轮轮询：只问本地状态（一次 IPC 覆盖全部副本），变了的那份进入回写裁决。 */
 async function pollEditWatches() {
   if (!editWatches.value.length) { stopEditPollIfIdle(); return }
@@ -1965,11 +1992,9 @@ function buildMenu(side: Side, targets: FsEntry[]): MenuItem[] {
   const items: MenuItem[] = []
 
   if (single) {
-    items.push({
-      label: single.type === 'dir' ? '进入目录' : '打开',
-      icon: single.type === 'dir' ? ICON.enter : ICON.file,
-      action: () => onRowDblClick(side, single),
-    })
+    items.push(single.type === 'dir'
+      ? { label: '进入目录', icon: ICON.enter, action: () => onRowDblClick(side, single) }
+      : { label: '编辑', icon: ICON.edit, shortcut: '⌘↵', action: () => openEntriesInEditor(side, [single]) })
     items.push({ divider: true })
   }
 
@@ -1987,12 +2012,12 @@ function buildMenu(side: Side, targets: FsEntry[]): MenuItem[] {
     items.push({ divider: true })
   }
 
-  if (side === 'remote' && onlyFiles) {
+  if (onlyFiles && targets.length > 1) {
     items.push({
-      label: targets.length > 1 ? `用编辑器打开 ${targets.length} 个文件` : '用编辑器打开',
+      label: `用编辑器打开 ${targets.length} 个文件`,
       icon: ICON.edit, shortcut: '⌘↵',
-      disabled: !connected.value,
-      action: () => void openInEditor(targets),
+      disabled: side === 'remote' && !connected.value,
+      action: () => openEntriesInEditor(side, targets),
     })
     items.push({ divider: true })
   }
@@ -2028,7 +2053,7 @@ function buildMenu(side: Side, targets: FsEntry[]): MenuItem[] {
   return items
 }
 
-/* 行交互：单击选择（Ctrl/⌘ 多选）、双击目录进入、双击文件传输 */
+/* 行交互：单击选择（Ctrl/⌘ 多选）、双击目录进入、双击文件用编辑器打开 */
 function onRowClick(side: Side, entry: FsEntry, e: MouseEvent) {
   lastSide.value = side
   const sel = side === 'local' ? localSelected : remoteSelected
@@ -2061,8 +2086,7 @@ function onRowDblClick(side: Side, entry: FsEntry) {
     }
   } else {
     sel.value = new Set([entry.name])
-    if (side === 'local') onUpload()
-    else onDownload()
+    openEntriesInEditor(side, [entry])
   }
 }
 
@@ -2627,9 +2651,9 @@ function onSftpShortcut(e: KeyboardEvent) {
     const t = selectedEntries(side)
     if (t.length) void deleteTargets(side, t)
   } else if (meta && key === 'enter') {
-    // ⌘↵ 对应右键菜单的「用编辑器打开」（远端文件，支持多选批量）
+    // ⌘↵ 对应右键菜单的「编辑」（本机/远端文件，支持多选批量）
     const t = selectedEntries(side)
-    if (t.length) void openInEditor(t)
+    if (t.length) openEntriesInEditor(side, t)
   } else if (e.key === 'Enter') {
     const t = selectedEntries(side)
     if (t.length === 1) onRowDblClick(side, t[0]!)

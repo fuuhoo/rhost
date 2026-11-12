@@ -210,9 +210,9 @@ export interface AppSettings {
    *  双栏分隔线随之隐藏，上传改用拖拽或远端栏的下载目录选择；前端消费：
    *  DockPanel showLocalPane，重新打开即恢复原布局） */
   sftpShowLocalPane: boolean
-  /** 外部编辑器命令（右键「用编辑器打开」/ 双击远端文件用）。留空按 code → codium →
+  /** 外部编辑器命令（双击文件 / 右键「编辑」用，本机与远端一致）。留空按 code → codium →
    *  cursor → 系统默认 顺序自动探测；填写则按空白拆分并支持引号转义，
-   *  文件路径始终作为独立参数传给 execve，不经 shell 展开（前端消费：DockPanel openInEditor，
+   *  文件路径始终作为独立参数传给 execve，不经 shell 展开（前端消费：DockPanel openInEditor / openLocalInEditor，
    *  实际执行见 localfs.rs open_with_editor；设置面板的候选清单来自 localfs.rs list_text_editors，
    *  选中或按路径选择都只是往本字段写一条合法命令） */
   sftpEditorCommand: string
