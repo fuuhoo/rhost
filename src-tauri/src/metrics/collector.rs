@@ -20,9 +20,9 @@ use tokio_util::sync::CancellationToken;
 use crate::applog;
 use crate::applog::events as ev;
 use crate::metrics::{
-    CpuMetricsPayload, CpuTimes, DISK_INTERVAL_ROUNDS, DiskMetrics, DockerScanScope,
+    CpuMetricsPayload, CpuSampleState, DISK_INTERVAL_ROUNDS, DiskMetrics, DockerScanScope,
     GpuItemPayload, MemMetrics, MetricsPayload, NetCounters, NetMetricsPayload, ProcsPayload,
-    RawMetrics, build_procs_payload, byte_rate, container_name_for, cpu_util, metrics_script,
+    RawMetrics, advance_cpu, build_procs_payload, byte_rate, container_name_for, metrics_script,
     parse_metrics_output,
 };
 use crate::ssh::frame::{FrameType, encode_frame};
@@ -152,10 +152,11 @@ async fn run(
         _ = sleep(Duration::from_millis(jitter_ms)) => {}
     }
 
-    let mut prev_cpu: Option<CpuTimes> = None;
+    // CPU 快照跨任务保存在会话上：切换会话/暂停后 collector 重启，首帧仍能算出
+    // 真实差值（间隔短）或沿用上次值（暂停久），不会凭空归零
+    let mut cpu_state: CpuSampleState = session.metrics_cpu_state();
     // 各段最近一次有效值：本轮该段缺失/为空时沿用上一次，界面不回落到 0/占位。
     // 采集失败轮根本不发帧（前端保留上一帧），这里覆盖的是「执行成功但某段空缺」的半坏帧。
-    let mut cpu_util_cache: f32 = 0.0;
     let mut load_cache: Option<[f32; 3]> = None;
     let mut mem_cache = MemMetrics::default();
     let mut net_cache = NetMetricsPayload {
@@ -280,15 +281,18 @@ async fn run(
                 // exec 成功即解除退避（即使部分 marker 段缺失也算通道健康）
                 consecutive_failures = 0;
                 ever_succeeded = true;
-                // CPU 利用率需相邻两次快照差值；首帧（或本轮缺 stat）沿用上一次值
-                let util = match (prev_cpu, raw.cpu) {
-                    (Some(p), Some(c)) => cpu_util(p, c),
-                    _ => cpu_util_cache,
+                // CPU 利用率需相邻两次快照差值；无前置快照或本轮缺 stat 时沿用上次值。
+                // 旧快照在 max_gap 内才做差值：重启后快速恢复仍得到真实值，
+                // 暂停过久则保留上次值，不把暂停期平均进来、也不推 0%
+                let util = match raw.cpu {
+                    Some(cur) => {
+                        let max_gap = interval * 2 + Duration::from_secs(2);
+                        let util = advance_cpu(&mut cpu_state, cur, sampled_at, max_gap);
+                        session.set_metrics_cpu_state(cpu_state);
+                        util
+                    }
+                    None => cpu_state.util,
                 };
-                if raw.cpu.is_some() {
-                    prev_cpu = raw.cpu;
-                    cpu_util_cache = util;
-                }
                 // 负载：loadavg 缺失时沿用上一次，避免界面周期性跳 N/A
                 let load = raw.load.or(load_cache);
                 if raw.load.is_some() {

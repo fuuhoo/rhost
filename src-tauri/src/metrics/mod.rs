@@ -452,6 +452,46 @@ pub(crate) fn cpu_util(prev: CpuTimes, cur: CpuTimes) -> f32 {
     ((busy as f32 / dt as f32) * 100.0).clamp(0.0, 100.0)
 }
 
+/// 跨采集任务保留的 CPU 采样状态。collector 会因切换会话、面板隐藏等停止并在
+/// 返回时重启；若上一快照随任务丢掉，重启后的首帧没有差值可算，只能推 0%，
+/// 界面就出现「CPU 忽然归零」。把快照与上次利用率存在会话上，重启首帧仍可
+/// 给出真实值（间隔很短）或沿用上次值（暂停过久）。
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct CpuSampleState {
+    /// 上一次 /proc/stat 快照
+    pub prev: Option<CpuTimes>,
+    /// 最近一次算出的利用率；无可用差值时沿用它，不报 0
+    pub util: f32,
+    /// prev 的采样时刻
+    pub at: Option<Instant>,
+}
+
+/// 用本轮快照推进 CPU 状态并返回利用率。
+/// 距上一快照在 `max_gap` 内才做差值，暂停过久则沿用上次值，
+/// 避免把整段暂停时间平均进来（或直接报 0）。纯函数便于单测。
+pub(crate) fn advance_cpu(
+    state: &mut CpuSampleState,
+    cur: CpuTimes,
+    now: Instant,
+    max_gap: Duration,
+) -> f32 {
+    let util = match (state.prev, state.at) {
+        // 快照倒退（远端重启）或同值也不算差值，沿用上次值而不是报 0
+        (Some(prev), Some(at))
+            if now.saturating_duration_since(at) <= max_gap && cur.total > prev.total =>
+        {
+            cpu_util(prev, cur)
+        }
+        _ => state.util,
+    };
+    *state = CpuSampleState {
+        prev: Some(cur),
+        util,
+        at: Some(now),
+    };
+    util
+}
+
 /// 解析 `/proc/loadavg` 首行：`0.42 0.38 0.31 2/321 12345`，取前 3 列
 /// （1/5/15 分钟平均运行队列长度，非百分比）。缺列/非法返回 None。
 pub(crate) fn parse_loadavg(line: &str) -> Option<[f32; 3]> {
@@ -1399,6 +1439,52 @@ mod metrics_dynamic_tests {
             idle: 0,
         };
         assert_eq!(cpu_util(p, c), 100.0);
+    }
+
+    #[test]
+    fn advance_cpu_keeps_last_value_across_restarts() {
+        let mut st = CpuSampleState::default();
+        let t0 = Instant::now();
+        let max_gap = Duration::from_secs(6);
+        let s1 = CpuTimes {
+            total: 1000,
+            idle: 800,
+        };
+        let s2 = CpuTimes {
+            total: 1100,
+            idle: 820,
+        };
+        // 无前置快照（首次连接）：沿用初始 0，并记录本轮快照
+        assert_eq!(advance_cpu(&mut st, s1, t0, max_gap), 0.0);
+        assert_eq!(st.prev, Some(s1));
+        // 短间隔重启后首帧：差值有效，得到真实 80%，而不是 0%
+        let util = advance_cpu(&mut st, s2, t0 + Duration::from_secs(2), max_gap);
+        assert!((util - 80.0).abs() < 1e-6);
+        // 暂停超过窗口：沿用上次 80%，不把暂停期平均进来
+        let s3 = CpuTimes {
+            total: 2000,
+            idle: 1200,
+        };
+        assert_eq!(
+            advance_cpu(&mut st, s3, t0 + Duration::from_secs(120), max_gap),
+            80.0
+        );
+        // 已用新快照续上：下一轮恢复实时差值
+        let s4 = CpuTimes {
+            total: 2100,
+            idle: 1250,
+        };
+        let util = advance_cpu(&mut st, s4, t0 + Duration::from_secs(122), max_gap);
+        assert!((util - 50.0).abs() < 1e-6);
+        // 节拍倒退/同值（远端重启）：沿用上次值，不把 0 推给界面
+        let reset = CpuTimes {
+            total: 100,
+            idle: 80,
+        };
+        assert_eq!(
+            advance_cpu(&mut st, reset, t0 + Duration::from_secs(124), max_gap),
+            50.0
+        );
     }
 
     #[test]

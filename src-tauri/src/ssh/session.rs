@@ -886,6 +886,9 @@ pub struct SshSession {
     /// 动态指标采集任务句柄（启动后存在）。同步锁仅做瞬时取放，
     /// 不在持锁期间 await；stop 只取消令牌，任务异步退出
     metrics: StdMutex<Option<crate::metrics::collector::CollectorHandle>>,
+    /// CPU 快照与上次利用率：跨采集任务保留，切换会话/暂停后重启 collector
+    /// 首帧仍能算出真实差值，不会因「没有上一次」而显示 0%
+    metrics_cpu: StdMutex<crate::metrics::CpuSampleState>,
     /// SFTP 子系统长驻会话（懒加载；远端文件面板列目录使用）
     pub(super) sftp: SftpState,
     /// Shell 当前工作目录：由 merge_task 解析 PTY 中的 OSC 6667 序列更新，
@@ -1531,6 +1534,7 @@ impl SshSession {
                 handle,
                 frame_tx: metrics_frame_tx,
                 metrics: StdMutex::new(None),
+                metrics_cpu: StdMutex::new(crate::metrics::CpuSampleState::default()),
                 sftp,
                 cwd,
                 cd_strip,
@@ -1859,6 +1863,16 @@ impl SshSession {
         {
             handle.heartbeat();
         }
+    }
+
+    /// 读取跨采集任务的 CPU 快照状态（collector 启动时恢复）
+    pub(crate) fn metrics_cpu_state(&self) -> crate::metrics::CpuSampleState {
+        *self.metrics_cpu.lock().unwrap()
+    }
+
+    /// 写回 CPU 快照状态（每轮采集成功后调用）
+    pub(crate) fn set_metrics_cpu_state(&self, state: crate::metrics::CpuSampleState) {
+        *self.metrics_cpu.lock().unwrap() = state;
     }
 
     /// 关闭会话：取消所有后台任务，释放 russh 连接。
