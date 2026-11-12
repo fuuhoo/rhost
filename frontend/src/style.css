@@ -2478,13 +2478,19 @@ html[data-theme="light"] .grid-link-arrow{stroke:var(--blue)}
 .queue-led{
     width:6px;height:6px;border-radius:50%;flex-shrink:0;
     background:var(--green);
+    position:relative;
+}
+/* 光圈走伪元素的 transform/opacity，避免每帧重绘 box-shadow（同监控面板状态灯） */
+.queue-led::after{
+    content:'';position:absolute;inset:0;border-radius:50%;
+    background:inherit;
     animation:queue-pulse 2s ease-out infinite;
 }
 .queue-led.idle{background:var(--rhost-status-idle);animation:none}
+.queue-led.idle::after{display:none}
 @keyframes queue-pulse{
-    0%{box-shadow:0 0 0 0 rgba(var(--accent-rgb),.5)}
-    70%{box-shadow:0 0 0 5px rgba(var(--accent-rgb),0)}
-    100%{box-shadow:0 0 0 0 rgba(var(--accent-rgb),0)}
+    0%{transform:scale(1);opacity:.5}
+    70%,100%{transform:scale(2);opacity:0}
 }
 .queue-title{color:var(--muted);font-weight:600;white-space:nowrap}
 .queue-badge{

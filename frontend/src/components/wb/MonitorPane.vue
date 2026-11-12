@@ -811,6 +811,8 @@ async function onDisconnect() {
 }
 .ri-toggle.on svg {
   transform-origin: 50% 50%;
+  /* 常驻旋转：提升为独立合成层，避免每帧重绘整个面板头部 */
+  will-change: transform;
   animation: ri-spin 3s linear infinite;
 }
 @keyframes ri-spin {
@@ -885,18 +887,29 @@ async function onDisconnect() {
   height: 7px;
   border-radius: 50%;
   flex: 0 0 auto;
-  box-shadow: 0 0 0 0 currentColor;
-  animation: ri-pulse 2s infinite;
+  background: currentColor;
+  position: relative;
+}
+/* 呼吸光圈用伪元素做 transform/opacity：只在合成层播放。
+   动画 box-shadow（旧写法）每帧都要重绘阴影，WKWebView 会连带整块面板重绘，
+   实测能把 WebContent/GPU 进程各推到 13%~15% */
+.ri-pulse::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: currentColor;
+  animation: ri-pulse 2s ease-out infinite;
 }
 @keyframes ri-pulse {
   0% {
-    box-shadow: 0 0 0 0 rgba(61, 220, 132, 0.5);
+    transform: scale(1);
+    opacity: 0.5;
   }
-  70% {
-    box-shadow: 0 0 0 7px rgba(61, 220, 132, 0);
-  }
+  70%,
   100% {
-    box-shadow: 0 0 0 0 rgba(61, 220, 132, 0);
+    transform: scale(2.1);
+    opacity: 0;
   }
 }
 .ri-hostname {
