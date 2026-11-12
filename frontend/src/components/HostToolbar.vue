@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { open } from '@tauri-apps/plugin-dialog'
 import { toast } from '../composables/useToast'
-import { filter, showNewConn, viewStyle } from '../stores/hosts'
+import { filter, groupFilter, showNewConn, viewStyle } from '../stores/hosts'
+import { groupedView } from '../stores/hostDisplay'
+import { allGroups } from '../stores/groups'
 import {
   importHosts,
   isEncryptedConfig,
@@ -26,6 +28,16 @@ const VIEW_SVGS: Record<ViewStyle, string> = {
   grid: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="7" rx="1.5"/><rect x="3" y="14" width="18" height="7" rx="1.5"/></svg>',
   compact: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="3" y1="14" x2="21" y2="14"/><line x1="3" y1="18" x2="21" y2="18"/></svg>',
 }
+
+// 分组被重命名/删除后，筛选值可能已不在候选里——回落到全部分组
+watch(
+  () => allGroups.value.map(g => g.name).join('\n'),
+  names => {
+    if (groupFilter.value && !names.split('\n').includes(groupFilter.value)) {
+      groupFilter.value = ''
+    }
+  },
+)
 
 function onSwitch(style: ViewStyle) {
   viewStyle.value = style
@@ -84,10 +96,41 @@ async function onImportHosts() {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle>
           <line x1="21" y1="21" x2="16.7" y2="16.7"></line></svg>
-        <input v-model="filter" type="text" placeholder="搜索主机、IP 或用户…" autocomplete="off">
+        <input
+          v-model="filter"
+          type="text"
+          :placeholder="groupedView ? '搜索分组或主机…' : '搜索主机、IP 或用户…'"
+          autocomplete="off"
+        >
       </div>
 
-      <div class="view-switch">
+      <button
+        type="button"
+        class="btn"
+        :class="{ on: groupedView }"
+        :title="groupedView ? '切换为平铺显示' : '按分组显示'"
+        :aria-pressed="groupedView"
+        @click="groupedView = !groupedView"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+        </svg>
+        <span>分组</span>
+      </button>
+
+      <select
+        v-if="!groupedView"
+        v-model="groupFilter"
+        class="filter-select"
+        :class="{ active: !!groupFilter }"
+        title="按分组筛选"
+      >
+        <option value="">全部分组</option>
+        <option v-for="g in allGroups" :key="g.name" :value="g.name">{{ g.name }}</option>
+      </select>
+
+      <div v-if="!groupedView" class="view-switch">
         <button
           v-for="v in VIEWS"
           :key="v.style"

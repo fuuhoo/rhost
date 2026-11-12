@@ -8,27 +8,38 @@ import { isTauri } from '../lib/tauri'
 export const hosts = ref<Host[]>([])
 export const viewStyle = ref<ViewStyle>('list')
 export const filter = ref('')
+/** 分组筛选；空串表示全部分组 */
+export const groupFilter = ref('')
 export const showNewConn = ref(false)
 
 export const filtered = computed(() => {
   const q = filter.value.trim().toLowerCase()
-  if (!q) return hosts.value
-  return hosts.value.filter(
-    h =>
+  const g = groupFilter.value
+  return hosts.value.filter(h => {
+    if (g && h.group !== g) return false
+    if (!q) return true
+    return (
       h.id.toLowerCase().includes(q) ||
       h.ip.includes(q) ||
       h.user.toLowerCase().includes(q) ||
       h.os.toLowerCase().includes(q) ||
       h.tag.includes(q) ||
-      h.group.includes(q),
-  )
+      h.group.includes(q)
+    )
+  })
 })
 
 export const styleLabel = computed(() => STYLE_LABELS[viewStyle.value])
 
-export const filterInfo = computed(() =>
-  filter.value.trim() ? `筛选出 ${filtered.value.length} 台主机` : '无筛选',
-)
+export const filterInfo = computed(() => {
+  const q = filter.value.trim()
+  const g = groupFilter.value
+  if (!q && !g) return '无筛选'
+  const parts = [`筛选出 ${filtered.value.length} 台主机`]
+  if (g) parts.push(`分组「${g}」`)
+  if (q) parts.push(`关键词「${q}」`)
+  return parts.join(' · ')
+})
 
 /* =========================================================
  *  前后端数据转换
@@ -153,6 +164,16 @@ export async function updateHost(
     console.error('save_connection 失败:', e)
   }
   return updated
+}
+
+/** 连接探测到发行版后回写主机记录：就地改属性（保持会话持有同一对象），
+ *  仅值变化时落盘；保存失败静默——下次连接会再写一次。 */
+export function setHostOs(id: string, os: string) {
+  const h = hosts.value.find(x => x.id === id)
+  if (!h || !os || h.os === os) return
+  h.os = os
+  if (!isTauri) return
+  void invoke('save_connection', { host: hostToStored(h, 'ssh') }).catch(() => {})
 }
 
 export async function removeHost(id: string) {

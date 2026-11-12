@@ -2,7 +2,6 @@ import type { Component } from 'vue'
 import type { HomeViewId } from '../stores/homeView'
 import HostsView from '../views/home/HostsView.vue'
 import QuickConnectView from '../views/home/QuickConnectView.vue'
-import GroupsView from '../views/home/GroupsView.vue'
 import KeysView from '../views/home/KeysView.vue'
 import { keys } from '../stores/keys'
 import HomePlaceholder from '../views/home/HomePlaceholder.vue'
@@ -43,13 +42,6 @@ export const HOME_NAV: HomeNavItem[] = [
     enabled: true,
     component: HostsView,
     icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><line x1="7" y1="7" x2="7.01" y2="7"/><line x1="7" y1="17" x2="7.01" y2="17"/></svg>',
-  },
-  {
-    id: 'groups',
-    label: '分组',
-    enabled: true,
-    component: GroupsView,
-    icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
   },
   {
     id: 'keys',
