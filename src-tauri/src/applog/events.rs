@@ -216,6 +216,10 @@ pub const TOOLBOX_DOCKER_TERMINAL: &str = "toolbox.docker.terminal";
 pub const TOOLBOX_SYSLOG_SOURCES: &str = "toolbox.syslog.sources";
 /// 系统日志读取 / 保存（kv 只带来源/行数/字符数，不含日志正文与口令）
 pub const TOOLBOX_SYSLOG_READ: &str = "toolbox.syslog.read";
+/// 服务器时间与 NTP 状态读取（kv 带服务类型/同步状态/偏差，不含服务器口令）
+pub const TOOLBOX_TIME_STATUS: &str = "toolbox.time.status";
+/// NTP 安装 / 配置时间源 / 立即校时 / 服务启停
+pub const TOOLBOX_NTP_CHANGE: &str = "toolbox.time.change";
 
 /// 前端上报允许的 event_id 域（report_app_log 校验白名单）：
 /// web.* 前端通用事件 + sftp.* 传输队列事件（队列管理逻辑在前端，§7.3）
@@ -375,6 +379,8 @@ mod tests {
             TOOLBOX_DOCKER_TERMINAL,
             TOOLBOX_SYSLOG_SOURCES,
             TOOLBOX_SYSLOG_READ,
+            TOOLBOX_TIME_STATUS,
+            TOOLBOX_NTP_CHANGE,
         ];
         for id in all {
             assert!(

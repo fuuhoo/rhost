@@ -14,6 +14,7 @@ mod firewall;
 mod ports;
 mod pubkey;
 mod syslog;
+mod timesync;
 
 use std::time::{Duration, Instant};
 
@@ -42,6 +43,8 @@ const TRANSFER_TIMEOUT: Duration = Duration::from_secs(1800);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Docker 配置读取 / 保存 + 服务重启
 const CONFIG_TIMEOUT: Duration = Duration::from_secs(90);
+/// 安装 NTP 软件包：apt 更新索引 + 下载安装，慢镜像源要留足余量
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
 /// 日志落盘上限：与远端读取上限（512 KiB 字符）留足 UTF-8 余量
 const MAX_LOG_SAVE_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -538,6 +541,8 @@ pub struct DockerResult {
     pub compose_version: Option<String>,
     pub containers: Vec<docker::ContainerRow>,
     pub images: Vec<docker::ImageRow>,
+    pub networks: Vec<docker::NetworkRow>,
+    pub volumes: Vec<docker::VolumeRow>,
 }
 
 /// 列举远端容器与镜像（按需提权：socket 权限不足时先试免密 sudo）。
@@ -580,6 +585,8 @@ pub async fn toolbox_docker_list(
         compose_version: parsed.compose_version,
         containers: parsed.containers,
         images: parsed.images,
+        networks: parsed.networks,
+        volumes: parsed.volumes,
     };
     applog::emit(
         log::Level::Info,
@@ -591,6 +598,8 @@ pub async fn toolbox_docker_list(
             "containers": result.containers.len(),
             "running": result.containers.iter().filter(|c| c.state == "running").count(),
             "images": result.images.len(),
+            "networks": result.networks.len(),
+            "volumes": result.volumes.len(),
             "docker_version": result.docker_version,
             "compose_version": result.compose_version,
             "elevated": result.elevated,
@@ -648,6 +657,8 @@ pub async fn toolbox_docker_action(
         ("container", "restart") => format!("容器 {target} 已重启"),
         ("container", "remove") => format!("容器 {target} 已删除"),
         ("image", "remove") => format!("镜像 {target} 已删除"),
+        ("network", "remove") => format!("网络 {target} 已删除"),
+        ("volume", "remove") => format!("数据卷 {target} 已删除"),
         _ => "Docker 操作已完成".into(),
     };
     applog::emit(
@@ -660,6 +671,137 @@ pub async fn toolbox_docker_action(
             "kind": kind,
             "action": action,
             "target": target,
+            "elevated": exec.elevated,
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+            "exit_code": exec.out.exit_code,
+        })),
+    );
+    Ok(msg)
+}
+
+/// 新建自定义 Docker 网络（驱动 / 子网 / 网关由后端校验后重建命令）。
+#[tauri::command]
+pub async fn toolbox_docker_network_create(
+    session_id: String,
+    name: String,
+    driver: String,
+    subnet: Option<String>,
+    gateway: Option<String>,
+    sudo_password: Option<String>,
+    manager: State<'_, SessionManager>,
+) -> Result<String, String> {
+    let started = Instant::now();
+    let spec = docker::validate_network_spec(
+        &name,
+        &driver,
+        subnet.as_deref(),
+        gateway.as_deref(),
+    )?;
+    let script = docker::build_network_create_script(&spec);
+    let exec = run_docker(
+        &manager,
+        &session_id,
+        &script,
+        sudo_password.as_deref(),
+        ACTION_TIMEOUT,
+    )
+    .await?;
+    docker::action_result(&exec.out).map_err(|e| {
+        applog::emit(
+            log::Level::Warn,
+            "toolbox",
+            ev::TOOLBOX_DOCKER_ACTION,
+            Some(&session_id),
+            "Docker 网络创建失败",
+            Some(serde_json::json!({
+                "kind": "network",
+                "action": "create",
+                "target": spec.name.as_str(),
+                "driver": spec.driver.as_str(),
+                "elevated": exec.elevated,
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+                "exit_code": exec.out.exit_code,
+                "timed_out": exec.out.timed_out,
+                "err": e,
+            })),
+        );
+        e
+    })?;
+    let msg = format!("网络 {} 已创建", spec.name);
+    applog::emit(
+        log::Level::Info,
+        "toolbox",
+        ev::TOOLBOX_DOCKER_ACTION,
+        Some(&session_id),
+        &msg,
+        Some(serde_json::json!({
+            "kind": "network",
+            "action": "create",
+            "target": spec.name.as_str(),
+            "driver": spec.driver.as_str(),
+            "subnet": spec.subnet,
+            "gateway": spec.gateway,
+            "elevated": exec.elevated,
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+            "exit_code": exec.out.exit_code,
+        })),
+    );
+    Ok(msg)
+}
+
+/// 新建 Docker 数据卷（名称与驱动由后端校验后重建命令）。
+#[tauri::command]
+pub async fn toolbox_docker_volume_create(
+    session_id: String,
+    name: String,
+    driver: String,
+    sudo_password: Option<String>,
+    manager: State<'_, SessionManager>,
+) -> Result<String, String> {
+    let started = Instant::now();
+    let spec = docker::validate_volume_spec(&name, &driver)?;
+    let script = docker::build_volume_create_script(&spec);
+    let exec = run_docker(
+        &manager,
+        &session_id,
+        &script,
+        sudo_password.as_deref(),
+        ACTION_TIMEOUT,
+    )
+    .await?;
+    docker::action_result(&exec.out).map_err(|e| {
+        applog::emit(
+            log::Level::Warn,
+            "toolbox",
+            ev::TOOLBOX_DOCKER_ACTION,
+            Some(&session_id),
+            "Docker 数据卷创建失败",
+            Some(serde_json::json!({
+                "kind": "volume",
+                "action": "create",
+                "target": spec.name.as_str(),
+                "driver": spec.driver.as_str(),
+                "elevated": exec.elevated,
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+                "exit_code": exec.out.exit_code,
+                "timed_out": exec.out.timed_out,
+                "err": e,
+            })),
+        );
+        e
+    })?;
+    let msg = format!("数据卷 {} 已创建", spec.name);
+    applog::emit(
+        log::Level::Info,
+        "toolbox",
+        ev::TOOLBOX_DOCKER_ACTION,
+        Some(&session_id),
+        &msg,
+        Some(serde_json::json!({
+            "kind": "volume",
+            "action": "create",
+            "target": spec.name.as_str(),
+            "driver": spec.driver.as_str(),
             "elevated": exec.elevated,
             "elapsed_ms": started.elapsed().as_millis() as u64,
             "exit_code": exec.out.exit_code,
@@ -1623,4 +1765,401 @@ pub async fn toolbox_syslog_save(path: String, content: String) -> Result<String
         })),
     );
     Ok(abs.display().to_string())
+}
+
+/* =========================================================
+ *  服务器时间与 NTP
+ * ========================================================= */
+
+/// 变更类操作的返回值：一句可展示的结论 + 操作后重新探测的状态
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimeChange {
+    pub message: String,
+    pub status: timesync::NtpStatus,
+}
+
+/// 读取 NTP 状态：普通通道优先；chrony 在跑但 tracking 读不到时（非 root 常见），
+/// 再用免密 sudo 试一次。需要密码时不打扰用户，只展示已读到的部分。
+async fn probe_ntp_status(
+    manager: &SessionManager,
+    session_id: &str,
+    password: Option<&str>,
+) -> Result<timesync::NtpStatus, String> {
+    if password.is_some() {
+        let exec = exec_root(
+            manager,
+            session_id,
+            timesync::STATUS_SCRIPT,
+            password,
+            LIST_TIMEOUT,
+        )
+        .await?;
+        return timesync::parse_status(&exec.out.output);
+    }
+    let plain = exec_plain(manager, session_id, timesync::STATUS_SCRIPT, LIST_TIMEOUT).await?;
+    let status = timesync::parse_status(&plain.out.output)?;
+    if status.service == "chrony" && status.synchronized.is_none() {
+        if let Ok(exec) =
+            exec_root(manager, session_id, timesync::STATUS_SCRIPT, None, LIST_TIMEOUT).await
+        {
+            if let Ok(elevated) = timesync::parse_status(&exec.out.output) {
+                if elevated.synchronized.is_some() {
+                    return Ok(elevated);
+                }
+            }
+        }
+    }
+    Ok(status)
+}
+
+/// 变更脚本的成功判定：超时/非零退出把远端报错尾部交给前端。
+fn time_change_result(out: &ExecOutput, action: &str) -> Result<String, String> {
+    if out.timed_out {
+        return Err(format!("{action}超时，请检查远端网络与软件源"));
+    }
+    let text = out.output.trim();
+    if out.exit_code != Some(0) {
+        let shown: String = if text.chars().count() > 400 {
+            let tail: String = text.chars().rev().take(400).collect::<Vec<_>>().into_iter().rev().collect();
+            format!("…{tail}")
+        } else {
+            text.to_string()
+        };
+        return Err(if shown.is_empty() {
+            format!("{action}失败（退出码 {:?}）", out.exit_code)
+        } else {
+            format!("{action}失败：{shown}")
+        });
+    }
+    Ok(text.lines().last().unwrap_or("").trim().to_string())
+}
+
+/// 状态栏用：读取远端当前时间（只读、无日志，供分钟级校时）。
+#[tauri::command]
+pub async fn toolbox_server_time(
+    session_id: String,
+    manager: State<'_, SessionManager>,
+) -> Result<timesync::ServerTime, String> {
+    let exec = exec_plain(
+        &manager,
+        &session_id,
+        timesync::SERVER_TIME_SCRIPT,
+        LIST_TIMEOUT,
+    )
+    .await?;
+    timesync::parse_server_time(&exec.out.output)
+}
+
+/// 探测服务器时间与 NTP 状态（只读）。
+#[tauri::command]
+pub async fn toolbox_ntp_status(
+    session_id: String,
+    sudo_password: Option<String>,
+    manager: State<'_, SessionManager>,
+) -> Result<timesync::NtpStatus, String> {
+    let started = Instant::now();
+    let status = probe_ntp_status(&manager, &session_id, sudo_password.as_deref())
+        .await
+        .map_err(|e| {
+            applog::emit(
+                log::Level::Warn,
+                "toolbox",
+                ev::TOOLBOX_TIME_STATUS,
+                Some(&session_id),
+                "NTP 状态读取失败",
+                Some(serde_json::json!({
+                    "elapsed_ms": started.elapsed().as_millis() as u64,
+                    "err": e,
+                })),
+            );
+            e
+        })?;
+    applog::emit(
+        log::Level::Info,
+        "toolbox",
+        ev::TOOLBOX_TIME_STATUS,
+        Some(&session_id),
+        "NTP 状态读取完成",
+        Some(serde_json::json!({
+            "os": status.os,
+            "distro": status.distro,
+            "service": status.service,
+            "installed": status.installed,
+            "active": status.active,
+            "enabled": status.enabled,
+            "synchronized": status.synchronized,
+            "offset_ms": status.offset_ms,
+            "servers": status.servers.len(),
+            "tz": status.now.tz_name,
+            "tz_offset_minutes": status.now.tz_offset_minutes,
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+        })),
+    );
+    Ok(status)
+}
+
+/// 安装 chrony 并设为开机自启。
+#[tauri::command]
+pub async fn toolbox_ntp_install(
+    session_id: String,
+    sudo_password: Option<String>,
+    manager: State<'_, SessionManager>,
+) -> Result<TimeChange, String> {
+    let started = Instant::now();
+    let before = probe_ntp_status(&manager, &session_id, None).await?;
+    if !before.managed {
+        return Err(before
+            .note
+            .unwrap_or_else(|| "当前主机不支持自动安装时间服务".into()));
+    }
+    if before.installed {
+        return Err(format!("当前主机已安装时间服务（{}），无需重复安装", before.service));
+    }
+    let script = timesync::install_script(&before.package_manager)?;
+    let exec = exec_root(
+        &manager,
+        &session_id,
+        &script,
+        sudo_password.as_deref(),
+        INSTALL_TIMEOUT,
+    )
+    .await?;
+    if let Err(e) = time_change_result(&exec.out, "安装 chrony") {
+        applog::emit(
+            log::Level::Warn,
+            "toolbox",
+            ev::TOOLBOX_NTP_CHANGE,
+            Some(&session_id),
+            "chrony 安装失败",
+            Some(serde_json::json!({
+                "op": "install",
+                "package_manager": before.package_manager,
+                "exit_code": exec.out.exit_code,
+                "timed_out": exec.out.timed_out,
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+                "err": e,
+            })),
+        );
+        return Err(e);
+    }
+    let status = probe_ntp_status(&manager, &session_id, None)
+        .await
+        .unwrap_or(before);
+    applog::emit(
+        log::Level::Info,
+        "toolbox",
+        ev::TOOLBOX_NTP_CHANGE,
+        Some(&session_id),
+        "chrony 已安装",
+        Some(serde_json::json!({
+            "op": "install",
+            "package_manager": status.package_manager,
+            "service": status.service,
+            "active": status.active,
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+        })),
+    );
+    Ok(TimeChange {
+        message: format!("chrony 已安装并启用（{}）", status.distro),
+        status,
+    })
+}
+
+/// 替换时间源并重启时间服务（原配置备份为 `<conf>.rhost.bak`）。
+#[tauri::command]
+pub async fn toolbox_ntp_configure(
+    session_id: String,
+    servers: Vec<String>,
+    sudo_password: Option<String>,
+    manager: State<'_, SessionManager>,
+) -> Result<TimeChange, String> {
+    let started = Instant::now();
+    let before = probe_ntp_status(&manager, &session_id, None).await?;
+    if !before.managed {
+        return Err(before
+            .note
+            .unwrap_or_else(|| "当前主机不支持自动配置时间源".into()));
+    }
+    if before.service == "none" {
+        return Err("当前主机未安装时间服务，请先安装 chrony".into());
+    }
+    let servers = timesync::validate_servers(&servers)?;
+    let script = timesync::configure_script(&before.service, &servers)?;
+    let exec = exec_root(
+        &manager,
+        &session_id,
+        &script,
+        sudo_password.as_deref(),
+        ACTION_TIMEOUT,
+    )
+    .await?;
+    if let Err(e) = time_change_result(&exec.out, "配置时间源") {
+        applog::emit(
+            log::Level::Warn,
+            "toolbox",
+            ev::TOOLBOX_NTP_CHANGE,
+            Some(&session_id),
+            "NTP 时间源配置失败",
+            Some(serde_json::json!({
+                "op": "configure",
+                "service": before.service,
+                "servers": servers,
+                "exit_code": exec.out.exit_code,
+                "timed_out": exec.out.timed_out,
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+                "err": e,
+            })),
+        );
+        return Err(e);
+    }
+    let status = probe_ntp_status(&manager, &session_id, None)
+        .await
+        .unwrap_or(before);
+    applog::emit(
+        log::Level::Info,
+        "toolbox",
+        ev::TOOLBOX_NTP_CHANGE,
+        Some(&session_id),
+        "NTP 时间源已更新",
+        Some(serde_json::json!({
+            "op": "configure",
+            "service": status.service,
+            "servers": servers,
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+        })),
+    );
+    Ok(TimeChange {
+        message: format!("时间源已更新为 {}", servers.join("、")),
+        status,
+    })
+}
+
+/// 立即校时：chrony 走 `makestep`，其他服务重启触发一次同步。
+#[tauri::command]
+pub async fn toolbox_ntp_sync(
+    session_id: String,
+    sudo_password: Option<String>,
+    manager: State<'_, SessionManager>,
+) -> Result<TimeChange, String> {
+    let started = Instant::now();
+    let before = probe_ntp_status(&manager, &session_id, None).await?;
+    let script = timesync::sync_script(&before.service)?;
+    let exec = exec_root(
+        &manager,
+        &session_id,
+        &script,
+        sudo_password.as_deref(),
+        ACTION_TIMEOUT,
+    )
+    .await?;
+    let detail = time_change_result(&exec.out, "立即校时").map_err(|e| {
+        applog::emit(
+            log::Level::Warn,
+            "toolbox",
+            ev::TOOLBOX_NTP_CHANGE,
+            Some(&session_id),
+            "立即校时失败",
+            Some(serde_json::json!({
+                "op": "sync",
+                "service": before.service,
+                "exit_code": exec.out.exit_code,
+                "timed_out": exec.out.timed_out,
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+                "err": e,
+            })),
+        );
+        e
+    })?;
+    let status = probe_ntp_status(&manager, &session_id, None)
+        .await
+        .unwrap_or(before);
+    applog::emit(
+        log::Level::Info,
+        "toolbox",
+        ev::TOOLBOX_NTP_CHANGE,
+        Some(&session_id),
+        "已请求立即校时",
+        Some(serde_json::json!({
+            "op": "sync",
+            "service": status.service,
+            "synchronized": status.synchronized,
+            "offset_ms": status.offset_ms,
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+        })),
+    );
+    Ok(TimeChange {
+        message: if detail.is_empty() {
+            "已请求立即校时".to_string()
+        } else {
+            detail
+        },
+        status,
+    })
+}
+
+/// 时间服务启停 / 开机自启（enable / disable / start / stop）。
+#[tauri::command]
+pub async fn toolbox_ntp_service(
+    session_id: String,
+    action: String,
+    sudo_password: Option<String>,
+    manager: State<'_, SessionManager>,
+) -> Result<TimeChange, String> {
+    let started = Instant::now();
+    let before = probe_ntp_status(&manager, &session_id, None).await?;
+    let script = timesync::service_script(&before.service, &action)?;
+    let exec = exec_root(
+        &manager,
+        &session_id,
+        &script,
+        sudo_password.as_deref(),
+        ACTION_TIMEOUT,
+    )
+    .await?;
+    let message = match action.as_str() {
+        "enable" => "时间服务已设为开机自启并启动",
+        "disable" => "已取消时间服务开机自启",
+        "start" => "时间服务已启动",
+        _ => "时间服务已停止",
+    };
+    if let Err(e) = time_change_result(&exec.out, message) {
+        applog::emit(
+            log::Level::Warn,
+            "toolbox",
+            ev::TOOLBOX_NTP_CHANGE,
+            Some(&session_id),
+            "时间服务操作失败",
+            Some(serde_json::json!({
+                "op": action,
+                "service": before.service,
+                "exit_code": exec.out.exit_code,
+                "timed_out": exec.out.timed_out,
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+                "err": e,
+            })),
+        );
+        return Err(e);
+    }
+    let status = probe_ntp_status(&manager, &session_id, None)
+        .await
+        .unwrap_or(before);
+    applog::emit(
+        log::Level::Info,
+        "toolbox",
+        ev::TOOLBOX_NTP_CHANGE,
+        Some(&session_id),
+        message,
+        Some(serde_json::json!({
+            "op": action,
+            "service": status.service,
+            "active": status.active,
+            "enabled": status.enabled,
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+        })),
+    );
+    Ok(TimeChange {
+        message: message.to_string(),
+        status,
+    })
 }

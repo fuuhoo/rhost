@@ -75,11 +75,13 @@ fn permission_case() -> String {
     )
 }
 
-/// 列表脚本：先确认 CLI 与 daemon 可用，再输出容器 / 镜像两段。
+/// 列表脚本：先确认 CLI 与 daemon 可用，再输出容器 / 镜像 / 网络 / 数据卷四段。
 ///
 /// `--no-trunc` 保留完整 ID 供操作；`\t` 分隔，状态、端口、创建时间里的
 /// 空格不会打乱列。daemon 不可用时区分权限不足与未启动，前者交给提权重试。
 /// 容器状态由 `Status` 文本推导：19.03 等旧版 `docker ps` 模板没有 `.State` 字段。
+/// 网络用 `docker network inspect` 的 JSON：一次拿齐驱动、IPAM 与已连接容器；
+/// 数据卷同样用 `docker volume inspect`，拿到驱动、挂载点与创建时间。
 pub(super) fn build_list_script() -> String {
     format!(
         r#"{prelude}echo '@@DIAG@@'
@@ -105,7 +107,17 @@ echo "COMPOSE_VERSION=$compose_ver"
 echo '@@CONTAINERS@@'
 "$DOCKER" ps -a --no-trunc --format '{{{{.ID}}}}\t{{{{.Names}}}}\t{{{{.Image}}}}\t{{{{.Status}}}}\t{{{{.Ports}}}}\t{{{{.CreatedAt}}}}' 2>&1
 echo '@@IMAGES@@'
-"$DOCKER" images --no-trunc --format '{{{{.ID}}}}\t{{{{.Repository}}}}\t{{{{.Tag}}}}\t{{{{.CreatedSince}}}}\t{{{{.Size}}}}' 2>&1
+"$DOCKER" images --no-trunc --format '{{{{.ID}}}}\t{{{{.Repository}}}}\t{{{{.Tag}}}}\t{{{{.CreatedSince}}}}\t{{{{.Size}}}}\t{{{{.CreatedAt}}}}' 2>&1
+echo '@@NETWORKS@@'
+net_ids=$("$DOCKER" network ls -q 2>/dev/null)
+if [ -n "$net_ids" ]; then
+  "$DOCKER" network inspect $net_ids 2>&1
+fi
+echo '@@VOLUMES@@'
+vol_names=$("$DOCKER" volume ls -q 2>/dev/null)
+if [ -n "$vol_names" ]; then
+  "$DOCKER" volume inspect $vol_names 2>&1
+fi
 echo '@@END@@'
 "#,
         prelude = prelude(),
@@ -134,8 +146,41 @@ pub struct ImageRow {
     /// 悬空镜像为 `<none>`
     pub repository: String,
     pub tag: String,
+    /// 相对时间（如 `2 weeks ago`），仅用于展示
     pub created: String,
+    /// `docker images .CreatedAt` 原始时间戳，供前端按时间排序
+    pub created_at: String,
     pub size: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkRow {
+    pub id: String,
+    pub name: String,
+    pub driver: String,
+    /// local / swarm
+    pub scope: String,
+    /// 多个 IPAM 段用 `, ` 连接；未配置时为空
+    pub subnet: String,
+    pub gateway: String,
+    pub internal: bool,
+    pub ipv6: bool,
+    /// 已连接容器，形如 `web-1 (172.18.0.2/16)`，按名称排序
+    pub containers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VolumeRow {
+    pub name: String,
+    pub driver: String,
+    /// local / global
+    pub scope: String,
+    /// 宿主机上的数据目录；部分旧版 daemon 不返回
+    pub mountpoint: String,
+    /// 原始创建时间；部分 daemon 不返回该字段
+    pub created_at: String,
 }
 
 #[derive(Debug)]
@@ -148,6 +193,8 @@ pub(super) struct DockerList {
     pub compose_version: Option<String>,
     pub containers: Vec<ContainerRow>,
     pub images: Vec<ImageRow>,
+    pub networks: Vec<NetworkRow>,
+    pub volumes: Vec<VolumeRow>,
 }
 
 /// 解析列表输出；权限不足 / CLI 缺失 / daemon 未启动均转换为可读错误。
@@ -175,6 +222,8 @@ pub(super) fn parse_list(output: &str) -> Result<DockerList, String> {
     let mut compose_version: Option<String> = None;
     let mut containers_out = String::new();
     let mut images_out = String::new();
+    let mut networks_out = String::new();
+    let mut volumes_out = String::new();
     let mut section = "";
     for line in output.lines() {
         match line.trim_end() {
@@ -188,6 +237,14 @@ pub(super) fn parse_list(output: &str) -> Result<DockerList, String> {
             }
             "@@IMAGES@@" => {
                 section = "images";
+                continue;
+            }
+            "@@NETWORKS@@" => {
+                section = "networks";
+                continue;
+            }
+            "@@VOLUMES@@" => {
+                section = "volumes";
                 continue;
             }
             "@@END@@" => {
@@ -214,6 +271,14 @@ pub(super) fn parse_list(output: &str) -> Result<DockerList, String> {
                 images_out.push_str(line);
                 images_out.push('\n');
             }
+            "networks" => {
+                networks_out.push_str(line);
+                networks_out.push('\n');
+            }
+            "volumes" => {
+                volumes_out.push_str(line);
+                volumes_out.push('\n');
+            }
             _ => {}
         }
     }
@@ -232,12 +297,16 @@ pub(super) fn parse_list(output: &str) -> Result<DockerList, String> {
             one_line(&images_out)
         ));
     }
+    let networks = parse_networks(&networks_out)?;
+    let volumes = parse_volumes(&volumes_out)?;
     Ok(DockerList {
         uid,
         docker_version,
         compose_version,
         containers,
         images,
+        networks,
+        volumes,
     })
 }
 
@@ -308,12 +377,13 @@ fn container_state(status: &str) -> String {
 fn parse_images(text: &str) -> Vec<ImageRow> {
     text.lines()
         .filter_map(|line| {
-            let mut f = line.trim_end().splitn(5, '\t');
+            let mut f = line.trim_end().splitn(6, '\t');
             let id = f.next()?.trim();
             let repository = f.next()?.trim();
             let tag = f.next()?.trim();
             let created = f.next()?.trim();
             let size = f.next().unwrap_or("").trim();
+            let created_at = f.next().unwrap_or("").trim();
             if id.is_empty() || repository.is_empty() || tag.is_empty() {
                 return None;
             }
@@ -322,21 +392,200 @@ fn parse_images(text: &str) -> Vec<ImageRow> {
                 repository: repository.to_string(),
                 tag: tag.to_string(),
                 created: created.to_string(),
+                created_at: created_at.to_string(),
                 size: size.to_string(),
             })
         })
         .collect()
 }
 
+/// 解析 `docker network inspect` 的 JSON 数组；空输出表示没有网络。
+fn parse_networks(text: &str) -> Result<Vec<NetworkRow>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|_| {
+        format!("无法解析 docker 网络列表：{}", one_line(text))
+    })?;
+    let items = value
+        .as_array()
+        .ok_or_else(|| "无法解析 docker 网络列表".to_string())?;
+    let mut rows: Vec<NetworkRow> = items.iter().filter_map(network_row).collect();
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(rows)
+}
+
+fn network_row(value: &serde_json::Value) -> Option<NetworkRow> {
+    let name = value.get("Name").and_then(|v| v.as_str())?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let mut subnets: Vec<String> = Vec::new();
+    let mut gateways: Vec<String> = Vec::new();
+    if let Some(configs) = value.pointer("/IPAM/Config").and_then(|v| v.as_array()) {
+        for conf in configs {
+            if let Some(s) = conf.get("Subnet").and_then(|v| v.as_str()) {
+                push_trimmed(&mut subnets, s);
+            }
+            if let Some(g) = conf.get("Gateway").and_then(|v| v.as_str()) {
+                push_trimmed(&mut gateways, g);
+            }
+        }
+    }
+    Some(NetworkRow {
+        id: value
+            .get("Id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        name: name.to_string(),
+        driver: value
+            .get("Driver")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        scope: value
+            .get("Scope")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        subnet: subnets.join(", "),
+        gateway: gateways.join(", "),
+        internal: value
+            .get("Internal")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        ipv6: value
+            .get("EnableIPv6")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        containers: network_containers(value),
+    })
+}
+
+fn push_trimmed(out: &mut Vec<String>, value: &str) {
+    let value = value.trim();
+    if !value.is_empty() && !out.iter().any(|v| v == value) {
+        out.push(value.to_string());
+    }
+}
+
+fn network_containers(value: &serde_json::Value) -> Vec<String> {
+    let Some(items) = value.get("Containers").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+    let mut rows: Vec<(String, String)> = items
+        .iter()
+        .filter_map(|(id, c)| {
+            let name = c.get("Name").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let name = if name.is_empty() {
+                id.chars().take(12).collect::<String>()
+            } else {
+                name.to_string()
+            };
+            Some((name, container_addr(c)))
+        })
+        .collect();
+    rows.sort();
+    rows.into_iter()
+        .map(|(name, addr)| {
+            if addr.is_empty() {
+                name
+            } else {
+                format!("{name} ({addr})")
+            }
+        })
+        .collect()
+}
+
+fn container_addr(container: &serde_json::Value) -> String {
+    for field in ["IPv4Address", "IPv6Address"] {
+        if let Some(addr) = container
+            .get(field)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            return addr.to_string();
+        }
+    }
+    for field in ["IPv4Addresses", "IPv6Addresses"] {
+        if let Some(addr) = container
+            .get(field)
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            return addr.to_string();
+        }
+    }
+    String::new()
+}
+
+/// 解析 `docker volume inspect` 的 JSON 数组；空输出表示没有数据卷。
+fn parse_volumes(text: &str) -> Result<Vec<VolumeRow>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|_| format!("无法解析 docker 数据卷列表：{}", one_line(text)))?;
+    let items = value
+        .as_array()
+        .ok_or_else(|| "无法解析 docker 数据卷列表".to_string())?;
+    let mut rows: Vec<VolumeRow> = items.iter().filter_map(volume_row).collect();
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(rows)
+}
+
+fn volume_row(value: &serde_json::Value) -> Option<VolumeRow> {
+    let name = value.get("Name").and_then(|v| v.as_str())?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(VolumeRow {
+        name: name.to_string(),
+        driver: value
+            .get("Driver")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        scope: value
+            .get("Scope")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        mountpoint: value
+            .get("Mountpoint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        created_at: value
+            .get("CreatedAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
 /// 容器操作白名单：start / stop / restart / remove
 const CONTAINER_ACTIONS: [&str; 4] = ["start", "stop", "restart", "remove"];
 /// 镜像操作白名单：仅 remove
 const IMAGE_ACTIONS: [&str; 1] = ["remove"];
+/// 网络操作白名单：仅 remove
+const NETWORK_ACTIONS: [&str; 1] = ["remove"];
+/// 数据卷操作白名单：仅 remove
+const VOLUME_ACTIONS: [&str; 1] = ["remove"];
 
 pub(super) fn validate_action(kind: &str, action: &str) -> Result<(), String> {
     let ok = match kind {
         "container" => CONTAINER_ACTIONS.contains(&action),
         "image" => IMAGE_ACTIONS.contains(&action),
+        "network" => NETWORK_ACTIONS.contains(&action),
+        "volume" => VOLUME_ACTIONS.contains(&action),
         _ => return Err("不支持的 Docker 对象类型".into()),
     };
     if ok {
@@ -346,7 +595,7 @@ pub(super) fn validate_action(kind: &str, action: &str) -> Result<(), String> {
     }
 }
 
-/// 容器名 / ID 与镜像引用的字符集校验，禁止前导 `-` 与 shell 元字符。
+/// 容器名 / ID、镜像引用、网络名与数据卷名的字符集校验，禁止前导 `-` 与 shell 元字符。
 pub(super) fn validate_target(kind: &str, input: &str) -> Result<String, String> {
     let target = input.trim();
     if target.is_empty() {
@@ -361,7 +610,9 @@ pub(super) fn validate_target(kind: &str, input: &str) -> Result<String, String>
         return Err("操作目标不合法".into());
     }
     let rest_ok = match kind {
-        "container" => chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')),
+        "container" | "network" | "volume" => {
+            chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        }
         "image" => chars.all(|c| {
             c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | ':' | '/' | '@')
         }),
@@ -381,12 +632,17 @@ pub(super) fn build_action_script(
 ) -> Result<String, String> {
     validate_action(kind, action)?;
     let target = validate_target(kind, target)?;
+    if kind == "network" && ["bridge", "host", "none"].contains(&target.as_str()) {
+        return Err("默认网络 bridge / host / none 不可删除".into());
+    }
     let cmd = match (kind, action) {
         ("container", "start") => "start",
         ("container", "stop") => "stop",
         ("container", "restart") => "restart",
         ("container", "remove") => "rm",
         ("image", "remove") => "rmi",
+        ("network", "remove") => "network rm",
+        ("volume", "remove") => "volume rm",
         _ => return Err("不支持的操作".into()),
     };
     Ok(format!(
@@ -437,6 +693,193 @@ pub(super) fn action_result(out: &ExecOutput) -> Result<(), String> {
         "Docker 操作失败（退出码 {:?}）",
         out.exit_code.unwrap_or(-1)
     ))
+}
+
+/* =========================================================
+ *  自定义网络
+ * ========================================================= */
+
+/// 可创建的驱动白名单：host / none 无自定义配置意义，交给默认网络
+const NETWORK_DRIVERS: [&str; 4] = ["bridge", "overlay", "macvlan", "ipvlan"];
+
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct NetworkSpec {
+    pub name: String,
+    pub driver: String,
+    pub subnet: Option<String>,
+    pub gateway: Option<String>,
+}
+
+/// 网络名称：字母或数字开头，仅 `_.-` 与字母数字，最长 64。
+pub(super) fn validate_network_name(input: &str) -> Result<String, String> {
+    let name = input.trim();
+    if name.is_empty() {
+        return Err("请填写网络名称".into());
+    }
+    if name.len() > 64 {
+        return Err("网络名称不能超过 64 个字符".into());
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphanumeric() {
+        return Err("网络名称需以字母或数字开头".into());
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {
+        return Err("网络名称只能包含字母、数字与 _ . -".into());
+    }
+    Ok(name.to_string())
+}
+
+/// 子网 CIDR 校验并归一化（`ip/prefix`），网关单独校验 IP 并要求先填子网。
+pub(super) fn validate_network_spec(
+    name: &str,
+    driver: &str,
+    subnet: Option<&str>,
+    gateway: Option<&str>,
+) -> Result<NetworkSpec, String> {
+    let name = validate_network_name(name)?;
+    let driver = driver.trim().to_ascii_lowercase();
+    if !NETWORK_DRIVERS.contains(&driver.as_str()) {
+        return Err("不支持的驱动，可选 bridge / overlay / macvlan / ipvlan".into());
+    }
+    let subnet = subnet
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(validate_cidr)
+        .transpose()?;
+    let gateway = gateway
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|g| {
+            g.parse::<std::net::IpAddr>()
+                .map(|ip| ip.to_string())
+                .map_err(|_| "网关地址不是合法 IP".to_string())
+        })
+        .transpose()?;
+    if gateway.is_some() && subnet.is_none() {
+        return Err("填写网关前需先填写子网".into());
+    }
+    Ok(NetworkSpec {
+        name,
+        driver,
+        subnet,
+        gateway,
+    })
+}
+
+fn validate_cidr(input: &str) -> Result<String, String> {
+    let input = input.trim();
+    let (addr, prefix) = input
+        .split_once('/')
+        .ok_or_else(|| "子网需为 CIDR 格式，如 172.20.0.0/16".to_string())?;
+    let ip: std::net::IpAddr = addr
+        .parse()
+        .map_err(|_| "子网地址不是合法 IP".to_string())?;
+    let prefix: u8 = prefix
+        .parse()
+        .map_err(|_| "子网前缀不合法".to_string())?;
+    let max = if ip.is_ipv4() { 32 } else { 128 };
+    if prefix > max {
+        return Err("子网前缀超出范围".into());
+    }
+    Ok(format!("{ip}/{prefix}"))
+}
+
+pub(super) fn build_network_create_script(spec: &NetworkSpec) -> String {
+    let mut cmd = format!("network create --driver {}", sq(&spec.driver));
+    if let Some(subnet) = &spec.subnet {
+        cmd.push_str(&format!(" --subnet {}", sq(subnet)));
+    }
+    if let Some(gateway) = &spec.gateway {
+        cmd.push_str(&format!(" --gateway {}", sq(gateway)));
+    }
+    cmd.push(' ');
+    cmd.push_str(&sq(&spec.name));
+    format!(
+        r#"{prelude}err=$("$DOCKER" {cmd} 2>&1)
+rc=$?
+if [ $rc -ne 0 ]; then
+  {case}
+  exit 5
+fi
+echo '{ok}'
+"#,
+        prelude = prelude(),
+        cmd = cmd,
+        case = permission_case(),
+        ok = ACTION_OK,
+    )
+}
+
+/* =========================================================
+ *  数据卷
+ * ========================================================= */
+
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct VolumeSpec {
+    pub name: String,
+    pub driver: String,
+}
+
+/// 数据卷名称：字母或数字开头，仅 `_.-` 与字母数字，最长 255。
+pub(super) fn validate_volume_name(input: &str) -> Result<String, String> {
+    let name = input.trim();
+    if name.is_empty() {
+        return Err("请填写数据卷名称".into());
+    }
+    if name.len() > 255 {
+        return Err("数据卷名称不能超过 255 个字符".into());
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphanumeric() {
+        return Err("数据卷名称需以字母或数字开头".into());
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) {
+        return Err("数据卷名称只能包含字母、数字与 _ . -".into());
+    }
+    Ok(name.to_string())
+}
+
+/// 卷驱动可来自插件，不穷举；留空按 local，名称只做字符集校验。
+pub(super) fn validate_volume_spec(name: &str, driver: &str) -> Result<VolumeSpec, String> {
+    let name = validate_volume_name(name)?;
+    let trimmed = driver.trim().to_ascii_lowercase();
+    let driver = if trimmed.is_empty() {
+        "local".to_string()
+    } else {
+        trimmed
+    };
+    let ok = driver.len() <= 64
+        && driver
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && driver
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+    if !ok {
+        return Err("数据卷驱动只能包含字母、数字与 _ . -".into());
+    }
+    Ok(VolumeSpec { name, driver })
+}
+
+pub(super) fn build_volume_create_script(spec: &VolumeSpec) -> String {
+    format!(
+        r#"{prelude}err=$("$DOCKER" volume create --driver {driver_q} {name_q} 2>&1)
+rc=$?
+if [ $rc -ne 0 ]; then
+  {case}
+  exit 5
+fi
+echo '{ok}'
+"#,
+        prelude = prelude(),
+        driver_q = sq(&spec.driver),
+        name_q = sq(&spec.name),
+        case = permission_case(),
+        ok = ACTION_OK,
+    )
 }
 
 /* =========================================================
@@ -1318,8 +1761,12 @@ COMPOSE_VERSION=1.25.0
 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tweb-1\tnginx:latest\tUp 3 days\t0.0.0.0:8080->80/tcp, [::]:8080->80/tcp\t2026-11-01 09:00:00 +0800 CST
 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tpg\tpostgres:16\tExited (0) 2 hours ago\t\t2026-10-30 12:00:00 +0800 CST
 @@IMAGES@@
-sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\tnginx\tlatest\t2 weeks ago\t187MB
-sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\t<none>\t<none>\t3 days ago\t120MB
+sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\tnginx\tlatest\t2 weeks ago\t187MB\t2026-10-20 08:00:00 +0800 CST
+sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\t<none>\t<none>\t3 days ago\t120MB\t2026-11-02 08:00:00 +0800 CST
+@@NETWORKS@@
+[{\"Name\":\"bridge\",\"Id\":\"f1f1f1f1f1f1\",\"Scope\":\"local\",\"Driver\":\"bridge\",\"EnableIPv6\":false,\"Internal\":false,\"IPAM\":{\"Config\":[{\"Subnet\":\"172.17.0.0/16\",\"Gateway\":\"172.17.0.1\"}]},\"Containers\":{\"c1ffffff\":{\"Name\":\"web-1\",\"IPv4Address\":\"172.17.0.2/16\"}}}]
+@@VOLUMES@@
+[{\"CreatedAt\":\"2026-10-01T08:00:00+08:00\",\"Driver\":\"local\",\"Labels\":null,\"Mountpoint\":\"/var/lib/docker/volumes/app-data/_data\",\"Name\":\"app-data\",\"Options\":null,\"Scope\":\"local\"},{\"CreatedAt\":\"2026-10-02T09:30:00+08:00\",\"Driver\":\"local\",\"Mountpoint\":\"/var/lib/docker/volumes/pgdata/_data\",\"Name\":\"pgdata\",\"Scope\":\"local\"}]
 @@END@@
 ";
 
@@ -1338,6 +1785,7 @@ sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\t<none>\
         assert_eq!(list.images.len(), 2);
         assert_eq!(list.images[0].repository, "nginx");
         assert_eq!(list.images[0].size, "187MB");
+        assert_eq!(list.images[0].created_at, "2026-10-20 08:00:00 +0800 CST");
         assert_eq!(list.images[1].repository, "<none>");
     }
 
@@ -1372,9 +1820,127 @@ sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\t<none>\
 
     #[test]
     fn parses_empty_lists() {
-        let list = parse_list("@@DIAG@@\nUID=1000\n@@CONTAINERS@@\n@@IMAGES@@\n@@END@@\n").unwrap();
+        let list = parse_list("@@DIAG@@\nUID=1000\n@@CONTAINERS@@\n@@IMAGES@@\n@@NETWORKS@@\n@@END@@\n").unwrap();
         assert!(list.containers.is_empty());
         assert!(list.images.is_empty());
+        assert!(list.networks.is_empty());
+        assert!(list.volumes.is_empty());
+    }
+
+    #[test]
+    fn parses_volumes_from_inspect_json() {
+        let list = parse_list(SAMPLE).unwrap();
+        assert_eq!(list.volumes.len(), 2);
+        assert_eq!(list.volumes[0].name, "app-data");
+        assert_eq!(list.volumes[0].driver, "local");
+        assert_eq!(list.volumes[0].scope, "local");
+        assert_eq!(
+            list.volumes[0].mountpoint,
+            "/var/lib/docker/volumes/app-data/_data"
+        );
+        assert_eq!(list.volumes[0].created_at, "2026-10-01T08:00:00+08:00");
+        assert_eq!(list.volumes[1].name, "pgdata");
+
+        // 未按名称排序、缺少 CreatedAt 的旧版输出
+        let multi = r#"@@DIAG@@
+@@VOLUMES@@
+[{"Name":"zeta","Driver":"nfs","Scope":"global","Mountpoint":"/mnt/z"},{"Name":"alpha","Driver":"local","Scope":"local"}]
+@@END@@
+"#;
+        let list = parse_list(multi).unwrap();
+        assert_eq!(list.volumes.len(), 2);
+        assert_eq!(list.volumes[0].name, "alpha");
+        assert_eq!(list.volumes[0].driver, "local");
+        assert_eq!(list.volumes[0].mountpoint, "");
+        assert_eq!(list.volumes[0].created_at, "");
+        assert_eq!(list.volumes[1].scope, "global");
+
+        let bad = "@@DIAG@@\n@@VOLUMES@@\nError response from daemon: oops\n@@END@@\n";
+        assert!(parse_list(bad)
+            .unwrap_err()
+            .contains("无法解析 docker 数据卷"));
+    }
+
+    #[test]
+    fn parses_networks_from_inspect_json() {
+        let list = parse_list(SAMPLE).unwrap();
+        assert_eq!(list.networks.len(), 1);
+        let bridge = &list.networks[0];
+        assert_eq!(bridge.name, "bridge");
+        assert_eq!(bridge.driver, "bridge");
+        assert_eq!(bridge.scope, "local");
+        assert_eq!(bridge.subnet, "172.17.0.0/16");
+        assert_eq!(bridge.gateway, "172.17.0.1");
+        assert!(!bridge.internal);
+        assert!(!bridge.ipv6);
+        assert_eq!(bridge.containers, vec!["web-1 (172.17.0.2/16)"]);
+
+        let multi = r#"@@DIAG@@
+@@NETWORKS@@
+[{"Name":"web-net","Id":"e2","Scope":"local","Driver":"bridge","EnableIPv6":true,"Internal":true,"IPAM":{"Config":[{"Subnet":"172.20.0.0/16","Gateway":"172.20.0.1"},{"Subnet":"fd00::/64","Gateway":"fd00::1"}]},"Containers":{"z9":{"Name":"b-1","IPv4Addresses":["172.20.0.3/16"]},"a1":{"Name":"a-1","IPv4Address":"172.20.0.2/16"}}},
+ {"Name":"alpha","Id":"e1","Driver":"overlay","Scope":"swarm","Internal":false,"EnableIPv6":false,"IPAM":{"Config":[]},"Containers":{}}]
+@@END@@
+"#;
+        let list = parse_list(multi).unwrap();
+        assert_eq!(list.networks.len(), 2);
+        assert_eq!(list.networks[0].name, "alpha");
+        assert_eq!(list.networks[0].driver, "overlay");
+        assert_eq!(list.networks[0].scope, "swarm");
+        assert!(list.networks[0].subnet.is_empty());
+        assert!(list.networks[0].containers.is_empty());
+        let web = &list.networks[1];
+        assert_eq!(web.subnet, "172.20.0.0/16, fd00::/64");
+        assert_eq!(web.gateway, "172.20.0.1, fd00::1");
+        assert!(web.internal);
+        assert!(web.ipv6);
+        assert_eq!(web.containers, vec!["a-1 (172.20.0.2/16)", "b-1 (172.20.0.3/16)"]);
+
+        let bad = "@@DIAG@@\n@@NETWORKS@@\nError response from daemon: oops\n@@END@@\n";
+        assert!(parse_list(bad).unwrap_err().contains("无法解析 docker 网络"));
+    }
+
+    #[test]
+    fn validates_network_specs_and_builds_create_script() {
+        assert_eq!(validate_network_name(" app-net_1.0 ").unwrap(), "app-net_1.0");
+        assert!(validate_network_name("").is_err());
+        assert!(validate_network_name("-net").is_err());
+        assert!(validate_network_name("net;id").is_err());
+
+        let spec = validate_network_spec(
+            "app-net",
+            "Bridge",
+            Some("172.20.0.0/16"),
+            Some("172.20.0.1"),
+        )
+        .unwrap();
+        assert_eq!(spec.driver, "bridge");
+        assert_eq!(spec.subnet.as_deref(), Some("172.20.0.0/16"));
+        let script = build_network_create_script(&spec);
+        assert!(script.contains(
+            "network create --driver 'bridge' --subnet '172.20.0.0/16' --gateway '172.20.0.1' 'app-net'"
+        ));
+        assert!(script.contains(ACTION_OK));
+
+        let bare = validate_network_spec("net2", "ipvlan", None, None).unwrap();
+        assert!(build_network_create_script(&bare)
+            .contains("network create --driver 'ipvlan' 'net2'"));
+
+        assert!(validate_network_spec("n", "host", None, None).is_err());
+        assert!(validate_network_spec("n", "bridge", Some("172.20.0.0"), None).is_err());
+        assert!(validate_network_spec("n", "bridge", Some("172.20.0.0/40"), None).is_err());
+        assert!(validate_network_spec("n", "bridge", None, Some("172.20.0.1")).is_err());
+        assert!(validate_network_spec("n", "bridge", Some("bad/16"), None).is_err());
+        assert!(validate_network_spec("n", "bridge", Some("fd00::/64"), Some("fd00::1")).is_ok());
+    }
+
+    #[test]
+    fn builds_network_action_script() {
+        let script = build_action_script("network", "remove", "app-net").unwrap();
+        assert!(script.contains("network rm 'app-net'"));
+        assert!(build_action_script("network", "remove", "bridge").is_err());
+        assert!(build_action_script("network", "remove", "host").is_err());
+        assert!(build_action_script("network", "remove", "bad;id").is_err());
+        assert!(build_action_script("network", "start", "app-net").is_err());
     }
 
     #[test]
@@ -1408,7 +1974,10 @@ sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\t<none>\
         assert!(validate_action("container", "rmi").is_err());
         assert!(validate_action("image", "remove").is_ok());
         assert!(validate_action("image", "stop").is_err());
-        assert!(validate_action("volume", "remove").is_err());
+        assert!(validate_action("network", "remove").is_ok());
+        assert!(validate_action("network", "create").is_err());
+        assert!(validate_action("volume", "remove").is_ok());
+        assert!(validate_action("volume", "create").is_err());
     }
 
     #[test]
@@ -1425,12 +1994,18 @@ sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\t<none>\
             validate_target("image", "sha256:abcd1234").unwrap(),
             "sha256:abcd1234"
         );
+        assert_eq!(validate_target("network", "app-net_1").unwrap(), "app-net_1");
         assert!(validate_target("container", "").is_err());
         assert!(validate_target("container", "-rf").is_err());
         assert!(validate_target("container", "web;rm -rf /").is_err());
         assert!(validate_target("image", "nginx latest").is_err());
         assert!(validate_target("image", "nginx:latest$(id)").is_err());
-        assert!(validate_target("volume", "data").is_err());
+        assert_eq!(
+            validate_target("volume", "app-data_1").unwrap(),
+            "app-data_1"
+        );
+        assert!(validate_target("volume", "-data").is_err());
+        assert!(validate_target("volume", "data;id").is_err());
     }
 
     #[test]
@@ -1444,7 +2019,31 @@ sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\t<none>\
         assert!(build_action_script("image", "remove", "nginx:latest")
             .unwrap()
             .contains("\"$DOCKER\" rmi 'nginx:latest'"));
+        assert!(build_action_script("volume", "remove", "app-data")
+            .unwrap()
+            .contains("\"$DOCKER\" volume rm 'app-data'"));
         assert!(build_action_script("container", "explode", "web").is_err());
+    }
+
+    #[test]
+    fn validates_volume_specs_and_builds_create_script() {
+        assert_eq!(validate_volume_name(" app-data_1 ").unwrap(), "app-data_1");
+        assert!(validate_volume_name("").is_err());
+        assert!(validate_volume_name("-data").is_err());
+        assert!(validate_volume_name("data;id").is_err());
+        assert!(validate_volume_name(&"v".repeat(256)).is_err());
+
+        let spec = validate_volume_spec("app-data", "Local").unwrap();
+        assert_eq!(spec.driver, "local");
+        let script = build_volume_create_script(&spec);
+        assert!(script.contains("volume create --driver 'local' 'app-data'"));
+        assert!(script.contains(ACTION_OK));
+
+        let bare = validate_volume_spec("pgdata", "   ").unwrap();
+        assert_eq!(bare.driver, "local");
+        assert_eq!(validate_volume_spec("v", "nfs").unwrap().driver, "nfs");
+        assert!(validate_volume_spec("v", "bad driver").is_err());
+        assert!(validate_volume_spec("v", "-x").is_err());
     }
 
     #[test]

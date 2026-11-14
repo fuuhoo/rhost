@@ -455,6 +455,8 @@ pub fn run() {
             toolbox::toolbox_deploy_pubkey,
             toolbox::toolbox_docker_list,
             toolbox::toolbox_docker_action,
+            toolbox::toolbox_docker_network_create,
+            toolbox::toolbox_docker_volume_create,
             toolbox::toolbox_docker_logs,
             toolbox::toolbox_docker_logs_save,
             toolbox::toolbox_docker_export,
@@ -471,6 +473,12 @@ pub fn run() {
             toolbox::toolbox_syslog_sources,
             toolbox::toolbox_syslog_read,
             toolbox::toolbox_syslog_save,
+            toolbox::toolbox_server_time,
+            toolbox::toolbox_ntp_status,
+            toolbox::toolbox_ntp_install,
+            toolbox::toolbox_ntp_configure,
+            toolbox::toolbox_ntp_sync,
+            toolbox::toolbox_ntp_service,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
