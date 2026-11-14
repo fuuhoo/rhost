@@ -188,6 +188,87 @@ watch(() => savedSettings.memInterval, () => {
   if (pollingActive.value) startPolling()
 })
 
+/* ---- 服务器时间：读取远端时钟后按本地节奏走秒，60s 校一次 ---- */
+interface ServerTime {
+  epochMs: number
+  tzOffsetMinutes: number
+  tzName: string
+  formatted: string
+}
+
+const clockBase = ref<{ epoch: number; at: number } | null>(null)
+const clockTick = ref(Date.now())
+const clockTz = ref({ offset: 0, name: '' })
+
+async function pollClock() {
+  const sid = activeSession.value?.backendId
+  if (!sid) return
+  const sent = Date.now()
+  try {
+    const r = await invoke<ServerTime>('toolbox_server_time', { sessionId: sid })
+    const at = Date.now()
+    // date 只给到秒：用半个往返时间补齐到「响应时刻」的服务器时间
+    const half = Math.min(Math.max(Math.round((at - sent) / 2), 0), 999)
+    clockBase.value = { epoch: r.epochMs + half, at }
+    clockTz.value = { offset: r.tzOffsetMinutes, name: r.tzName }
+    clockTick.value = at
+  } catch {
+    // 会话刚断/通道忙时保留上一次读数，下个周期再试
+  }
+}
+
+const clockText = computed(() => {
+  const b = clockBase.value
+  if (!b) return ''
+  const d = new Date(b.epoch + (clockTick.value - b.at) + clockTz.value.offset * 60_000)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ` +
+    `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`
+})
+
+const clockTitle = computed(() => {
+  const tz = clockTz.value
+  const total = tz.offset
+  const sign = total < 0 ? '-' : '+'
+  const abs = Math.abs(total)
+  const hm = `UTC${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`
+  return `服务器本地时间${tz.name ? `（${tz.name} · ${hm}）` : `（${hm}）`}`
+})
+
+/* 时钟只在已连接且状态栏可见时轮询（与内存采集同一视线门控） */
+const clockActive = computed(() => connected.value && barVisible.value && docVisible.value)
+let clockTimer: ReturnType<typeof setInterval> | null = null
+let resyncTimer: ReturnType<typeof setInterval> | null = null
+const CLOCK_RESYNC_MS = 60_000
+
+function startClock() {
+  stopClock()
+  void pollClock()
+  clockTimer = setInterval(() => {
+    if (clockBase.value) clockTick.value = Date.now()
+  }, 1000)
+  resyncTimer = setInterval(() => void pollClock(), CLOCK_RESYNC_MS)
+}
+function stopClock() {
+  if (clockTimer) {
+    clearInterval(clockTimer)
+    clockTimer = null
+  }
+  if (resyncTimer) {
+    clearInterval(resyncTimer)
+    resyncTimer = null
+  }
+}
+
+watch(clockActive, active => {
+  if (active) startClock()
+  else stopClock()
+})
+watch(() => activeSession.value?.backendId, () => {
+  clockBase.value = null
+  if (clockActive.value) startClock()
+})
+
 onMounted(() => {
   document.addEventListener('visibilitychange', onVisibility)
   if (barEl.value && typeof IntersectionObserver !== 'undefined') {
@@ -197,9 +278,11 @@ onMounted(() => {
     io.observe(barEl.value)
   }
   if (pollingActive.value) startPolling()
+  if (clockActive.value) startClock()
 })
 onUnmounted(() => {
   stopPolling()
+  stopClock()
   document.removeEventListener('visibilitychange', onVisibility)
   io?.disconnect()
 })
@@ -214,6 +297,7 @@ onUnmounted(() => {
     <span class="item">
       {{ activeSession ? `${activeSession.host.user}@${activeSession.host.ip}:${activeSession.host.port}` : '—' }}
     </span>
+    <span v-if="clockText" class="item clock" :title="clockTitle">{{ clockText }}</span>
     <span class="item">{{ hostKeyLabel }}</span>
     <span class="item">{{ cipherLabel }}</span>
     <span class="spacer"></span>
@@ -250,3 +334,7 @@ onUnmounted(() => {
     </span>
   </footer>
 </template>
+
+<style scoped>
+.clock { font-variant-numeric: tabular-nums; }
+</style>

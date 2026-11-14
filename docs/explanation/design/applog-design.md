@@ -263,6 +263,8 @@
 | 容器终端 | `toolbox.docker.terminal` | INFO | 打开：op=open、container、sudo（none/passwordless/password）、cols、rows、elapsed_ms；关闭：op=close。**kv 不含 sudo 口令** |
 | 系统日志来源探测 | `toolbox.syslog.sources` | INFO/WARN | 完成：os、distro、count（来源数）、journal（是否含 journald）、elapsed_ms、timed_out；失败 WARN 记 exit_code、err。**kv 不含日志正文** |
 | 系统日志读取 / 保存 | `toolbox.syslog.read` | INFO/WARN | 读取完成：source（来源 id）、tail、since/until（时间段，可空）、chars、truncated、elevated、elapsed_ms；失败 WARN 记 source、tail、since/until、exit_code、timed_out、err。保存：op=save、path（本地）、bytes。**kv 不含日志正文与 sudo 口令** |
+| 服务器时间 / NTP 状态 | `toolbox.time.status` | INFO/WARN | 完成：os、distro、service（chrony/ntpd/timesyncd/none）、installed、active、enabled、synchronized、offset_ms、servers（时间源数）、tz、tz_offset_minutes、elapsed_ms；失败 WARN 记 elapsed_ms、err。**kv 不含 sudo 口令** |
+| NTP 安装 / 配置 / 校时 / 启停 | `toolbox.time.change` | INFO/WARN | op（install/configure/sync/enable/disable/start/stop）、service、package_manager（安装）、servers（保存的地址列表）、active/enabled（操作后）、exit_code、timed_out、elapsed_ms；失败 WARN 另记 err |
 
 ### 4.7 AI 助手（target: `ai`，带 scope 标签）
 

@@ -12,6 +12,7 @@ import { copyText, keys } from '../../stores/keys'
 import type { SshKey } from '../../types'
 import DockerTerminal, { type DockerTermChannel } from './DockerTerminal.vue'
 import SyslogPanel from './SyslogPanel.vue'
+import TimePanel from './TimePanel.vue'
 
 interface PortRow {
   port: number
@@ -71,8 +72,33 @@ interface DockerImage {
   id: string
   repository: string
   tag: string
+  /** 相对时间（如 `2 weeks ago`），仅展示 */
   created: string
+  /** 原始时间戳，供按创建时间排序 */
+  createdAt: string
   size: string
+}
+
+interface DockerNetwork {
+  id: string
+  name: string
+  driver: string
+  scope: string
+  subnet: string
+  gateway: string
+  internal: boolean
+  ipv6: boolean
+  containers: string[]
+}
+
+interface DockerVolume {
+  name: string
+  driver: string
+  scope: string
+  /** 宿主机上的数据目录；部分旧版 daemon 为空 */
+  mountpoint: string
+  /** 创建时间；部分 daemon 不返回该字段 */
+  createdAt: string
 }
 
 interface DockerListResult {
@@ -81,6 +107,8 @@ interface DockerListResult {
   composeVersion: string | null
   containers: DockerContainer[]
   images: DockerImage[]
+  networks: DockerNetwork[]
+  volumes: DockerVolume[]
 }
 
 interface DockerLogsResult {
@@ -97,8 +125,8 @@ interface DockerConfig {
   dataRoot: string | null
 }
 
-type Tab = 'firewall' | 'ports' | 'pubkey' | 'docker' | 'syslog'
-type DockerView = 'containers' | 'images' | 'config'
+type Tab = 'firewall' | 'ports' | 'pubkey' | 'docker' | 'syslog' | 'time'
+type DockerView = 'containers' | 'images' | 'networks' | 'volumes' | 'config'
 
 const SUDO_REQUIRED = 'SUDO_PASSWORD_REQUIRED'
 const SUDO_INCORRECT = 'SUDO_PASSWORD_INCORRECT'
@@ -262,6 +290,10 @@ const dockerStateFilter = ref<'all' | 'running' | 'exited' | 'paused' | 'other'>
 
 const dockerContainers = computed(() => docker.value?.containers ?? [])
 const dockerImages = computed(() => docker.value?.images ?? [])
+const dockerNetworks = computed(() => docker.value?.networks ?? [])
+const dockerVolumes = computed(() => docker.value?.volumes ?? [])
+const netCreate = ref<{ name: string, driver: string, subnet: string, gateway: string } | null>(null)
+const volCreate = ref<{ name: string, driver: string } | null>(null)
 
 /** 悬空镜像没有标签，用镜像 ID 作为删除目标 */
 function imageRef(img: DockerImage): string {
@@ -313,12 +345,273 @@ const filteredImages = computed(() => {
   })
 })
 
+const filteredNetworks = computed(() => {
+  const q = dockerQuery.value.trim().toLowerCase()
+  return dockerNetworks.value.filter(n => {
+    if (!q) return true
+    return [n.name, n.driver, n.scope, n.subnet, n.gateway, n.id, ...n.containers].some(v =>
+      v.toLowerCase().includes(q),
+    )
+  })
+})
+
+const filteredVolumes = computed(() => {
+  const q = dockerQuery.value.trim().toLowerCase()
+  return dockerVolumes.value.filter(v => {
+    if (!q) return true
+    return [v.name, v.driver, v.scope, v.mountpoint, v.createdAt].some(field =>
+      field.toLowerCase().includes(q),
+    )
+  })
+})
+
+/* ---- Docker 列表：表头排序与拖动列宽 ---- */
+type DockerTable = 'containers' | 'images' | 'networks' | 'volumes'
+
+interface DockerSortState { key: string, dir: 'asc' | 'desc' }
+const dockerSort = reactive<Record<DockerTable, DockerSortState>>({
+  containers: { key: '', dir: 'asc' },
+  images: { key: '', dir: 'asc' },
+  networks: { key: '', dir: 'asc' },
+  volumes: { key: '', dir: 'asc' },
+})
+
+const DOCKER_COLUMNS: Record<DockerTable, { key: string, label: string }[]> = {
+  containers: [
+    { key: 'name', label: '名称' },
+    { key: 'image', label: '镜像' },
+    { key: 'state', label: '状态' },
+    { key: 'ports', label: '端口' },
+    { key: 'created', label: '创建时间' },
+    { key: '', label: '操作' },
+  ],
+  images: [
+    { key: 'repo', label: '仓库:标签' },
+    { key: 'id', label: '镜像 ID' },
+    { key: 'size', label: '大小' },
+    { key: 'created', label: '创建时间' },
+    { key: '', label: '操作' },
+  ],
+  networks: [
+    { key: 'name', label: '名称' },
+    { key: 'driver', label: '驱动' },
+    { key: 'subnet', label: '子网 / 网关' },
+    { key: 'containers', label: '已连接容器' },
+    { key: 'scope', label: '范围' },
+    { key: '', label: '操作' },
+  ],
+  volumes: [
+    { key: 'name', label: '名称' },
+    { key: 'driver', label: '驱动' },
+    { key: 'mountpoint', label: '挂载点' },
+    { key: 'created', label: '创建时间' },
+    { key: '', label: '操作' },
+  ],
+}
+
+function toggleDockerSort(view: DockerTable, key: string) {
+  if (colResizing) return
+  const state = dockerSort[view]
+  if (state.key === key) state.dir = state.dir === 'asc' ? 'desc' : 'asc'
+  else {
+    state.key = key
+    state.dir = 'asc'
+  }
+}
+
+const CONTAINER_STATE_RANK: Record<string, number> = {
+  running: 0,
+  restarting: 1,
+  paused: 2,
+  created: 3,
+  exited: 4,
+  dead: 5,
+  removing: 6,
+}
+
+function imageSizeBytes(size: string): number {
+  const m = /^([\d.]+)\s*(B|KB|MB|GB|TB)?$/i.exec(size.trim())
+  if (!m) return 0
+  const unit = (m[2] ?? 'B').toUpperCase()
+  const mult: Record<string, number> = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3, TB: 1024 ** 4 }
+  return Number(m[1]) * (mult[unit] ?? 1)
+}
+
+function containerSortValue(c: DockerContainer, key: string): string | number {
+  switch (key) {
+    case 'name': return c.name
+    case 'image': return c.image
+    case 'state': return CONTAINER_STATE_RANK[c.state] ?? 99
+    case 'ports': return c.ports
+    case 'created': return c.created
+    default: return ''
+  }
+}
+
+function imageSortValue(img: DockerImage, key: string): string | number {
+  switch (key) {
+    case 'repo': return imageRef(img)
+    case 'id': return img.id
+    case 'size': return imageSizeBytes(img.size)
+    case 'created': return img.createdAt || img.created
+    default: return ''
+  }
+}
+
+function networkSortValue(n: DockerNetwork, key: string): string | number {
+  switch (key) {
+    case 'name': return n.name
+    case 'driver': return n.driver
+    case 'subnet': return n.subnet
+    case 'containers': return n.containers.length
+    case 'scope': return n.scope
+    default: return ''
+  }
+}
+
+function volumeSortValue(v: DockerVolume, key: string): string | number {
+  switch (key) {
+    case 'name': return v.name
+    case 'driver': return v.driver
+    case 'mountpoint': return v.mountpoint
+    case 'created': return v.createdAt
+    default: return ''
+  }
+}
+
+function sortDockerRows<T>(
+  rows: T[], state: DockerSortState, value: (row: T, key: string) => string | number,
+): T[] {
+  if (!state.key) return rows
+  const dir = state.dir === 'asc' ? 1 : -1
+  return [...rows].sort((a, b) => {
+    const va = value(a, state.key)
+    const vb = value(b, state.key)
+    if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * dir
+    return String(va).localeCompare(String(vb), 'zh-CN', { numeric: true, sensitivity: 'base' }) * dir
+  })
+}
+
+const sortedContainers = computed(() =>
+  sortDockerRows(filteredContainers.value, dockerSort.containers, containerSortValue))
+const sortedImages = computed(() =>
+  sortDockerRows(filteredImages.value, dockerSort.images, imageSortValue))
+const sortedNetworks = computed(() =>
+  sortDockerRows(filteredNetworks.value, dockerSort.networks, networkSortValue))
+const sortedVolumes = computed(() =>
+  sortDockerRows(filteredVolumes.value, dockerSort.volumes, volumeSortValue))
+
+/** 首列到操作列前的像素宽度；操作列保持自适应，拖动后总宽仍填满容器 */
+const dockerColWidths = reactive<Record<DockerTable, number[] | null>>({
+  containers: null,
+  images: null,
+  networks: null,
+  volumes: null,
+})
+const DOCKER_OPS_MIN: Record<DockerTable, number> = {
+  containers: 170,
+  images: 76,
+  networks: 56,
+  volumes: 56,
+}
+
+function dockerGridStyle(view: DockerTable) {
+  const widths = dockerColWidths[view]
+  if (!widths) return undefined
+  const fixed = widths.slice(0, -1).map(w => `${Math.round(w * 100) / 100}px`)
+  return { gridTemplateColumns: [...fixed, `minmax(${DOCKER_OPS_MIN[view]}px, 1fr)`].join(' ') }
+}
+
+let colDrag: { view: DockerTable, index: number, startX: number, widths: number[] } | null = null
+let colResizing = false
+
+function startColResize(view: DockerTable, e: PointerEvent, index: number) {
+  const head = (e.currentTarget as HTMLElement).closest('.dk-head')
+  if (!head) return
+  const widths = Array.from(head.children).map(el => (el as HTMLElement).getBoundingClientRect().width)
+  dockerColWidths[view] = widths
+  colDrag = { view, index, startX: e.clientX, widths: [...widths] }
+  colResizing = true
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+  window.addEventListener('pointermove', onColResize)
+  window.addEventListener('pointerup', endColResize, { once: true })
+}
+
+function onColResize(e: PointerEvent) {
+  if (!colDrag) return
+  const { view, index, startX, widths } = colDrag
+  const minOf = (i: number) => i === widths.length - 1 ? DOCKER_OPS_MIN[view] : 48
+  const next = [...widths]
+  const raw = e.clientX - startX
+  if (raw > 0) {
+    // 加宽：从右侧列依次借空间，借不到则停在该上限，总宽保持不变
+    let remain = raw
+    for (let i = index + 1; i < next.length && remain > 0; i++) {
+      const give = Math.min(remain, Math.max(0, next[i] - minOf(i)))
+      next[i] -= give
+      remain -= give
+    }
+    next[index] += raw - remain
+  } else if (raw < 0) {
+    // 收窄：腾出的空间交给右邻列
+    const w = Math.max(48, widths[index] + raw)
+    next[index + 1] += widths[index] - w
+    next[index] = w
+  }
+  dockerColWidths[view] = next
+}
+
+function endColResize() {
+  colDrag = null
+  document.body.style.cursor = ''
+  document.body.style.userSelect = ''
+  window.removeEventListener('pointermove', onColResize)
+  // 松开后浏览器还会补一次 click，避免误触排序
+  setTimeout(() => { colResizing = false }, 0)
+}
+
+/** Docker 预置网络不可删除 */
+const BUILTIN_NETWORKS = ['bridge', 'host', 'none']
+const NETWORK_DRIVERS = ['bridge', 'overlay', 'macvlan', 'ipvlan']
+
+function isBuiltinNetwork(n: DockerNetwork) {
+  return BUILTIN_NETWORKS.includes(n.name)
+}
+
+function networkContainersLabel(n: DockerNetwork) {
+  return n.containers.length ? n.containers.join('、') : '—'
+}
+
+/** 匿名卷由 Docker 生成 64 位十六进制名称 */
+function isAnonymousVolume(v: DockerVolume) {
+  return /^[0-9a-f]{64}$/.test(v.name)
+}
+
+/** volume inspect 的 CreatedAt 为 ISO 8601，压缩到分钟精度便于列展示 */
+function volumeCreatedLabel(v: DockerVolume) {
+  const raw = v.createdAt.trim()
+  if (!raw) return '—'
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(raw)
+  return m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}` : raw
+}
+
 const dockerCountLabel = computed(() => {
   if (!docker.value) return ''
   if (dockerView.value === 'containers') {
     const total = dockerContainers.value.length
     const shown = filteredContainers.value.length
     return shown === total ? `共 ${total} 个容器` : `显示 ${shown} / ${total} 个容器`
+  }
+  if (dockerView.value === 'networks') {
+    const total = dockerNetworks.value.length
+    const shown = filteredNetworks.value.length
+    return shown === total ? `共 ${total} 个网络` : `显示 ${shown} / ${total} 个网络`
+  }
+  if (dockerView.value === 'volumes') {
+    const total = dockerVolumes.value.length
+    const shown = filteredVolumes.value.length
+    return shown === total ? `共 ${total} 个数据卷` : `显示 ${shown} / ${total} 个数据卷`
   }
   const total = dockerImages.value.length
   const shown = filteredImages.value.length
@@ -933,6 +1226,8 @@ async function saveDockerConfig() {
 
 function setDockerView(view: DockerView) {
   dockerView.value = view
+  if (view !== 'networks') netCreate.value = null
+  if (view !== 'volumes') volCreate.value = null
   if (view === 'config' && !configLoaded.value) void loadDockerConfig()
 }
 
@@ -941,6 +1236,8 @@ function resetDocker() {
   dockerLogs.value = null
   logs.value = null
   transfer.value = null
+  netCreate.value = null
+  volCreate.value = null
   docker.value = null
   dockerConfig.value = null
   configLoaded.value = false
@@ -1027,6 +1324,130 @@ async function removeImage(img: DockerImage) {
       kind: 'image',
       action: 'remove',
       target: ref,
+      sudoPassword: pw,
+    }))
+    toast(msg, 'ok', 2200)
+    await loadDocker()
+  } catch (e) {
+    reportError(e)
+  } finally {
+    busy.value = ''
+  }
+}
+
+function openNetCreate() {
+  netCreate.value = { name: '', driver: 'bridge', subnet: '', gateway: '' }
+}
+
+async function createNetwork() {
+  const sid = backendId.value
+  const form = netCreate.value
+  if (!sid || !form) return
+  const name = form.name.trim()
+  if (!name) {
+    error.value = '请填写网络名称'
+    return
+  }
+  busy.value = 'docker-act'
+  error.value = ''
+  try {
+    const msg = await runElevated(pw => invoke<string>('toolbox_docker_network_create', {
+      sessionId: sid,
+      name,
+      driver: form.driver,
+      subnet: form.subnet.trim() || null,
+      gateway: form.gateway.trim() || null,
+      sudoPassword: pw,
+    }))
+    toast(msg, 'ok', 2400)
+    netCreate.value = null
+    await loadDocker()
+  } catch (e) {
+    reportError(e)
+  } finally {
+    busy.value = ''
+  }
+}
+
+async function removeNetwork(n: DockerNetwork) {
+  const sid = backendId.value
+  if (!sid || isBuiltinNetwork(n)) return
+  const ok = await confirmDialog(
+    n.containers.length
+      ? `删除网络 ${n.name}？该网络仍连接 ${n.containers.length} 个容器，需先断开后才能删除。`
+      : `删除网络 ${n.name}？该操作不可恢复。`,
+    '删除网络',
+    { confirmText: '删除', danger: true },
+  )
+  if (!ok) return
+  busy.value = 'docker-act'
+  error.value = ''
+  try {
+    const msg = await runElevated(pw => invoke<string>('toolbox_docker_action', {
+      sessionId: sid,
+      kind: 'network',
+      action: 'remove',
+      target: n.name,
+      sudoPassword: pw,
+    }))
+    toast(msg, 'ok', 2200)
+    await loadDocker()
+  } catch (e) {
+    reportError(e)
+  } finally {
+    busy.value = ''
+  }
+}
+
+function openVolCreate() {
+  volCreate.value = { name: '', driver: 'local' }
+}
+
+async function createVolume() {
+  const sid = backendId.value
+  const form = volCreate.value
+  if (!sid || !form) return
+  const name = form.name.trim()
+  if (!name) {
+    error.value = '请填写数据卷名称'
+    return
+  }
+  busy.value = 'docker-act'
+  error.value = ''
+  try {
+    const msg = await runElevated(pw => invoke<string>('toolbox_docker_volume_create', {
+      sessionId: sid,
+      name,
+      driver: form.driver.trim(),
+      sudoPassword: pw,
+    }))
+    toast(msg, 'ok', 2400)
+    volCreate.value = null
+    await loadDocker()
+  } catch (e) {
+    reportError(e)
+  } finally {
+    busy.value = ''
+  }
+}
+
+async function removeVolume(v: DockerVolume) {
+  const sid = backendId.value
+  if (!sid) return
+  const ok = await confirmDialog(
+    `删除数据卷 ${v.name}？卷内数据会被一并删除，且不可恢复。正在被容器使用的卷需先移除容器后才能删除。`,
+    '删除数据卷',
+    { confirmText: '删除', danger: true },
+  )
+  if (!ok) return
+  busy.value = 'docker-act'
+  error.value = ''
+  try {
+    const msg = await runElevated(pw => invoke<string>('toolbox_docker_action', {
+      sessionId: sid,
+      kind: 'volume',
+      action: 'remove',
+      target: v.name,
       sudoPassword: pw,
     }))
     toast(msg, 'ok', 2200)
@@ -1291,7 +1712,10 @@ function onKey(e: KeyboardEvent) {
   }
 }
 document.addEventListener('keydown', onKey)
-onUnmounted(() => document.removeEventListener('keydown', onKey))
+onUnmounted(() => {
+  document.removeEventListener('keydown', onKey)
+  if (colDrag) endColResize()
+})
 </script>
 
 <template>
@@ -1307,7 +1731,7 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
           </div>
           <div class="modal-title">
             <h2 id="tbxTitle">工具箱</h2>
-            <p>{{ sessionLabel }} · Docker、防火墙、端口、公钥与系统日志</p>
+            <p>{{ sessionLabel }} · Docker、防火墙、端口、公钥、系统日志与时间同步</p>
           </div>
           <button class="modal-close" title="关闭 (Esc)" @click="close">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
@@ -1334,6 +1758,9 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
           <button class="tbx-tab" :class="{ active: tab === 'syslog' }" @click="switchTab('syslog')">
             日志
           </button>
+          <button class="tbx-tab" :class="{ active: tab === 'time' }" @click="switchTab('time')">
+            时间
+          </button>
         </div>
 
         <div class="tbx-body">
@@ -1342,11 +1769,19 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
           <div v-else-if="error" class="tbx-error">
             <span>{{ error }}</span>
             <button class="tbx-link" @click="retryCurrent">{{ tab === 'pubkey' ? '重试写入' : '重试' }}</button>
+            <button class="tbx-error-close" title="关闭" aria-label="关闭" @click="error = ''">×</button>
           </div>
 
           <!-- 系统日志（自持来源探测 / 筛选 / 跟随 / 错误处理） -->
           <SyslogPanel
             v-if="sessionReady && tab === 'syslog'"
+            :session-id="backendId ?? ''"
+            :run-elevated="runElevated"
+          />
+
+          <!-- 服务器时间与 NTP（自持时钟 / 状态 / 提权操作） -->
+          <TimePanel
+            v-if="sessionReady && tab === 'time'"
             :session-id="backendId ?? ''"
             :run-elevated="runElevated"
           />
@@ -1657,6 +2092,18 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
                     镜像<span v-if="docker" class="dk-seg-count">{{ dockerImages.length }}</span>
                   </button>
                   <button
+                    :class="{ active: dockerView === 'networks' }"
+                    @click="setDockerView('networks')"
+                  >
+                    网络<span v-if="docker" class="dk-seg-count">{{ dockerNetworks.length }}</span>
+                  </button>
+                  <button
+                    :class="{ active: dockerView === 'volumes' }"
+                    @click="setDockerView('volumes')"
+                  >
+                    卷<span v-if="docker" class="dk-seg-count">{{ dockerVolumes.length }}</span>
+                  </button>
+                  <button
                     :class="{ active: dockerView === 'config' }"
                     @click="setDockerView('config')"
                   >
@@ -1666,7 +2113,13 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
                 <template v-if="dockerView !== 'config'">
                   <input
                     v-model="dockerQuery" class="tbx-input dk-search"
-                    :placeholder="dockerView === 'containers' ? '搜索名称 / 镜像 / 状态 / 端口…' : '搜索仓库 / 标签 / 镜像 ID…'"
+                    :placeholder="dockerView === 'containers'
+                      ? '搜索名称 / 镜像 / 状态 / 端口…'
+                      : dockerView === 'images'
+                        ? '搜索仓库 / 标签 / 镜像 ID…'
+                        : dockerView === 'networks'
+                          ? '搜索网络名称 / 驱动 / 子网 / 容器…'
+                          : '搜索卷名称 / 驱动 / 挂载点…'"
                     autocomplete="off" spellcheck="false"
                   />
                   <select
@@ -1691,6 +2144,14 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
                     v-if="dockerView === 'images'" class="tbx-btn"
                     :disabled="!!busy || !!transfer" @click="startImport"
                   >导入镜像</button>
+                  <button
+                    v-if="dockerView === 'networks'" class="tbx-btn"
+                    :disabled="!!busy" @click="netCreate ? (netCreate = null) : openNetCreate()"
+                  >{{ netCreate ? '取消新建' : '新建网络' }}</button>
+                  <button
+                    v-if="dockerView === 'volumes'" class="tbx-btn"
+                    :disabled="!!busy" @click="volCreate ? (volCreate = null) : openVolCreate()"
+                  >{{ volCreate ? '取消新建' : '新建卷' }}</button>
                   <button class="tbx-btn" :disabled="!!busy" @click="loadDocker">刷新</button>
                 </template>
                 <template v-else>
@@ -1702,16 +2163,33 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
 
               <!-- 容器列表 -->
               <template v-if="dockerView === 'containers'">
-                <div class="dk-head dk-cols-container">
-                  <span>名称</span><span>镜像</span><span>状态</span><span>端口</span><span>创建时间</span><span>操作</span>
+                <div class="dk-head dk-cols-container" :style="dockerGridStyle('containers')">
+                  <span
+                    v-for="(col, i) in DOCKER_COLUMNS.containers" :key="col.label"
+                    class="dk-th"
+                    :class="{ sortable: !!col.key, sorted: !!col.key && dockerSort.containers.key === col.key }"
+                    @click="col.key && toggleDockerSort('containers', col.key)"
+                  >
+                    {{ col.label }}
+                    <span v-if="col.key && dockerSort.containers.key === col.key" class="dk-sort">
+                      {{ dockerSort.containers.dir === 'asc' ? '▲' : '▼' }}
+                    </span>
+                    <span
+                      v-if="i < DOCKER_COLUMNS.containers.length - 1" class="dk-resizer"
+                      @click.stop @pointerdown.stop.prevent="startColResize('containers', $event, i)"
+                    ></span>
+                  </span>
                 </div>
                 <div class="dk-list">
-                  <div v-if="busy === 'docker'" class="tbx-empty">正在读取 Docker 容器与镜像…</div>
+                  <div v-if="busy === 'docker'" class="tbx-empty">正在读取 Docker 容器、镜像、网络与数据卷…</div>
                   <div v-else-if="!docker" class="tbx-empty">尚未读取</div>
                   <div v-else-if="!filteredContainers.length" class="tbx-empty">
                     {{ docker.containers.length ? '没有匹配筛选条件的容器' : '未发现容器' }}
                   </div>
-                  <div v-for="c in filteredContainers" :key="c.id" class="dk-row dk-cols-container">
+                  <div
+                    v-for="c in sortedContainers" :key="c.id" class="dk-row dk-cols-container"
+                    :style="dockerGridStyle('containers')"
+                  >
                     <span class="dk-name">
                       <span class="ellipsis" :title="c.name">{{ c.name }}</span>
                       <span class="dk-id mono" :title="c.id">{{ shortId(c.id) }}</span>
@@ -1833,16 +2311,33 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
                   </button>
                   <button class="tbx-link" :disabled="transfer.busy" @click="closeTransfer">取消</button>
                 </div>
-                <div class="dk-head dk-cols-image">
-                  <span>仓库:标签</span><span>镜像 ID</span><span>大小</span><span>创建时间</span><span>操作</span>
+                <div class="dk-head dk-cols-image" :style="dockerGridStyle('images')">
+                  <span
+                    v-for="(col, i) in DOCKER_COLUMNS.images" :key="col.label"
+                    class="dk-th"
+                    :class="{ sortable: !!col.key, sorted: !!col.key && dockerSort.images.key === col.key }"
+                    @click="col.key && toggleDockerSort('images', col.key)"
+                  >
+                    {{ col.label }}
+                    <span v-if="col.key && dockerSort.images.key === col.key" class="dk-sort">
+                      {{ dockerSort.images.dir === 'asc' ? '▲' : '▼' }}
+                    </span>
+                    <span
+                      v-if="i < DOCKER_COLUMNS.images.length - 1" class="dk-resizer"
+                      @click.stop @pointerdown.stop.prevent="startColResize('images', $event, i)"
+                    ></span>
+                  </span>
                 </div>
                 <div class="dk-list">
-                  <div v-if="busy === 'docker'" class="tbx-empty">正在读取 Docker 容器与镜像…</div>
+                  <div v-if="busy === 'docker'" class="tbx-empty">正在读取 Docker 容器、镜像、网络与数据卷…</div>
                   <div v-else-if="!docker" class="tbx-empty">尚未读取</div>
                   <div v-else-if="!filteredImages.length" class="tbx-empty">
                     {{ docker.images.length ? '没有匹配筛选条件的镜像' : '未发现镜像' }}
                   </div>
-                  <div v-for="img in filteredImages" :key="imageRef(img)" class="dk-row dk-cols-image">
+                  <div
+                    v-for="img in sortedImages" :key="imageRef(img)" class="dk-row dk-cols-image"
+                    :style="dockerGridStyle('images')"
+                  >
                     <span class="ellipsis mono" :title="imageRef(img)">{{ imageRef(img) }}</span>
                     <span class="mono muted" :title="img.id">{{ shortId(img.id) }}</span>
                     <span>{{ img.size }}</span>
@@ -1850,6 +2345,152 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
                     <span class="dk-ops">
                       <button class="tbx-link" :disabled="!!busy || !!transfer?.busy" @click="startExport(img)">导出</button>
                       <button class="tbx-link danger" :disabled="!!busy" @click="removeImage(img)">删除</button>
+                    </span>
+                  </div>
+                </div>
+              </template>
+
+              <!-- 网络列表 -->
+              <template v-else-if="dockerView === 'networks'">
+                <div v-if="netCreate" class="dk-transfer">
+                  <span class="dk-transfer-title">新建网络</span>
+                  <input
+                    v-model="netCreate.name" class="tbx-input dk-transfer-path"
+                    placeholder="网络名称，如 app-net" :disabled="busy === 'docker-act'"
+                    autocomplete="off" spellcheck="false"
+                  />
+                  <select
+                    v-model="netCreate.driver" class="tbx-input tbx-select dk-transfer-mode"
+                    :disabled="busy === 'docker-act'" title="网络驱动"
+                  >
+                    <option v-for="d in NETWORK_DRIVERS" :key="d" :value="d">{{ d }}</option>
+                  </select>
+                  <input
+                    v-model="netCreate.subnet" class="tbx-input dk-transfer-path"
+                    placeholder="子网（可选）172.20.0.0/16" :disabled="busy === 'docker-act'"
+                    autocomplete="off" spellcheck="false"
+                  />
+                  <input
+                    v-model="netCreate.gateway" class="tbx-input dk-transfer-path"
+                    placeholder="网关（可选）172.20.0.1" :disabled="busy === 'docker-act'"
+                    autocomplete="off" spellcheck="false"
+                  />
+                  <button
+                    class="tbx-btn primary" :disabled="busy === 'docker-act' || !netCreate.name.trim()"
+                    @click="createNetwork"
+                  >{{ busy === 'docker-act' ? '处理中…' : '创建' }}</button>
+                  <button class="tbx-link" :disabled="busy === 'docker-act'" @click="netCreate = null">取消</button>
+                </div>
+                <div class="dk-head dk-cols-network" :style="dockerGridStyle('networks')">
+                  <span
+                    v-for="(col, i) in DOCKER_COLUMNS.networks" :key="col.label"
+                    class="dk-th"
+                    :class="{ sortable: !!col.key, sorted: !!col.key && dockerSort.networks.key === col.key }"
+                    @click="col.key && toggleDockerSort('networks', col.key)"
+                  >
+                    {{ col.label }}
+                    <span v-if="col.key && dockerSort.networks.key === col.key" class="dk-sort">
+                      {{ dockerSort.networks.dir === 'asc' ? '▲' : '▼' }}
+                    </span>
+                    <span
+                      v-if="i < DOCKER_COLUMNS.networks.length - 1" class="dk-resizer"
+                      @click.stop @pointerdown.stop.prevent="startColResize('networks', $event, i)"
+                    ></span>
+                  </span>
+                </div>
+                <div class="dk-list">
+                  <div v-if="busy === 'docker'" class="tbx-empty">正在读取 Docker 网络…</div>
+                  <div v-else-if="!docker" class="tbx-empty">尚未读取</div>
+                  <div v-else-if="!filteredNetworks.length" class="tbx-empty">
+                    {{ docker.networks.length ? '没有匹配筛选条件的网络' : '未发现网络' }}
+                  </div>
+                  <div
+                    v-for="n in sortedNetworks" :key="n.id || n.name" class="dk-row dk-cols-network"
+                    :style="dockerGridStyle('networks')"
+                  >
+                    <span class="dk-name">
+                      <span class="ellipsis" :title="n.name">{{ n.name }}</span>
+                      <span class="dk-id mono" :title="n.id">{{ shortId(n.id) }}</span>
+                    </span>
+                    <span class="mono">{{ n.driver }}</span>
+                    <span class="ellipsis mono" :title="[n.subnet, n.gateway].filter(Boolean).join(' · ')">
+                      {{ n.subnet || '—' }}<template v-if="n.gateway"> · {{ n.gateway }}</template>
+                    </span>
+                    <span class="ellipsis" :title="n.containers.join('\n') || '无已连接容器'">
+                      {{ networkContainersLabel(n) }}
+                    </span>
+                    <span class="dk-net-flags">
+                      <span class="dk-pill">{{ n.scope || '—' }}</span>
+                      <span v-if="n.internal" class="dk-pill warn">内部</span>
+                      <span v-if="n.ipv6" class="dk-pill">IPv6</span>
+                    </span>
+                    <span class="dk-ops">
+                      <button
+                        class="tbx-link danger" :disabled="!!busy || isBuiltinNetwork(n)"
+                        :title="isBuiltinNetwork(n) ? 'Docker 预置网络不可删除' : '删除网络'"
+                        @click="removeNetwork(n)"
+                      >删除</button>
+                    </span>
+                  </div>
+                </div>
+              </template>
+
+              <!-- 数据卷列表 -->
+              <template v-else-if="dockerView === 'volumes'">
+                <div v-if="volCreate" class="dk-transfer">
+                  <span class="dk-transfer-title">新建数据卷</span>
+                  <input
+                    v-model="volCreate.name" class="tbx-input dk-transfer-path"
+                    placeholder="数据卷名称，如 app-data" :disabled="busy === 'docker-act'"
+                    autocomplete="off" spellcheck="false"
+                  />
+                  <input
+                    v-model="volCreate.driver" class="tbx-input dk-vol-driver"
+                    placeholder="驱动（默认 local）" title="卷驱动，留空使用 local"
+                    :disabled="busy === 'docker-act'" autocomplete="off" spellcheck="false"
+                  />
+                  <button
+                    class="tbx-btn primary" :disabled="busy === 'docker-act' || !volCreate.name.trim()"
+                    @click="createVolume"
+                  >{{ busy === 'docker-act' ? '处理中…' : '创建' }}</button>
+                  <button class="tbx-link" :disabled="busy === 'docker-act'" @click="volCreate = null">取消</button>
+                </div>
+                <div class="dk-head dk-cols-volume" :style="dockerGridStyle('volumes')">
+                  <span
+                    v-for="(col, i) in DOCKER_COLUMNS.volumes" :key="col.label"
+                    class="dk-th"
+                    :class="{ sortable: !!col.key, sorted: !!col.key && dockerSort.volumes.key === col.key }"
+                    @click="col.key && toggleDockerSort('volumes', col.key)"
+                  >
+                    {{ col.label }}
+                    <span v-if="col.key && dockerSort.volumes.key === col.key" class="dk-sort">
+                      {{ dockerSort.volumes.dir === 'asc' ? '▲' : '▼' }}
+                    </span>
+                    <span
+                      v-if="i < DOCKER_COLUMNS.volumes.length - 1" class="dk-resizer"
+                      @click.stop @pointerdown.stop.prevent="startColResize('volumes', $event, i)"
+                    ></span>
+                  </span>
+                </div>
+                <div class="dk-list">
+                  <div v-if="busy === 'docker'" class="tbx-empty">正在读取 Docker 数据卷…</div>
+                  <div v-else-if="!docker" class="tbx-empty">尚未读取</div>
+                  <div v-else-if="!filteredVolumes.length" class="tbx-empty">
+                    {{ docker.volumes.length ? '没有匹配筛选条件的数据卷' : '未发现数据卷' }}
+                  </div>
+                  <div
+                    v-for="v in sortedVolumes" :key="v.name" class="dk-row dk-cols-volume"
+                    :style="dockerGridStyle('volumes')"
+                  >
+                    <span class="dk-name">
+                      <span class="ellipsis" :title="v.name">{{ v.name }}</span>
+                      <span v-if="isAnonymousVolume(v)" class="dk-id">匿名卷</span>
+                    </span>
+                    <span class="mono">{{ v.driver || '—' }}</span>
+                    <span class="ellipsis mono muted" :title="v.mountpoint">{{ v.mountpoint || '—' }}</span>
+                    <span class="ellipsis" :title="v.createdAt">{{ volumeCreatedLabel(v) }}</span>
+                    <span class="dk-ops">
+                      <button class="tbx-link danger" :disabled="!!busy" @click="removeVolume(v)">删除</button>
                     </span>
                   </div>
                 </div>
@@ -1943,8 +2584,9 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
               </template>
 
               <p v-if="dockerView !== 'config'" class="pt-note">
-                容器与镜像通过 Docker socket 读取；普通用户需加入 docker 组或具备 sudo 权限。
+                容器、镜像与网络通过 Docker socket 读取；普通用户需加入 docker 组或具备 sudo 权限。
                 删除容器不会清理数据卷；镜像可从镜像地址拉取、从远端 tar 导入或导出为 tar，导入导出后可再通过 SFTP 下载或上传。
+                新建网络可指定驱动与子网/网关；bridge / host / none 为 Docker 预置网络，不可删除。
               </p>
             </template>
           </template>
@@ -2031,6 +2673,20 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
 }
 .tbx-link:hover { text-decoration: underline; }
 .tbx-link.danger { color: var(--red); }
+.tbx-error-close {
+  margin-left: auto;
+  align-self: flex-start;
+  border: 0;
+  background: none;
+  padding: 0 2px;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.1;
+  color: var(--red);
+  opacity: 0.6;
+  cursor: pointer;
+}
+.tbx-error-close:hover { opacity: 1; }
 .tbx-btn {
   padding: 6px 12px;
   border: 1px solid var(--border);
@@ -2366,10 +3022,11 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
 .dk-bar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   flex-shrink: 0;
 }
-.dk-search { flex: 1; }
+.dk-search { flex: 1 1 200px; min-width: 200px; }
 .dk-seg {
   display: flex;
   flex-shrink: 0;
@@ -2411,6 +3068,34 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
 .dk-cols-image {
   grid-template-columns: minmax(0, 1.6fr) 110px 76px 110px 76px;
 }
+.dk-cols-network {
+  grid-template-columns: minmax(0, 1.1fr) 58px minmax(0, 1.35fr) minmax(0, 1.35fr) 138px 56px;
+}
+.dk-cols-volume {
+  grid-template-columns: minmax(0, 1.15fr) 64px minmax(0, 2fr) 128px 56px;
+}
+.dk-vol-driver { flex: 0 0 170px; }
+.dk-net-flags {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+.dk-pill {
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-2);
+  font-size: 9.5px;
+  line-height: 16px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.dk-pill.warn {
+  border-color: color-mix(in srgb, var(--yellow) 45%, transparent);
+  color: var(--yellow);
+}
 .dk-head {
   font-size: 10.5px;
   font-weight: 600;
@@ -2420,6 +3105,42 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
+.dk-th {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  white-space: nowrap;
+}
+.dk-th.sortable { cursor: pointer; }
+.dk-th.sortable:hover { color: var(--text); }
+.dk-th.sorted { color: var(--text); }
+.dk-sort {
+  margin-left: 3px;
+  font-size: 8px;
+  line-height: 1;
+  color: var(--blue);
+}
+.dk-resizer {
+  position: absolute;
+  top: -6px;
+  bottom: -6px;
+  right: -5px;
+  width: 10px;
+  z-index: 2;
+  cursor: col-resize;
+}
+.dk-resizer::after {
+  content: '';
+  position: absolute;
+  top: 7px;
+  bottom: 7px;
+  left: 4px;
+  width: 1px;
+  background: var(--border);
+  opacity: 0;
+}
+.dk-th:hover .dk-resizer::after { opacity: 1; }
 .dk-list { flex: 1; min-height: 0; overflow-y: auto; }
 .dk-row {
   padding-top: 5px;
