@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 [中文](./CHANGELOG.zh-CN.md) · **English**
 
+## [2.8.0] - 2026-11-14
+
+### Added
+
+- New "Time" tab in the toolbox: reads the remote clock and timezone, probes chrony / ntpd / systemd-timesyncd service state, sync offset and time sources, and can install chrony, replace time sources, step the clock immediately and start/stop services; the previous config is backed up as `.rhost.bak`, while macOS only points to System Settings
+- Server time in the bottom status bar: ticks every second and resyncs once a minute, paused while the bar is hidden or the session is offline
+- New "Networks" sub-view in the toolbox Docker tab: name, driver, subnet / gateway, connected containers and scope, with create (driver / subnet / gateway) and delete; Docker's built-in networks cannot be deleted
+- New "Volumes" sub-view in the toolbox Docker tab: name (anonymous volumes labelled), driver, mountpoint and creation time, with create (driver defaults to `local`) and delete
+- The container / image / network / volume lists can be sorted by clicking a column header (click again to reverse) and resized by dragging the header divider; width changes borrow from or return to the columns on the right
+
+### Fixed
+
+- Toolbox error notices and delete confirmations now have a close button in the top-right corner
+
 ## [2.7.0] - 2026-11-12
 
 ### Added
