@@ -54,6 +54,17 @@ echo '@@PKG@@'
 for c in apt-get dnf yum zypper pacman apk; do
   command -v "$c" >/dev/null 2>&1 && { echo "$c"; break; }
 done
+echo '@@TZ@@'
+if command -v timedatectl >/dev/null 2>&1; then
+  timedatectl show -p Timezone --value 2>/dev/null
+fi
+cat /etc/timezone 2>/dev/null
+readlink /etc/localtime 2>/dev/null
+echo '@@TZLIST@@'
+if command -v timedatectl >/dev/null 2>&1; then
+  timedatectl list-timezones 2>/dev/null
+fi
+[ -s /usr/share/zoneinfo/zone.tab ] && awk '!/^#/ && NF >= 3 {print $3}' /usr/share/zoneinfo/zone.tab 2>/dev/null
 echo '@@END@@'
 "##;
 
@@ -95,6 +106,10 @@ pub struct NtpStatus {
     pub config_path: Option<String>,
     /// apt-get / dnf / yum / zypper / pacman / apk / none
     pub package_manager: String,
+    /// 当前 IANA 时区名（如 Asia/Shanghai）；读不到时为空
+    pub timezone: Option<String>,
+    /// 远端可选的 IANA 时区（timedatectl list-timezones / zone.tab）
+    pub timezones: Vec<String>,
     /// 是否支持安装/配置（macOS 与未知平台为 false）
     pub managed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -281,6 +296,9 @@ pub(super) fn parse_status(output: &str) -> Result<NtpStatus, String> {
         .unwrap_or("none")
         .to_string();
 
+    let timezone = parse_timezone(&section("TZ"));
+    let timezones = parse_timezones(&section("TZLIST"));
+
     let mut synchronized = None;
     let mut offset_ms = None;
     if service == "chrony" {
@@ -344,10 +362,62 @@ pub(super) fn parse_status(output: &str) -> Result<NtpStatus, String> {
         servers,
         config_path,
         package_manager,
+        timezone,
+        timezones,
         managed,
         note,
         now,
     })
+}
+
+/// 时区段里的第一条合法值：timedatectl 输出、`/etc/timezone` 内容或
+/// `/etc/localtime` 的链接目标（macOS 为 `/var/db/timezone/zoneinfo/...`）。
+fn parse_timezone(section: &str) -> Option<String> {
+    section.lines().find_map(|line| {
+        let raw = line.trim();
+        let name = raw
+            .strip_prefix("/usr/share/zoneinfo/")
+            .or_else(|| raw.strip_prefix("/var/db/timezone/zoneinfo/"))
+            .or_else(|| raw.strip_prefix("../usr/share/zoneinfo/"))
+            .unwrap_or(raw);
+        validate_timezone(name).ok()
+    })
+}
+
+fn parse_timezones(section: &str) -> Vec<String> {
+    let mut out: Vec<String> = section
+        .lines()
+        .filter_map(|line| validate_timezone(line).ok())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// 校验 IANA 时区名（白名单字符 + 不允许路径逃逸）
+pub(super) fn validate_timezone(input: &str) -> Result<String, String> {
+    let tz = input.trim();
+    if tz.is_empty() {
+        return Err("时区不能为空".into());
+    }
+    if tz.len() > 64 {
+        return Err("时区名过长".into());
+    }
+    if matches!(tz, "UTC" | "GMT") {
+        return Ok(tz.to_string());
+    }
+    if tz.starts_with('/')
+        || tz.ends_with('/')
+        || tz.contains("//")
+        || tz.contains("..")
+        || !tz.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '+' | '-'))
+    {
+        return Err(format!("时区名不合法：{tz}"));
+    }
+    if !tz.contains('/') {
+        return Err("时区名需形如 Asia/Shanghai".into());
+    }
+    Ok(tz.to_string())
 }
 
 fn parse_distro(osrel: &str, os: &str) -> String {
@@ -651,6 +721,26 @@ pub(super) fn service_script(service: &str, action: &str) -> Result<String, Stri
     ))
 }
 
+/// 设置 IANA 时区：优先 `timedatectl set-timezone`，无 systemd 时回退到
+/// `zoneinfo` 链接 + `/etc/timezone`；不触碰系统时钟的 UTC 绝对值。
+pub(super) fn timezone_script(tz: &str) -> Result<String, String> {
+    let tz = validate_timezone(tz)?;
+    let zone = sq(&format!("/usr/share/zoneinfo/{tz}"));
+    let name = sq(&tz);
+    Ok(format!(
+        "set -e\n\
+         ZONE={zone}\n\
+         [ -f \"$ZONE\" ] || {{ echo '远端缺少该时区的 zoneinfo 数据' >&2; exit 1; }}\n\
+         if command -v timedatectl >/dev/null 2>&1 && timedatectl set-timezone {name} >/dev/null 2>&1; then\n\
+         \x20 echo '时区已更新'\n\
+         else\n\
+         \x20 ln -sf \"$ZONE\" /etc/localtime\n\
+         \x20 printf '%s\\n' {name} > /etc/timezone 2>/dev/null || true\n\
+         \x20 echo '时区已更新'\n\
+         fi\n"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -697,6 +787,12 @@ server 1.centos.pool.ntp.org iburst
 @@TIMESYNCD_CONF@@
 @@PKG@@
 yum
+@@TZ@@
+Asia/Shanghai
+@@TZLIST@@
+Europe/Berlin
+Asia/Shanghai
+UTC
 @@END@@
 ";
 
@@ -718,6 +814,15 @@ yum
         );
         assert_eq!(st.config_path.as_deref(), Some("/etc/chrony.conf"));
         assert_eq!(st.package_manager, "yum");
+        assert_eq!(st.timezone.as_deref(), Some("Asia/Shanghai"));
+        assert_eq!(
+            st.timezones,
+            vec![
+                "Asia/Shanghai".to_string(),
+                "Europe/Berlin".to_string(),
+                "UTC".to_string()
+            ]
+        );
         assert!(st.managed);
         assert_eq!(st.now.epoch_ms, 1_762_900_000_000);
         assert_eq!(st.now.tz_offset_minutes, 480);
@@ -825,6 +930,53 @@ yum
         let s = configure_script("timesyncd", &["ntp.aliyun.com".into()]).unwrap();
         assert!(s.contains("NTP=ntp.aliyun.com"));
         assert!(s.contains("timesyncd.conf.d/rhost.conf"));
+    }
+
+    #[test]
+    fn parses_timezone_and_list() {
+        assert_eq!(
+            parse_timezone("Asia/Shanghai\nAsia/Shanghai\n").as_deref(),
+            Some("Asia/Shanghai")
+        );
+        assert_eq!(
+            parse_timezone("/usr/share/zoneinfo/Europe/Berlin\n").as_deref(),
+            Some("Europe/Berlin")
+        );
+        assert_eq!(
+            parse_timezone("/var/db/timezone/zoneinfo/America/New_York\n").as_deref(),
+            Some("America/New_York")
+        );
+        assert_eq!(parse_timezone(""), None);
+        assert_eq!(parse_timezone("not a timezone\n"), None);
+
+        assert_eq!(
+            parse_timezones("UTC\nAsia/Shanghai\nAsia/Shanghai\nbad zone\n"),
+            vec!["Asia/Shanghai".to_string(), "UTC".to_string()]
+        );
+    }
+
+    #[test]
+    fn validates_timezones() {
+        assert_eq!(validate_timezone("Asia/Shanghai").unwrap(), "Asia/Shanghai");
+        assert_eq!(validate_timezone("Etc/GMT+8").unwrap(), "Etc/GMT+8");
+        assert_eq!(validate_timezone("UTC").unwrap(), "UTC");
+        assert!(validate_timezone("").is_err());
+        assert!(validate_timezone("Shanghai").is_err());
+        assert!(validate_timezone("../etc/passwd").is_err());
+        assert!(validate_timezone("/etc/passwd").is_err());
+        assert!(validate_timezone("Asia/../etc").is_err());
+        assert!(validate_timezone("Asia//Shanghai").is_err());
+        assert!(validate_timezone("Asia/Shanghai;rm -rf /").is_err());
+        assert!(validate_timezone(&"a".repeat(80)).is_err());
+    }
+
+    #[test]
+    fn builds_timezone_script() {
+        let s = timezone_script("Asia/Shanghai").unwrap();
+        assert!(s.contains("timedatectl set-timezone 'Asia/Shanghai'"));
+        assert!(s.contains("/usr/share/zoneinfo/Asia/Shanghai"));
+        assert!(s.contains("ln -sf \"$ZONE\" /etc/localtime"));
+        assert!(timezone_script("../etc/passwd").is_err());
     }
 
     #[test]

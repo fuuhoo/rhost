@@ -479,6 +479,7 @@ pub fn run() {
             toolbox::toolbox_ntp_configure,
             toolbox::toolbox_ntp_sync,
             toolbox::toolbox_ntp_service,
+            toolbox::toolbox_timezone_set,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

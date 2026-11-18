@@ -22,6 +22,8 @@ interface NtpStatus {
   servers: string[]
   configPath?: string
   packageManager: string
+  timezone?: string
+  timezones: string[]
   managed: boolean
   note?: string
   now: ServerTime
@@ -45,10 +47,18 @@ const SERVICE_LABELS: Record<string, string> = {
 
 const status = ref<NtpStatus | null>(null)
 const loading = ref(false)
-const action = ref<'' | 'install' | 'configure' | 'sync' | 'service'>('')
+const action = ref<'' | 'install' | 'configure' | 'sync' | 'service' | 'timezone'>('')
 const error = ref('')
 const serversText = ref('')
 const serversDirty = ref(false)
+const tzQuery = ref('')
+const tzOpen = ref(false)
+
+const COMMON_TIMEZONES = [
+  'Asia/Shanghai', 'Asia/Hong_Kong', 'Asia/Taipei', 'Asia/Tokyo', 'Asia/Seoul',
+  'Asia/Singapore', 'UTC', 'Europe/London', 'Europe/Berlin',
+  'America/New_York', 'America/Los_Angeles',
+]
 const clockBase = ref<{ epoch: number; at: number } | null>(null)
 const tick = ref(Date.now())
 
@@ -65,8 +75,34 @@ const tzLabel = computed(() => {
   const sign = total < 0 ? '-' : '+'
   const abs = Math.abs(total)
   const hm = `UTC${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`
-  return tz.tzName ? `${tz.tzName} · ${hm}` : hm
+  const name = status.value?.timezone
+  const zone = name && name !== tz.tzName ? `${name} · ` : ''
+  return tz.tzName ? `${zone}${tz.tzName} · ${hm}` : `${zone}${hm}`
 })
+
+const tzSuggestions = computed(() => {
+  const all = status.value?.timezones ?? []
+  const q = tzQuery.value.trim().toLowerCase()
+  if (!q) {
+    return COMMON_TIMEZONES.filter(tz => !all.length || all.includes(tz))
+  }
+  return all.filter(tz => tz.toLowerCase().includes(q)).slice(0, 80)
+})
+
+function pickTimezone(tz: string) {
+  tzQuery.value = tz
+  tzOpen.value = false
+}
+
+let tzCloseTimer: ReturnType<typeof setTimeout> | null = null
+function closeTzLater() {
+  if (tzCloseTimer) clearTimeout(tzCloseTimer)
+  tzCloseTimer = setTimeout(() => { tzOpen.value = false }, 150)
+}
+function openTzList() {
+  if (tzCloseTimer) clearTimeout(tzCloseTimer)
+  tzOpen.value = true
+}
 
 /** 以读取到的服务器时间为基准，本地每秒推进（网络往返误差不累积） */
 const clockText = computed(() => {
@@ -101,6 +137,7 @@ const busyLabel = computed(() => {
     case 'configure': return '正在写入时间源并重启服务…'
     case 'sync': return '正在立即校时…'
     case 'service': return '正在调整时间服务…'
+    case 'timezone': return '正在写入时区…'
     default: return ''
   }
 })
@@ -138,7 +175,7 @@ async function load(silent = false) {
   }
 }
 
-async function runChange(kind: 'install' | 'configure' | 'sync' | 'service',
+async function runChange(kind: 'install' | 'configure' | 'sync' | 'service' | 'timezone',
   fn: (pw?: string) => Promise<TimeChange>) {
   action.value = kind
   error.value = ''
@@ -179,6 +216,22 @@ function saveServers() {
   }))
 }
 
+function saveTimezone() {
+  const sid = props.sessionId
+  if (!sid) return
+  const tz = tzQuery.value.trim()
+  if (!tz) {
+    error.value = '请填写时区，例如 Asia/Shanghai'
+    return
+  }
+  tzOpen.value = false
+  void runChange('timezone', pw => invoke<TimeChange>('toolbox_timezone_set', {
+    sessionId: sid,
+    timezone: tz,
+    sudoPassword: pw,
+  }))
+}
+
 function syncNow() {
   const sid = props.sessionId
   if (!sid) return
@@ -203,6 +256,8 @@ watch(() => props.sessionId, () => {
   clockBase.value = null
   serversDirty.value = false
   serversText.value = ''
+  tzQuery.value = ''
+  tzOpen.value = false
   void load()
 })
 
@@ -212,6 +267,7 @@ onMounted(() => {
 })
 onUnmounted(() => {
   if (timer) clearInterval(timer)
+  if (tzCloseTimer) clearTimeout(tzCloseTimer)
 })
 </script>
 
@@ -278,6 +334,43 @@ onUnmounted(() => {
       </div>
       <p class="ts-hint">
         多个服务器用空格或逗号分隔（最多 6 个）；保存会备份原配置为 <code>.rhost.bak</code> 并重启时间服务。
+      </p>
+    </section>
+
+    <section v-if="status?.managed" class="ts-card">
+      <div class="ts-head">
+        <h3>时区设置</h3>
+        <span v-if="status.timezone" class="ts-pill">{{ status.timezone }}</span>
+        <span class="spacer"></span>
+        <span v-if="action === 'timezone'" class="ts-busy">正在写入时区…</span>
+      </div>
+      <div class="ts-bar">
+        <div class="ts-combo">
+          <input
+            v-model="tzQuery" class="ts-input"
+            placeholder="搜索或输入时区，如 Asia/Shanghai"
+            autocomplete="off" spellcheck="false"
+            :disabled="!!action"
+            @focus="openTzList"
+            @input="openTzList"
+            @blur="closeTzLater"
+            @keydown.enter="saveTimezone"
+            @keydown.esc="tzOpen = false"
+          />
+          <div v-if="tzOpen && tzSuggestions.length" class="ts-combo-list">
+            <button
+              v-for="tz in tzSuggestions" :key="tz"
+              class="ts-combo-item" :class="{ active: tz === status.timezone }"
+              @mousedown.prevent="pickTimezone(tz)"
+            >{{ tz }}</button>
+          </div>
+        </div>
+        <button class="ts-btn" :disabled="!!action || !tzQuery.trim()" @click="saveTimezone">
+          设置时区
+        </button>
+      </div>
+      <p class="ts-hint">
+        时区只影响远端本地时间与日志时间显示，不改变时钟的绝对时间；NTP 对时仍按 UTC 进行。
       </p>
     </section>
 
@@ -443,6 +536,44 @@ onUnmounted(() => {
   color: var(--text);
 }
 .ts-input:focus { outline: none; border-color: var(--border-strong); }
+.ts-combo {
+  position: relative;
+  flex: 1;
+  min-width: 220px;
+}
+.ts-combo .ts-input { width: 100%; box-sizing: border-box; }
+.ts-combo-list {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 20;
+  max-height: 224px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, .22);
+}
+.ts-combo-item {
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ts-combo-item:hover { background: var(--hover); }
+.ts-combo-item.active { color: var(--blue); }
 .ts-btn {
   padding: 6px 12px;
   border: 1px solid var(--border);

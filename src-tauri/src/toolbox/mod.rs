@@ -11,6 +11,7 @@
 
 mod docker;
 mod firewall;
+mod mirror;
 mod ports;
 mod pubkey;
 mod syslog;
@@ -45,6 +46,7 @@ const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
 const CONFIG_TIMEOUT: Duration = Duration::from_secs(90);
 /// 安装 NTP 软件包：apt 更新索引 + 下载安装，慢镜像源要留足余量
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
+/// 软件源切换：最多 4 条镜像可达性探测（各 8s）+ 文件备份写回
 /// 日志落盘上限：与远端读取上限（512 KiB 字符）留足 UTF-8 余量
 const MAX_LOG_SAVE_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -2163,3 +2165,69 @@ pub async fn toolbox_ntp_service(
         status,
     })
 }
+
+/// 设置系统时区（IANA 名称，如 Asia/Shanghai）。
+#[tauri::command]
+pub async fn toolbox_timezone_set(
+    session_id: String,
+    timezone: String,
+    sudo_password: Option<String>,
+    manager: State<'_, SessionManager>,
+) -> Result<TimeChange, String> {
+    let started = Instant::now();
+    let before = probe_ntp_status(&manager, &session_id, None).await?;
+    if before.os == "Darwin" {
+        return Err(before.note.unwrap_or_else(|| {
+            "macOS 请在「系统设置 → 通用 → 日期与时间」中修改时区".to_string()
+        }));
+    }
+    let tz = timesync::validate_timezone(&timezone)?;
+    let script = timesync::timezone_script(&tz)?;
+    let exec = exec_root(
+        &manager,
+        &session_id,
+        &script,
+        sudo_password.as_deref(),
+        ACTION_TIMEOUT,
+    )
+    .await?;
+    if let Err(e) = time_change_result(&exec.out, "设置时区") {
+        applog::emit(
+            log::Level::Warn,
+            "toolbox",
+            ev::TOOLBOX_NTP_CHANGE,
+            Some(&session_id),
+            "时区设置失败",
+            Some(serde_json::json!({
+                "op": "timezone",
+                "timezone": tz,
+                "exit_code": exec.out.exit_code,
+                "timed_out": exec.out.timed_out,
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+                "err": e,
+            })),
+        );
+        return Err(e);
+    }
+    let status = probe_ntp_status(&manager, &session_id, None)
+        .await
+        .unwrap_or(before);
+    applog::emit(
+        log::Level::Info,
+        "toolbox",
+        ev::TOOLBOX_NTP_CHANGE,
+        Some(&session_id),
+        "时区已更新",
+        Some(serde_json::json!({
+            "op": "timezone",
+            "timezone": status.timezone,
+            "tz_offset_minutes": status.now.tz_offset_minutes,
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+        })),
+    );
+    Ok(TimeChange {
+        message: format!("时区已设为 {tz}"),
+        status,
+    })
+}
+
