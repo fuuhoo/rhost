@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 [中文](./CHANGELOG.zh-CN.md) · **English**
 
+## [2.9.0] - 2026-11-18
+
+### Added
+
+- The toolbox "Time" tab can now set the timezone: pick from a searchable list of common zones, with the name validated and the previous config backed up before writing; changes take effect immediately, and read-only platforms only get a hint
+- New "Software Sources" tab in the toolbox: detects apt / yum distributions, lists preset mirrors with reachability and latency probes, switches to a mirror in one click while keeping a backup, and can restore the latest backup at any time; backups live in `/etc/rhost/mirror-backup/<timestamp>/`, and writes are restricted to `/etc/apt/` and `/etc/yum.repos.d/`
+
+### Fixed
+
+- The Docker container terminal had no context menu: it now behaves like the main terminal with right-click copy / paste / clear / select all, honouring the "right-click action", "paste guard" and "trim on copy" settings
+- The "connecting to container…" hint lingered after the Docker container terminal opened: it is now erased in place instead of staying in the scrollback
+
 ## [2.8.0] - 2026-11-14
 
 ### Added
