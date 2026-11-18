@@ -480,6 +480,9 @@ pub fn run() {
             toolbox::toolbox_ntp_sync,
             toolbox::toolbox_ntp_service,
             toolbox::toolbox_timezone_set,
+            toolbox::toolbox_mirror_status,
+            toolbox::toolbox_mirror_apply,
+            toolbox::toolbox_mirror_restore,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

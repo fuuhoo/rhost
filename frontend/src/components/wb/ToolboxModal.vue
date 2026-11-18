@@ -13,6 +13,7 @@ import type { SshKey } from '../../types'
 import DockerTerminal, { type DockerTermChannel } from './DockerTerminal.vue'
 import SyslogPanel from './SyslogPanel.vue'
 import TimePanel from './TimePanel.vue'
+import MirrorPanel from './MirrorPanel.vue'
 
 interface PortRow {
   port: number
@@ -125,7 +126,7 @@ interface DockerConfig {
   dataRoot: string | null
 }
 
-type Tab = 'firewall' | 'ports' | 'pubkey' | 'docker' | 'syslog' | 'time'
+type Tab = 'firewall' | 'ports' | 'pubkey' | 'docker' | 'syslog' | 'time' | 'mirror'
 type DockerView = 'containers' | 'images' | 'networks' | 'volumes' | 'config'
 
 const SUDO_REQUIRED = 'SUDO_PASSWORD_REQUIRED'
@@ -1761,6 +1762,9 @@ onUnmounted(() => {
           <button class="tbx-tab" :class="{ active: tab === 'time' }" @click="switchTab('time')">
             时间
           </button>
+          <button class="tbx-tab" :class="{ active: tab === 'mirror' }" @click="switchTab('mirror')">
+            软件源
+          </button>
         </div>
 
         <div class="tbx-body">
@@ -1782,6 +1786,13 @@ onUnmounted(() => {
           <!-- 服务器时间与 NTP（自持时钟 / 状态 / 提权操作） -->
           <TimePanel
             v-if="sessionReady && tab === 'time'"
+            :session-id="backendId ?? ''"
+            :run-elevated="runElevated"
+          />
+
+          <!-- 软件源（apt / yum 镜像站切换与备份还原） -->
+          <MirrorPanel
+            v-if="sessionReady && tab === 'mirror'"
             :session-id="backendId ?? ''"
             :run-elevated="runElevated"
           />

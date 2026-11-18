@@ -47,6 +47,7 @@ const CONFIG_TIMEOUT: Duration = Duration::from_secs(90);
 /// 安装 NTP 软件包：apt 更新索引 + 下载安装，慢镜像源要留足余量
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
 /// 软件源切换：最多 4 条镜像可达性探测（各 8s）+ 文件备份写回
+const MIRROR_TIMEOUT: Duration = Duration::from_secs(60);
 /// 日志落盘上限：与远端读取上限（512 KiB 字符）留足 UTF-8 余量
 const MAX_LOG_SAVE_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -2231,3 +2232,297 @@ pub async fn toolbox_timezone_set(
     })
 }
 
+/* =========================================================
+ *  软件源（apt / yum 镜像站）
+ * ========================================================= */
+
+/// 软件源变更结果：一句结论 + 变更后重新探测的状态
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MirrorChange {
+    pub message: String,
+    pub status: mirror::MirrorStatus,
+}
+
+/// 探测软件源：普通通道读；文件读不到（非 root）时再用免密 sudo 试一次。
+async fn probe_mirror(
+    manager: &SessionManager,
+    session_id: &str,
+    password: Option<&str>,
+) -> Result<(mirror::MirrorStatus, Vec<mirror::RepoFile>), String> {
+    if password.is_some() {
+        let exec = exec_root(
+            manager,
+            session_id,
+            mirror::PROBE_SCRIPT,
+            password,
+            LIST_TIMEOUT,
+        )
+        .await?;
+        return mirror::parse_probe(&exec.out.output);
+    }
+    let plain = exec_plain(manager, session_id, mirror::PROBE_SCRIPT, LIST_TIMEOUT).await?;
+    let parsed = mirror::parse_probe(&plain.out.output)?;
+    if parsed.1.is_empty() {
+        if let Ok(exec) = exec_root(manager, session_id, mirror::PROBE_SCRIPT, None, LIST_TIMEOUT).await
+        {
+            if let Ok(elevated) = mirror::parse_probe(&exec.out.output) {
+                if !elevated.1.is_empty() {
+                    return Ok(elevated);
+                }
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn mirror_backup_id(output: &str) -> Option<String> {
+    output
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("BACKUP_ID="))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// 读取软件源现状与备份列表（只读）。
+#[tauri::command]
+pub async fn toolbox_mirror_status(
+    session_id: String,
+    manager: State<'_, SessionManager>,
+) -> Result<mirror::MirrorStatus, String> {
+    let started = Instant::now();
+    let (status, _) = match probe_mirror(&manager, &session_id, None).await {
+        Ok(v) => v,
+        Err(e) => {
+            applog::emit(
+                log::Level::Warn,
+                "toolbox",
+                ev::TOOLBOX_MIRROR_STATUS,
+                Some(&session_id),
+                "软件源探测失败",
+                Some(serde_json::json!({
+                    "elapsed_ms": started.elapsed().as_millis() as u64,
+                    "err": e,
+                })),
+            );
+            return Err(e);
+        }
+    };
+    applog::emit(
+        log::Level::Info,
+        "toolbox",
+        ev::TOOLBOX_MIRROR_STATUS,
+        Some(&session_id),
+        "软件源状态已读取",
+        Some(serde_json::json!({
+            "os": status.os,
+            "distro": status.distro,
+            "package_manager": status.package_manager,
+            "managed": status.managed,
+            "current": status.current,
+            "files": status.files.len(),
+            "backups": status.backups.len(),
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+        })),
+    );
+    Ok(status)
+}
+
+/// 切换到指定镜像站：备份原文件后重写 software source 主机地址。
+#[tauri::command]
+pub async fn toolbox_mirror_apply(
+    session_id: String,
+    preset: String,
+    probe: Option<bool>,
+    sudo_password: Option<String>,
+    manager: State<'_, SessionManager>,
+) -> Result<MirrorChange, String> {
+    let started = Instant::now();
+    let (before, files) = probe_mirror(&manager, &session_id, None).await?;
+    if !before.managed {
+        return Err(before
+            .note
+            .unwrap_or_else(|| "当前系统未发现可管理的软件源".to_string()));
+    }
+    let target = mirror::preset_by_id(&preset).ok_or_else(|| "未知的镜像站".to_string())?;
+    if before.current.as_deref() == Some(target.id.as_str()) {
+        return Err(format!("软件源已指向 {}，无需切换", target.label));
+    }
+
+    let mut changed_files: Vec<(String, String)> = Vec::new();
+    let mut changed_lines = 0usize;
+    let mut skipped = 0usize;
+    for file in &files {
+        let (content, changed, skip) = mirror::rewrite_file(
+            file.kind,
+            &file.content,
+            &target.host,
+            &before.distro_id,
+            &before.distro_major,
+        );
+        skipped += skip;
+        if changed > 0 && content != file.content {
+            changed_lines += changed;
+            changed_files.push((file.path.clone(), content));
+        }
+    }
+    if changed_files.is_empty() {
+        let hint = if skipped > 0 {
+            "（存在 mirrorlist/metalink 地址，暂不支持自动改写）"
+        } else {
+            ""
+        };
+        return Err(format!("未找到可切换的软件源地址{hint}"));
+    }
+
+    let probe_urls = mirror::concrete_probe_urls(
+        &changed_files,
+        &before.arch,
+        &before.distro_major,
+    );
+    let check = probe.unwrap_or(true);
+    let script = mirror::apply_script(
+        &target.id,
+        &target.host,
+        &before.package_manager,
+        &changed_files,
+        check,
+        &probe_urls,
+    );
+    let exec = exec_root(
+        &manager,
+        &session_id,
+        &script,
+        sudo_password.as_deref(),
+        MIRROR_TIMEOUT,
+    )
+    .await?;
+    let backup = mirror_backup_id(&exec.out.output);
+    let message = match time_change_result(&exec.out, "切换软件源") {
+        Ok(m) => m,
+        Err(e) => {
+            applog::emit(
+                log::Level::Warn,
+                "toolbox",
+                ev::TOOLBOX_MIRROR_CHANGE,
+                Some(&session_id),
+                "软件源切换失败",
+                Some(serde_json::json!({
+                    "op": "apply",
+                    "preset": target.id,
+                    "host": target.host,
+                    "files": changed_files.len(),
+                    "changed": changed_lines,
+                    "skipped": skipped,
+                    "probe": check,
+                    "exit_code": exec.out.exit_code,
+                    "timed_out": exec.out.timed_out,
+                    "elapsed_ms": started.elapsed().as_millis() as u64,
+                    "err": e,
+                })),
+            );
+            return Err(e);
+        }
+    };
+    let status = probe_mirror(&manager, &session_id, None)
+        .await
+        .map(|v| v.0)
+        .unwrap_or(before);
+    applog::emit(
+        log::Level::Info,
+        "toolbox",
+        ev::TOOLBOX_MIRROR_CHANGE,
+        Some(&session_id),
+        "软件源已切换",
+        Some(serde_json::json!({
+            "op": "apply",
+            "preset": target.id,
+            "host": target.host,
+            "files": changed_files.len(),
+            "changed": changed_lines,
+            "skipped": skipped,
+            "probe": check,
+            "backup": backup,
+            "current": status.current,
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+        })),
+    );
+    let msg = match &backup {
+        Some(id) => format!("{message}（已备份原配置 {id}）"),
+        None => message,
+    };
+    Ok(MirrorChange {
+        message: msg,
+        status,
+    })
+}
+
+/// 还原到指定备份：还原前先把当前文件另存一份（还原本身也可回退）。
+#[tauri::command]
+pub async fn toolbox_mirror_restore(
+    session_id: String,
+    backup: String,
+    sudo_password: Option<String>,
+    manager: State<'_, SessionManager>,
+) -> Result<MirrorChange, String> {
+    let started = Instant::now();
+    let before = probe_mirror(&manager, &session_id, None).await?.0;
+    let script = mirror::restore_script(&backup)?;
+    let exec = exec_root(
+        &manager,
+        &session_id,
+        &script,
+        sudo_password.as_deref(),
+        MIRROR_TIMEOUT,
+    )
+    .await?;
+    let saved = mirror_backup_id(&exec.out.output);
+    let message = match time_change_result(&exec.out, "还原软件源") {
+        Ok(m) => m,
+        Err(e) => {
+            applog::emit(
+                log::Level::Warn,
+                "toolbox",
+                ev::TOOLBOX_MIRROR_CHANGE,
+                Some(&session_id),
+                "软件源还原失败",
+                Some(serde_json::json!({
+                    "op": "restore",
+                    "backup": backup,
+                    "exit_code": exec.out.exit_code,
+                    "timed_out": exec.out.timed_out,
+                    "elapsed_ms": started.elapsed().as_millis() as u64,
+                    "err": e,
+                })),
+            );
+            return Err(e);
+        }
+    };
+    let status = probe_mirror(&manager, &session_id, None)
+        .await
+        .map(|v| v.0)
+        .unwrap_or(before);
+    applog::emit(
+        log::Level::Info,
+        "toolbox",
+        ev::TOOLBOX_MIRROR_CHANGE,
+        Some(&session_id),
+        "软件源已还原",
+        Some(serde_json::json!({
+            "op": "restore",
+            "backup": backup,
+            "saved": saved,
+            "current": status.current,
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+        })),
+    );
+    let msg = match &saved {
+        Some(id) => format!("{message}（还原前的配置已另存为 {id}）"),
+        None => message,
+    };
+    Ok(MirrorChange {
+        message: msg,
+        status,
+    })
+}
