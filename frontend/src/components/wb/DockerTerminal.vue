@@ -8,10 +8,13 @@
  */
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { Channel, invoke } from '@tauri-apps/api/core'
+import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { resolveTerminalFontFamily, savedSettings, termPalette } from '../../stores/settings'
+import { confirmDialog } from '../../composables/useConfirm'
+import ContextMenu, { type MenuItem } from './ContextMenu.vue'
 
 export type DockerTermChannel = Channel<number[] | ArrayBuffer | Uint8Array>
 
@@ -32,8 +35,11 @@ const el = ref<HTMLElement | null>(null)
 let term: Terminal | null = null
 let fit: FitAddon | null = null
 let observer: ResizeObserver | null = null
+let detachDom: (() => void) | null = null
 let ready = false
 let disposed = false
+/** 首帧数据前光标停在「正在连接容器…」行末，首帧到达时擦掉该提示再写数据 */
+let firstData = true
 
 const FRAME_DATA = 0x01
 const FRAME_EXIT = 0x02
@@ -64,6 +70,10 @@ function onFrame(bytes: Uint8Array) {
   if (!term || disposed) return
   for (const frame of decodeFrames(bytes)) {
     if (frame.type === FRAME_DATA) {
+      if (firstData) {
+        firstData = false
+        term.write('\r\x1b[2K')
+      }
       term.write(frame.payload)
     } else if (frame.type === FRAME_EXIT) {
       ready = false
@@ -100,6 +110,58 @@ function syncSize() {
   }
 }
 
+/* ---- 右键菜单 / 粘贴（与主终端同一套行为与设置）---- */
+const menuOpen = ref(false)
+const menuPos = ref({ x: 0, y: 0 })
+const menuItems = ref<MenuItem[]>([])
+
+const ICON_COPY = 'M9 9h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H11a2 2 0 0 1-2-2V9zM5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1'
+const ICON_PASTE = 'M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2M9 2h6a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z'
+const ICON_CLEAR = 'M18 6L6 18M6 6l12 12'
+const ICON_SELECT = 'M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3'
+
+const PASTE_CTRL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/
+
+function copySelection() {
+  const text = term?.getSelection()
+  if (!text) return
+  const out = savedSettings.trimOnCopy ? text.replace(/[ \t]+$/gm, '') : text
+  writeText(out).catch(() => {})
+}
+
+/** 多行/控制字符粘贴确认（设置 pasteGuard 开启时），与主终端一致 */
+async function pasteWithGuard(text: string) {
+  if (savedSettings.pasteGuard && (/\r\n|\r|\n/.test(text) || PASTE_CTRL_RE.test(text))) {
+    const ok = await confirmDialog(
+      '剪贴板内容包含换行或不可见控制字符，粘贴后可能直接执行多条命令。确认粘贴？',
+      '确认粘贴',
+      { confirmText: '确认粘贴' },
+    )
+    if (!ok || disposed) return
+  }
+  if (!disposed) term?.paste(text)
+}
+
+function pasteFromClipboard() {
+  readText().then(text => {
+    if (text) void pasteWithGuard(text)
+  }).catch(() => {})
+}
+
+function openMenu(x: number, y: number) {
+  const t = term
+  if (!t) return
+  menuItems.value = [
+    { label: '复制', icon: ICON_COPY, shortcut: '⌘C', disabled: !t.hasSelection(), action: copySelection },
+    { label: '粘贴', icon: ICON_PASTE, shortcut: '⌘V', action: pasteFromClipboard },
+    { divider: true },
+    { label: '清屏', icon: ICON_CLEAR, action: () => t.clear() },
+    { label: '全选', icon: ICON_SELECT, shortcut: '⌘A', action: () => t.selectAll() },
+  ]
+  menuPos.value = { x, y }
+  menuOpen.value = true
+}
+
 onMounted(async () => {
   const palette = termPalette.value
   term = new Terminal({
@@ -126,7 +188,7 @@ onMounted(async () => {
     term.open(el.value)
     fit.fit()
   }
-  term.write('\x1b[2m正在连接容器…\x1b[0m\r\n')
+  term.write('\x1b[2m正在连接容器…\x1b[0m')
   term.onData(writeToBackend)
   term.onResize(({ cols, rows }) => {
     if (!ready || disposed) return
@@ -136,6 +198,42 @@ onMounted(async () => {
       rows,
     }).catch(() => {})
   })
+
+  // 右键：menu 模式弹菜单，paste 模式直接粘贴（与主终端 settings.rightClick 一致）
+  const screenEl = el.value
+  const onCtx = (ev: MouseEvent) => {
+    ev.preventDefault()
+    ev.stopPropagation()
+    if (savedSettings.rightClick !== 'menu') {
+      pasteFromClipboard()
+      return
+    }
+    openMenu(ev.clientX, ev.clientY)
+  }
+  // 接管 Cmd+V：先过粘贴保护再交给 xterm 的 bracketed-paste 流程
+  const onPaste = (ev: ClipboardEvent) => {
+    const text = ev.clipboardData?.getData('text/plain')
+    if (!text) return
+    ev.preventDefault()
+    ev.stopPropagation()
+    void pasteWithGuard(text)
+  }
+  const onCopy = (ev: ClipboardEvent) => {
+    if (!savedSettings.trimOnCopy || !term?.hasSelection()) return
+    ev.stopPropagation()
+    ev.preventDefault()
+    ev.clipboardData?.setData('text/plain', term.getSelection().replace(/[ \t]+$/gm, ''))
+  }
+  if (screenEl) {
+    screenEl.addEventListener('contextmenu', onCtx, true)
+    screenEl.addEventListener('paste', onPaste, true)
+    screenEl.addEventListener('copy', onCopy, true)
+    detachDom = () => {
+      screenEl.removeEventListener('contextmenu', onCtx, true)
+      screenEl.removeEventListener('paste', onPaste, true)
+      screenEl.removeEventListener('copy', onCopy, true)
+    }
+  }
 
   observer = new ResizeObserver(() => syncSize())
   if (el.value) observer.observe(el.value)
@@ -158,6 +256,10 @@ onMounted(async () => {
   } catch (e) {
     const msg = typeof e === 'string' ? e : e instanceof Error ? e.message : String(e)
     const text = msg === '已取消输入 sudo 密码' ? '已取消打开容器终端' : msg
+    if (firstData) {
+      firstData = false
+      term.write('\r\x1b[2K')
+    }
     term.writeln(`\x1b[31m连接失败：${text}\x1b[0m`)
     emit('error', text)
   }
@@ -167,6 +269,8 @@ onBeforeUnmount(() => {
   disposed = true
   observer?.disconnect()
   observer = null
+  detachDom?.()
+  detachDom = null
   void invoke('toolbox_docker_terminal_close', { sessionId: props.sessionId }).catch(() => {})
   term?.dispose()
   term = null
@@ -176,6 +280,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div ref="el" class="dk-term-xterm"></div>
+  <ContextMenu v-model:visible="menuOpen" :x="menuPos.x" :y="menuPos.y" :items="menuItems" />
 </template>
 
 <style scoped>
