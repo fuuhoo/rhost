@@ -264,7 +264,9 @@
 | 系统日志来源探测 | `toolbox.syslog.sources` | INFO/WARN | 完成：os、distro、count（来源数）、journal（是否含 journald）、elapsed_ms、timed_out；失败 WARN 记 exit_code、err。**kv 不含日志正文** |
 | 系统日志读取 / 保存 | `toolbox.syslog.read` | INFO/WARN | 读取完成：source（来源 id）、tail、since/until（时间段，可空）、chars、truncated、elevated、elapsed_ms；失败 WARN 记 source、tail、since/until、exit_code、timed_out、err。保存：op=save、path（本地）、bytes。**kv 不含日志正文与 sudo 口令** |
 | 服务器时间 / NTP 状态 | `toolbox.time.status` | INFO/WARN | 完成：os、distro、service（chrony/ntpd/timesyncd/none）、installed、active、enabled、synchronized、offset_ms、servers（时间源数）、tz、tz_offset_minutes、elapsed_ms；失败 WARN 记 elapsed_ms、err。**kv 不含 sudo 口令** |
-| NTP 安装 / 配置 / 校时 / 启停 | `toolbox.time.change` | INFO/WARN | op（install/configure/sync/enable/disable/start/stop）、service、package_manager（安装）、servers（保存的地址列表）、active/enabled（操作后）、exit_code、timed_out、elapsed_ms；失败 WARN 另记 err |
+| NTP 安装 / 配置 / 校时 / 启停 / 时区 | `toolbox.time.change` | INFO/WARN | op（install/configure/sync/enable/disable/start/stop/timezone）、service、package_manager（安装）、servers（保存的地址列表）、timezone / tz_offset_minutes（时区）、active/enabled（操作后）、exit_code、timed_out、elapsed_ms；失败 WARN 另记 err |
+| 软件源状态读取 | `toolbox.mirror.status` | INFO/WARN | 完成：os、distro、package_manager、managed、current（命中的预设镜像 id）、files（源文件数）、backups（备份数）、elapsed_ms；失败 WARN 记 elapsed_ms、err。**kv 不含源文件内容与 sudo 口令** |
+| 软件源切换 / 还原 | `toolbox.mirror.change` | INFO/WARN | 切换：op=apply、preset、host、files（改动文件数）、changed（改动行数）、skipped（未改写的 mirrorlist/metalink 数）、probe（是否预探测）、backup（备份标识）、current（操作后命中的镜像站）、exit_code、timed_out、elapsed_ms；还原：op=restore、backup（被还原的备份）、saved（还原前另存的备份，可空）；失败 WARN 另记 err。**kv 不含源文件内容与 sudo 口令** |
 
 ### 4.7 AI 助手（target: `ai`，带 scope 标签）
 

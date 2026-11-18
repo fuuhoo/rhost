@@ -120,6 +120,8 @@
 
 **服务器时钟**：读取远端 `date +%s|%z|%Z` 后按本地节奏每秒前进，每 60 秒重新校一次；只在本机与远端会话在线、状态栏/页签可见时轮询。
 
+**时区设置**：输入或搜索 IANA 时区名（如 `Asia/Shanghai`，输入时在候选列表中按子串过滤，也可直接填完整名称），执行 `timedatectl set-timezone`；没有 systemd 的主机回退为链接 `/usr/share/zoneinfo/<时区>` 并写 `/etc/timezone`。时区只改变远端本地时间与日志时间的显示，不改变时钟的绝对时间；修改需要 root。macOS 不提供该操作。
+
 **状态卡片**：
 
 - 服务类型按运行中优先排序：`chrony` → `ntpd` → `systemd-timesyncd`；都没跑但已安装时显示已安装的服务，完全未安装显示「未安装」。
@@ -138,13 +140,27 @@
 
 **服务操作**：启动 / 停止（`systemctl start|stop`，OpenRC 用 `rc-service`）、开机自启 / 取消开机自启（`systemctl enable|disable` / `rc-update add|del`）。
 
-**权限**：读取状态走普通通道；chrony 在跑但非 root 读不到 `chronyc tracking` 时，后端会再试一次免密 sudo，仍不可用就只显示已读到的部分，不会为了看状态打扰用户。安装、保存时间源、立即校时与服务启停都需要 root，按下方 sudo 规则提权。
+**权限**：读取状态走普通通道；chrony 在跑但非 root 读不到 `chronyc tracking` 时，后端会再试一次免密 sudo，仍不可用就只显示已读到的部分，不会为了看状态打扰用户。安装、保存时间源、立即校时、服务启停与设置时区都需要 root，按下方 sudo 规则提权。
 
 **平台差异**：macOS 不修改系统配置（状态卡给出提示，请在「系统设置 → 通用 → 日期与时间」中管理）；包管理器无法识别的平台只读展示、不提供安装。
 
-## 8. sudo 权限
+## 8. 软件源（apt / yum）
 
-防火墙读取与变更、端口的「管理员视图」、把公钥写入其他用户、读取受保护的系统日志（如 `/var/log/secure`、`auth.log`）、安装 / 配置 NTP 与启停时间服务，以及无 Docker socket 权限时读取 / 操作容器、镜像、网络与数据卷、读取 `daemon.json`、保存 daemon.json 与重启 Docker 需要 root：
+「软件源」页签把远端包管理器的软件源一键切换到国内镜像站，并在修改前自动备份、支持随时还原。进页签先跑一段只读探测：`/etc/os-release`、包管理器（`apt-get` / `dnf` / `yum`）与 `/etc/apt/sources.list`、`/etc/apt/sources.list.d/*.list|*.sources`、`/etc/yum.repos.d/*.repo`。
+
+**镜像站**：内置阿里云、腾讯云、华为云、清华大学、中科大、网易六个预设，切换时只替换源地址里的主机名，保留协议、端口之外的路径与发行版目录，因此 Debian/Ubuntu 的 `dists` 路径、CentOS 7 的 vault 路径都会原样延续。CentOS 7 的 `mirrorlist.centos.org` 与 EPEL 的 `metalink` 没有镜像站提供等价服务，会改写为对应镜像站的 `baseurl`（`centos-vault/<版本>/{os,updates,extras,...}` 与 `epel/<版本>/$basearch`）；其他无法安全推导的 metalink 会跳过并在提示里说明。
+
+**可达性探测**：默认在写入前用 `curl --range 0-0` / `wget --spider` 探测目标镜像（最多 4 条展开后的地址，各 8 秒），任何一条不可达就整体放弃、不修改任何文件；可在页签内取消勾选跳过探测。
+
+**备份与还原**：每次切换前把涉及的源文件按绝对路径结构复制到 `/etc/rhost/mirror-backup/<YYYYmmdd-HHMMSS>/files/`，并写 `manifest`（相对路径清单）与 `meta`（目标镜像站 / 包管理器 / 时间）。备份列表按时间倒序展示，点「还原」会用备份覆盖当前配置；还原前同样先把当前文件另存一份，所以还原操作本身也可以回退。备份目录只由本工具维护，卸载或换机后仍可手工从该目录恢复。
+
+**只读与不支持**：macOS、zypper、apk 等未覆盖的平台只展示探测结论并给出提示，不提供切换按钮；未在标准路径发现可直接改写的 HTTP(S) 源时（例如全部使用 mirrorlist / metalink 的第三方仓库），会提示无法自动处理。
+
+**权限**：读取一般走普通通道，源文件仅 root 可读时再用免密 sudo 试一次；切换与还原都需要 root，按下方 sudo 规则提权，口令只经 stdin。
+
+## 9. sudo 权限
+
+防火墙读取与变更、端口的「管理员视图」、把公钥写入其他用户、读取受保护的系统日志（如 `/var/log/secure`、`auth.log`）、安装 / 配置 NTP、启停时间服务与设置时区、切换 / 还原软件源，以及无 Docker socket 权限时读取 / 操作容器、镜像、网络与数据卷、读取 `daemon.json`、保存 daemon.json 与重启 Docker 需要 root：
 
 1. 先尝试免密 `sudo -n`（已配置 NOPASSWD 或本身是 root 时无感）；
 2. 不可用时弹窗询问 sudo 密码，校验通过后执行，并在本会话内复用；
@@ -153,7 +169,7 @@
 5. 密码错误会立即丢弃缓存并提示重试；主机 sudo 要求 TTY、或未安装 sudo 时会给出明确说明。
 6. 容器交互终端拥有独立 PTY：需要口令时会先用 `sudo -v` 在终端内预热凭据，再以 `sudo -n` 启动容器内 shell，口令不会出现在命令行、回显或日志里；已配置 NOPASSWD 时完全跳过该步骤。
 
-## 9. 支持范围与限制
+## 10. 支持范围与限制
 
 | 后端 | 读取规则 | 增删 | 启停 | 备注 |
 |---|---|---|---|---|
@@ -172,9 +188,10 @@
 - 容器终端与端口扫描一样需要额外 exec 通道：堡垒机等单通道会话不支持，会直接返回错误，不会影响现有终端。
 - 容器终端依赖镜像内存在 `sh`（优先 `bash`）；distroless 等无 shell 镜像无法进入。
 - 时间同步覆盖 chrony / ntpd（含 RHEL 的 `ntp` 单元）/ systemd-timesyncd 与 OpenRC 发行版；`chronyc tracking`、`ntpq -pn` 读不到时同步状态与偏差显示为未知。时间源地址只接受 IPv4 / IPv6 / 主机名（字母、数字、`-`、`.`，允许 `[IPv6]` 括号形式），最多 6 个；保存会注释原配置中的时间源行，不做去重之外的合并。Windows OpenSSH、无 `systemctl`/OpenRC 且包管理器未识别的系统只读展示。
+- 软件源切换只覆盖 apt（含 deb822 `.sources`）与 dnf/yum（`.repo` 的 `baseurl` / CentOS 7 `mirrorlist` / EPEL `metalink`）；zypper、apk 与 macOS 只读展示。镜像站按主机名替换，保留原有路径，因此仅适用于镜像站路径与官方一致的发行版仓库；企业内网源、带自定义端口的地址与非标准仓库不会被猜测改写。备份目录 `/etc/rhost/mirror-backup/` 需自行控制权限与清理。
 - 防火墙变更会立即影响线上流量，请在操作前确认规则与来源网段；停用防火墙等于按默认策略暴露端口。
 
-## 10. 日志
+## 11. 日志
 
 工具箱的后端埋点使用 `toolbox.*` 事件（目标 `toolbox`）：
 
@@ -194,5 +211,7 @@
 | `toolbox.syslog.read` | 系统日志读取 / 保存：来源 id、行数、时间段（since/until）、字符数、是否截断、是否提权、耗时；保存记本地路径与字节数 |
 | `toolbox.time.status` | 服务器时间与 NTP 状态读取：系统名、发行版、服务类型、安装 / 运行 / 自启、同步状态、偏差、时间源数量、时区与偏移、耗时 |
 | `toolbox.time.change` | 安装 chrony / 保存时间源 / 立即校时 / 服务启停：op、服务类型、包管理器、时间源列表、退出码、是否超时、耗时；失败记错误原因 |
+| `toolbox.mirror.status` | 软件源状态读取：系统名、发行版、包管理器、是否可管理、当前命中的镜像站、源文件数与备份数、耗时 |
+| `toolbox.mirror.change` | 软件源切换 / 还原：op（apply/restore）、镜像站与主机、改动文件数、改动行数、跳过的 metalink 数、是否探测、备份标识、操作后命中的镜像站、退出码、是否超时、耗时；失败记错误原因 |
 
 日志只记录操作元数据，**绝不记录 sudo 口令、公钥内容、容器日志正文与日志正文**。
