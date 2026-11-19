@@ -6,7 +6,7 @@ import {
   METRICS_HEARTBEAT_MS, activeHost, activeHostInfo, activeMetrics, activeNetHist,
   activeReconnectAttempt, activeSession, isExternalSession, monitorVisible,
   connected, disconnectSession, metricsHeartbeat, openDock, reconnectTick,
-  startMetrics, stopMetrics,
+  startMetrics, stopMetrics, clearNetHist,
 } from '../../stores/session'
 import { savedSettings } from '../../stores/settings'
 import ProcModal from './ProcModal.vue'
@@ -398,6 +398,35 @@ const sysinfo = computed(() => {
 /** 图表区网卡标签：默认路由网卡名（0x05）；未采集到显示 N/A */
 const netIface = computed(() => activeHostInfo.value?.iface || NA)
 
+/* ---------- 采样网卡切换（0x06 下发网卡列表） ----------
+ * '' 跟随默认路由；'__all__' 汇总全部非 lo 网卡；其余为指定网卡。
+ * 切换即重启采集器（metricsTarget 变化），并清空本会话曲线历史。 */
+const IFACE_ALL = '__all__'
+const ifacePick = ref('')
+const ifaceOptions = computed(() => {
+  const names = [...new Set(activeMetrics.value?.net_ifaces ?? [])]
+  const def = activeHostInfo.value?.iface || ''
+  return names.sort((a, b) => (a === def ? -1 : b === def ? 1 : a.localeCompare(b)))
+})
+const ifaceValue = computed(() => {
+  if (ifacePick.value === IFACE_ALL) return IFACE_ALL
+  if (ifacePick.value && ifaceOptions.value.includes(ifacePick.value)) return ifacePick.value
+  return ifaceOptions.value[0] ?? ''
+})
+const ifaceForMetrics = computed<string | null>(() => {
+  if (ifacePick.value === IFACE_ALL) return null
+  if (ifacePick.value && ifaceOptions.value.includes(ifacePick.value)) return ifacePick.value
+  return activeHostInfo.value?.iface || null
+})
+function onIfacePick(e: Event) {
+  ifacePick.value = (e.target as HTMLSelectElement).value
+  const sid = activeSession.value?.id
+  if (sid) clearNetHist(sid)
+}
+watch(() => activeSession.value?.id, () => {
+  ifacePick.value = ''
+})
+
 /* ---------- 自动刷新开关（默认开启） ---------- */
 const autoRefresh = ref(true)
 function toggleAutoRefresh() {
@@ -421,10 +450,11 @@ const metricsTarget = computed<{ id: string; iface: string | null; intervalMs: n
   if (!autoRefresh.value || !monitorVisible.value || !panelVisible.value || !docVisible.value) {
     return null
   }
-  // iface 取自 0x05：首帧若晚到，target 变化会触发一次幂等重启切到默认网卡
+  // iface 默认取 0x05 默认路由网卡，用户可在网络页签切换（含汇总全部）；
+  // 首帧若晚到或切换网卡，target 变化都会触发一次幂等重启
   // intervalMs 取自全局设置：改采集间隔时 target 变化，幂等重启 collector 即时生效
   const intervalSec = Math.min(10, Math.max(1, Math.round(savedSettings.metricsInterval) || 2))
-  return { id: s.backendId, iface: activeHostInfo.value?.iface || null, intervalMs: intervalSec * 1000 }
+  return { id: s.backendId, iface: ifaceForMetrics.value, intervalMs: intervalSec * 1000 }
 })
 
 let runningBackendId: string | null = null
@@ -519,7 +549,7 @@ async function onDisconnect() {
         </svg>
       </button>
       <button class="ri-icon-btn ri-toggle" :class="{ on: autoRefresh }"
-              title="自动刷新"
+              :title="autoRefresh ? '自动刷新：开（点击暂停）' : '自动刷新：关（点击开启）'"
               @click="toggleAutoRefresh">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
@@ -680,7 +710,17 @@ async function onDisconnect() {
         <div class="ri-chart-top">
           <span class="ri-rate up">▲ {{ fmtRate(txRate) }}</span>
           <span class="ri-rate down">▼ {{ fmtRate(rxRate) }}</span>
-          <span class="ri-iface" title="采样网卡（默认路由）">{{ netIface }}</span>
+          <select
+            v-if="ifaceOptions.length > 1"
+            class="ri-iface sel"
+            :value="ifaceValue"
+            title="采样网卡（默认路由优先，可切换）"
+            @change="onIfacePick"
+          >
+            <option v-for="n in ifaceOptions" :key="n" :value="n">{{ n }}</option>
+            <option :value="IFACE_ALL">全部网卡</option>
+          </select>
+          <span v-else class="ri-iface" title="采样网卡（默认路由）">{{ netIface }}</span>
         </div>
         <div class="ri-plot">
           <span class="tick hi">{{ fmtRate(netHistMax) }}</span>
@@ -1246,6 +1286,31 @@ async function onDisconnect() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 多网卡时的切换下拉：外观压成普通标签，悬停/聚焦才显出可点 */
+.ri-iface.sel {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%238a8f98' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E")
+    no-repeat right 3px center;
+  padding: 0 16px 0 3px;
+  max-width: 45%;
+  font: inherit;
+  font-size: 10.5px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.ri-iface.sel:hover {
+  border-color: var(--border);
+  color: var(--text);
+}
+.ri-iface.sel:focus-visible {
+  outline: none;
+  border-color: var(--border);
+  color: var(--text);
 }
 /* 纵轴刻度用 HTML 定位：SVG 的 preserveAspectRatio=none 会把 <text> 横向拉变形 */
 .ri-plot {

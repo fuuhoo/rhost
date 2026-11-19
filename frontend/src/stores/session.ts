@@ -379,6 +379,8 @@ export interface MetricsData {
   cpu: CpuMetricsData
   mem: MemMetricsData
   net: NetMetricsData
+  /** 可切换的网卡名（非 lo）；不足两个时监控页签不显示切换入口 */
+  net_ifaces?: string[]
   /** 真实挂载点磁盘用量（后端低频夹带，非夹带轮沿用上一次结果） */
   disks: DiskMetricsData[]
   /** 进程总数与 CPU Top 5 */
@@ -412,6 +414,13 @@ export const activeNetHist = computed<{ up: number[]; down: number[] }>(() => {
   const id = activeSessionId.value
   return (id && netHistMap.value.get(id)) || EMPTY_NET_HIST
 })
+
+/** 切换采样网卡时清空该会话曲线历史：不同网卡的速率不能拼成同一条线 */
+export function clearNetHist(id: string) {
+  if (!netHistMap.value.has(id)) return
+  netHistMap.value.delete(id)
+  triggerRef(netHistMap)
+}
 
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
