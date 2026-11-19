@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 [中文](./CHANGELOG.zh-CN.md) · **English**
 
+## [2.10.0] - 2026-11-19
+
+### Added
+
+- New "Network" tab in the toolbox: one read-only pass collects interfaces, addresses, routes and DNS, with search across every field, hit counts and one-click address copy; prefers iproute2 and falls back to `ifconfig` + `route` (macOS `netstat`) when `ip` is missing — no root, no config changes
+- The network card in the monitor panel can switch the sampled interface: with more than one interface, pick the default-route one, a specific interface, or the "all interfaces" aggregate; switching clears that session's chart history
+- New "Export hosts" button on the hosts page: exports all hosts and groups to an encrypted JSON file (`scope=hosts`, password entered twice, at least 6 characters), unaffected by the current search or group filter
+
+### Fixed
+
+- The monitor panel's auto-refresh icon no longer spins forever; colour alone indicates on/off and the tooltip names the current state
+- The terminal connection banner's progress and slide animations now run on transform / opacity composite layers instead of triggering layout every frame, and are disabled when the system asks for reduced motion
+
 ## [2.9.0] - 2026-11-18
 
 ### Added
