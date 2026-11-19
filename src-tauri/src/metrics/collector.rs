@@ -167,6 +167,8 @@ async fn run(
     };
     // 网卡速率需 (采样时刻, 计数) 二元组做差；墙钟差兼容后台 Tab 节流后的非固定间隔
     let mut prev_net: Option<(Instant, NetCounters)> = None;
+    // 可切换网卡名缓存：本轮缺 netdev 段时沿用上一次，前端下拉不闪空
+    let mut ifaces_cache: Vec<String> = Vec::new();
     // 磁盘低频夹带：第 0 轮（首帧）立即采，之后每 DISK_INTERVAL_ROUNDS 轮一次；
     // 非夹带轮/df 失败沿用上一次缓存，UI 不闪空
     let mut tick: u32 = 0;
@@ -304,6 +306,9 @@ async fn run(
                 }
 
                 // 网络速率同理：缺 netdev 时沿用上一次速率与计数，不把 0 推给界面
+                if !raw.net_ifaces.is_empty() {
+                    ifaces_cache = std::mem::take(&mut raw.net_ifaces);
+                }
                 let net = if let Some(cur) = raw.net {
                     let mut n = NetMetricsPayload {
                         rx_rate: 0.0,
@@ -441,6 +446,7 @@ async fn run(
                     cpu: CpuMetricsPayload { util, load },
                     mem: mem_cache,
                     net,
+                    net_ifaces: ifaces_cache.clone(),
                     disks: disks_cache.clone(),
                     procs: procs_cache.clone().unwrap_or(ProcsPayload {
                         total: 0,

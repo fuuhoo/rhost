@@ -619,6 +619,35 @@ impl NetCounters {
     }
 }
 
+/// 容器/虚拟化自动生成的网卡前缀：数量多（Docker 主机常有几十个 br-/veth）
+/// 且页面上无意义，切换列表里不展示；这些网卡仍计入「全部网卡」汇总。
+const VIRTUAL_IFACE_PREFIXES: &[&str] = &["veth", "br-", "docker", "virbr", "vnet"];
+
+/// `/proc/net/dev` 中可切换的网卡名（去 lo 与容器虚拟网卡，保持内核顺序）。
+/// 供 0x06 帧下发，前端据此渲染采样网卡切换入口。
+pub(crate) fn netdev_ifaces(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in text.lines() {
+        let (name, rest) = match line.split_once(':') {
+            Some(kv) => kv,
+            None => continue,
+        };
+        let name = name.trim();
+        if name.is_empty()
+            || name == "lo"
+            || VIRTUAL_IFACE_PREFIXES.iter().any(|p| name.starts_with(p))
+        {
+            continue;
+        }
+        // 与 NetCounters::parse 同口径：至少 9 列才视为有效网卡行
+        if rest.split_whitespace().count() < 9 {
+            continue;
+        }
+        names.push(name.to_string());
+    }
+    names
+}
+
 /// 相邻两次网卡计数的字节速率（bytes/s）：字节增量 ÷ 墙钟秒数。
 /// 计数器倒退（异常快照）saturating 为 0；dt 非正返回 0，避免除零。
 pub(crate) fn byte_rate(prev: u64, cur: u64, dt: Duration) -> f64 {
@@ -989,6 +1018,8 @@ pub(crate) struct RawMetrics {
     pub mem: MemMetrics,
     /// 选定网卡计数；/proc/net/dev 缺失时为 None（collector 不更新 prev）
     pub net: Option<NetCounters>,
+    /// 可切换的网卡名（非 lo，内核顺序）；段缺失时为空
+    pub net_ifaces: Vec<String>,
     /// df 段只在夹带轮存在；None 表示本轮未采磁盘，collector 沿用上一次缓存
     pub disks: Option<Vec<DiskMetrics>>,
     /// 进程段每轮都采；None（段缺失/空）时 collector 沿用上一次榜单
@@ -1083,6 +1114,7 @@ pub(crate) fn parse_metrics_output(text: &str, iface: Option<&str>) -> RawMetric
     }
     let mem = MemMetrics::parse(&mem_lines);
     let net = NetCounters::parse(&net_lines, iface);
+    let net_ifaces = netdev_ifaces(&net_lines);
     let procs = parse_procs(&proc_lines);
     // docker 段只在 docker 轮存在：marker 存在即为权威快照（哪怕无容器），
     // 缺 marker 才是「本轮未采集」；名称段是否执行由 @@DOCKERNAMES@@ 单独标记
@@ -1114,6 +1146,7 @@ pub(crate) fn parse_metrics_output(text: &str, iface: Option<&str>) -> RawMetric
         load,
         mem,
         net,
+        net_ifaces,
         disks,
         procs,
         docker,
@@ -1130,6 +1163,9 @@ pub(crate) struct MetricsPayload {
     pub cpu: CpuMetricsPayload,
     pub mem: MemMetrics,
     pub net: NetMetricsPayload,
+    /// 可切换的网卡名（非 lo）；不足两个时前端不显示切换入口
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub net_ifaces: Vec<String>,
     /// 真实挂载点磁盘用量（低频夹带，非夹带轮沿用上一次结果）
     pub disks: Vec<DiskMetrics>,
     /// 进程总数与 CPU Top N 榜单
@@ -1672,6 +1708,23 @@ mod metrics_dynamic_tests {
         assert!(
             NetCounters::parse("    lo: 100 1 0 0 0 0 0 0 100 1 0 0 0 0 0 0\n", None).is_none()
         );
+    }
+
+    #[test]
+    fn netdev_iface_names_lists_non_lo_in_kernel_order() {
+        let text = concat!(
+            "Inter-|   Receive                                                |  Transmit\n",
+            " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n",
+            "    lo:     530       7    0    0    0     0          0         0      530       7    0    0    0     0       0          0\n",
+            "  eth0: 2063672   16521    0    0    0     0          0         0  2386376   11963    0    0    0     0       0          0\n",
+            " wlan0:  100000     100    2    3    0     0          0         0   200000     200    4    5    0     0       0          0\n",
+            "  veth1a:  999999     100    0    0    0     0          0         0   999999     200    0    0    0     0       0          0\n",
+            "br-abc123: 888888     100    0    0    0     0          0         0   888888     200    0    0    0     0       0          0\n",
+        );
+        assert_eq!(netdev_ifaces(text), vec!["eth0".to_string(), "wlan0".to_string()]);
+        // 缺列残行与只有 lo 都不产出名称
+        assert!(netdev_ifaces("  eth1: 1 2 3\n").is_empty());
+        assert!(netdev_ifaces("    lo: 100 1 0 0 0 0 0 0 100 1 0 0 0 0 0 0\n").is_empty());
     }
 
     #[test]
