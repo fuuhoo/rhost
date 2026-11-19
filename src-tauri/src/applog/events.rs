@@ -221,6 +221,8 @@ pub const TOOLBOX_TIME_STATUS: &str = "toolbox.time.status";
 /// NTP 安装 / 配置时间源 / 立即校时 / 服务启停
 pub const TOOLBOX_NTP_CHANGE: &str = "toolbox.time.change";
 /// 软件源状态读取（kv 带发行版/包管理器/当前镜像/文件与备份数）
+pub const TOOLBOX_NETWORK_LIST: &str = "toolbox.network.list";
+
 pub const TOOLBOX_MIRROR_STATUS: &str = "toolbox.mirror.status";
 /// 软件源切换 / 还原（kv 带 preset/改动文件数/skipped/备份标识，不含文件内容）
 pub const TOOLBOX_MIRROR_CHANGE: &str = "toolbox.mirror.change";
@@ -385,6 +387,7 @@ mod tests {
             TOOLBOX_SYSLOG_READ,
             TOOLBOX_TIME_STATUS,
             TOOLBOX_NTP_CHANGE,
+            TOOLBOX_NETWORK_LIST,
             TOOLBOX_MIRROR_STATUS,
             TOOLBOX_MIRROR_CHANGE,
         ];

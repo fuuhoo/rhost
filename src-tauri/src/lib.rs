@@ -448,6 +448,7 @@ pub fn run() {
             ai::ai_exec_tool,
             ai::ai_cancel_execs,
             toolbox::toolbox_list_ports,
+            toolbox::toolbox_network_info,
             toolbox::toolbox_firewall_status,
             toolbox::toolbox_firewall_add,
             toolbox::toolbox_firewall_remove,

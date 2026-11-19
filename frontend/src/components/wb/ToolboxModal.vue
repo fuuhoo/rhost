@@ -14,6 +14,7 @@ import DockerTerminal, { type DockerTermChannel } from './DockerTerminal.vue'
 import SyslogPanel from './SyslogPanel.vue'
 import TimePanel from './TimePanel.vue'
 import MirrorPanel from './MirrorPanel.vue'
+import NetworkPanel from './NetworkPanel.vue'
 
 interface PortRow {
   port: number
@@ -126,7 +127,7 @@ interface DockerConfig {
   dataRoot: string | null
 }
 
-type Tab = 'firewall' | 'ports' | 'pubkey' | 'docker' | 'syslog' | 'time' | 'mirror'
+type Tab = 'firewall' | 'ports' | 'network' | 'pubkey' | 'docker' | 'syslog' | 'time' | 'mirror'
 type DockerView = 'containers' | 'images' | 'networks' | 'volumes' | 'config'
 
 const SUDO_REQUIRED = 'SUDO_PASSWORD_REQUIRED'
@@ -1732,7 +1733,7 @@ onUnmounted(() => {
           </div>
           <div class="modal-title">
             <h2 id="tbxTitle">工具箱</h2>
-            <p>{{ sessionLabel }} · Docker、防火墙、端口、公钥、系统日志与时间同步</p>
+            <p>{{ sessionLabel }} · Docker、防火墙、端口、网络、公钥、系统日志、时间同步与软件源</p>
           </div>
           <button class="modal-close" title="关闭 (Esc)" @click="close">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
@@ -1752,6 +1753,9 @@ onUnmounted(() => {
           </button>
           <button class="tbx-tab" :class="{ active: tab === 'ports' }" @click="switchTab('ports')">
             端口
+          </button>
+          <button class="tbx-tab" :class="{ active: tab === 'network' }" @click="switchTab('network')">
+            网络
           </button>
           <button class="tbx-tab" :class="{ active: tab === 'pubkey' }" @click="switchTab('pubkey')">
             公钥
@@ -1775,6 +1779,12 @@ onUnmounted(() => {
             <button class="tbx-link" @click="retryCurrent">{{ tab === 'pubkey' ? '重试写入' : '重试' }}</button>
             <button class="tbx-error-close" title="关闭" aria-label="关闭" @click="error = ''">×</button>
           </div>
+
+          <!-- 网卡 / 地址 / 路由 / DNS（自持搜索与刷新） -->
+          <NetworkPanel
+            v-if="sessionReady && tab === 'network'"
+            :session-id="backendId ?? ''"
+          />
 
           <!-- 系统日志（自持来源探测 / 筛选 / 跟随 / 错误处理） -->
           <SyslogPanel

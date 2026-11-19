@@ -12,6 +12,7 @@
 mod docker;
 mod firewall;
 mod mirror;
+mod network;
 mod ports;
 mod pubkey;
 mod syslog;
@@ -312,6 +313,53 @@ pub async fn toolbox_list_ports(
         })),
     );
     Ok(result)
+}
+
+
+/// 网卡、地址、路由与 DNS 只读采集（不需要提权）。
+#[tauri::command]
+pub async fn toolbox_network_info(
+    session_id: String,
+    manager: State<'_, SessionManager>,
+) -> Result<network::NetworkInfo, String> {
+    let started = Instant::now();
+    let exec = match exec_plain(&manager, &session_id, network::NETWORK_SCRIPT, LIST_TIMEOUT).await {
+        Ok(v) => v,
+        Err(e) => {
+            applog::emit(
+                log::Level::Warn,
+                "toolbox",
+                ev::TOOLBOX_NETWORK_LIST,
+                Some(&session_id),
+                "网络信息读取失败",
+                Some(serde_json::json!({
+                    "elapsed_ms": started.elapsed().as_millis() as u64,
+                    "err": e,
+                })),
+            );
+            return Err(e);
+        }
+    };
+    let info = network::parse(&exec.out.output);
+    applog::emit(
+        log::Level::Info,
+        "toolbox",
+        ev::TOOLBOX_NETWORK_LIST,
+        Some(&session_id),
+        "网络信息读取完成",
+        Some(serde_json::json!({
+            "tool": info.tool,
+            "hostname": info.hostname,
+            "interfaces": info.interfaces.len(),
+            "up": info.interfaces.iter().filter(|i| i.state == "UP").count(),
+            "routes": info.routes.len(),
+            "default_routes": info.routes.iter().filter(|r| r.default).count(),
+            "dns_servers": info.dns.servers.len(),
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+            "timed_out": exec.out.timed_out,
+        })),
+    );
+    Ok(info)
 }
 
 /// 防火墙状态与规则列表（按需提权）。
