@@ -805,20 +805,10 @@ async function onDisconnect() {
   color: var(--red);
 }
 
-/* 自动刷新开关：开启=品牌绿+持续旋转，关闭=与普通按钮一致 */
+/* 自动刷新开关：开启=品牌绿常亮；不再常驻旋转（图标只表达开关态，
+   持续动效交给数据本身的曲线刷新） */
 .ri-toggle.on {
   color: var(--green);
-}
-.ri-toggle.on svg {
-  transform-origin: 50% 50%;
-  /* 常驻旋转：提升为独立合成层，避免每帧重绘整个面板头部 */
-  will-change: transform;
-  animation: ri-spin 3s linear infinite;
-}
-@keyframes ri-spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 /* ============ 滚动内容 ============ */
 .ri-body {
