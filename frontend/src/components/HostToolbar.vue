@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { open } from '@tauri-apps/plugin-dialog'
+import { open, save } from '@tauri-apps/plugin-dialog'
 import { toast } from '../composables/useToast'
 import { filter, groupFilter, showNewConn, viewStyle } from '../stores/hosts'
 import { groupedView } from '../stores/hostDisplay'
 import { allGroups } from '../stores/groups'
 import {
+  exportConfig,
   importHosts,
   isEncryptedConfig,
   readImportFile,
@@ -87,6 +88,60 @@ async function onImportHosts() {
     importing.value = false
   }
 }
+
+/** 导出全部主机与分组（scope=hosts，强制密码加密，与设置页导出同一链路） */
+const exporting = ref(false)
+const EXPORT_PW_MIN = 6
+
+function timeStamp() {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+}
+
+async function askExportPassword(): Promise<string | null> {
+  const pw = await promptPassword(
+    '该密码仅用于此文件加密，丢失后无法恢复',
+    '导出主机',
+    `设置加密密码（至少 ${EXPORT_PW_MIN} 位）`,
+  )
+  if (pw === null) return null
+  if (pw.length < EXPORT_PW_MIN) {
+    toast(`密码至少 ${EXPORT_PW_MIN} 位`, 'err', 2600)
+    return null
+  }
+  const again = await promptPassword('请再次输入密码', '确认密码', '再次输入密码')
+  if (again === null) return null
+  if (pw !== again) {
+    toast('两次输入的密码不一致', 'err', 2600)
+    return null
+  }
+  return pw
+}
+
+async function onExportHosts() {
+  if (!isTauri) {
+    toast('请在桌面端使用「导出主机」', 'info', 2000)
+    return
+  }
+  const password = await askExportPassword()
+  if (password === null) return
+  const path = await save({
+    title: '导出主机',
+    defaultPath: `rhost_hosts_${timeStamp()}.json`,
+    filters: [{ name: 'JSON 配置文件', extensions: ['json'] }],
+  })
+  if (!path) return
+  exporting.value = true
+  try {
+    const abs = await exportConfig(path, 'hosts', false, false, password)
+    toast(`主机已导出：${abs}`, 'ok', 3200)
+  } catch (e) {
+    toast(`导出失败：${String(e)}`, 'err', 4000)
+  } finally {
+    exporting.value = false
+  }
+}
 </script>
 
 <template>
@@ -150,7 +205,7 @@ async function onImportHosts() {
             <line x1="5" y1="12" x2="19" y2="12"></line></svg>
           <span>新建连接</span>
         </button>
-        <button class="btn" :disabled="importing" @click="onImportHosts">
+        <button class="btn" :disabled="importing || exporting" @click="onImportHosts">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
@@ -158,6 +213,15 @@ async function onImportHosts() {
             <line x1="12" y1="15" x2="12" y2="3"></line>
           </svg>
           <span>{{ importing ? '导入中…' : '导入主机' }}</span>
+        </button>
+        <button class="btn" :disabled="exporting || importing" @click="onExportHosts">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="17 8 12 3 7 8"></polyline>
+            <line x1="12" y1="3" x2="12" y2="15"></line>
+          </svg>
+          <span>{{ exporting ? '导出中…' : '导出主机' }}</span>
         </button>
       </div>
     </div>

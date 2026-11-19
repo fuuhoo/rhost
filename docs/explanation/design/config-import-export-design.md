@@ -511,6 +511,7 @@ async fn import_hosts(
 - 连接合并与 id 冲突重命名、id 重映射规则同 §6.1（`ui_state.sessions` 重映射同样适用）。
 - 持写锁（§7.5），临界区同 `import_config`。
 - 前端入口：主机列表页工具栏【导入主机】按钮 → 系统打开对话框 → 流程同 §8.3（stat 预检/加密密码/摘要 toast）；**不弹重启确认**——只合并主机与分组两节，热刷新后即完全生效。
+- 同区域【导出主机】按钮复用 `export_config(scope="hosts")`：固定密码加密（两次确认、至少 6 位），默认文件名 `rhost_hosts_<时间戳>.json`，导出全部主机与分组（不受当前搜索/分组筛选影响）。
 - 日志事件复用 `app.config.import.*`（kv `scope=hosts`）。
 
 ---
@@ -745,7 +746,7 @@ pub fn migrate_to_current(mut data: serde_json::Value, file_version: u32) -> Res
 | `components/wb/DockPanel.vue` | 移除 `rhost.logWrap` localStorage；写穿 `'ui_state'`。 |
 | `components/SettingsModal.vue` | 移除「导出到剪贴板」与「立即备份」按钮（后者与全量加密导出链路等价，统一入口）；「配置文件」区域为「导出范围」常驻下拉（全量配置/仅主机与分组/仅界面偏好）+【导出…】/【导入…】/【恢复默认设置】，无常驻重启按钮；导出固定包含全部可选节且固定密码加密（无勾选框，点击导出时两次输入密码）；`onExportFile()` / `onImportFile()` 接后端 IPC（导入前 stat 预检，阈值取自 `AppConfigSnapshot.max_import_file_bytes`；加密文件传 password 给后端解密）；`onImportFile()` 成功后经全局 `useConfirm`（ConfirmModal）弹「立即重启 / 稍后」确认，确认调 `relaunch()`（`@tauri-apps/plugin-process`，需确认插件已注册）。 |
 | `stores/applog.ts` | 同步登记 §10.1 的 8 个 `app.config.*` 事件 ID（与后端 `events.rs` 对齐）。 |
-| 主机列表页工具栏 | 新增【导入主机】按钮 → `import_hosts` IPC（§7.7），流程同 §8.3（stat 预检/加密密码/摘要 toast），不弹重启确认（仅主机/分组节，热刷新即生效）。 |
+| 主机列表页工具栏 | 新增【导入主机】按钮 → `import_hosts` IPC（§7.7），流程同 §8.3（stat 预检/加密密码/摘要 toast），不弹重启确认（仅主机/分组节，热刷新即生效）；【导出主机】按钮 → `export_config(scope="hosts")`，固定密码加密后写出全部主机与分组。 |
 | `App.vue`（启动序列） | 启动序列保持精简：`load_app_config` → `loadHosts` → `restoreSessions`。无 localStorage 迁移步骤（§3.1）。 |
 
 ### 设计文档
