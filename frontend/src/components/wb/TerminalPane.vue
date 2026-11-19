@@ -1341,6 +1341,7 @@ function dotClass(status: HostStatus) {
   padding:0 8px 0 10px;
   background:var(--panel-2);
   border-bottom:1px solid var(--border);
+  overflow:hidden;
   font-size:11px;color:var(--muted);
   animation:rcb-slide .22s cubic-bezier(.16,1,.3,1);
 }
@@ -1348,6 +1349,7 @@ function dotClass(status: HostStatus) {
 
 /* 状态点 */
 .rcb-dot{
+  position:relative;
   flex:none;width:7px;height:7px;border-radius:50%;
   background:var(--orange);
   box-shadow:0 0 0 2px rgba(255,158,100,.15);
@@ -1364,6 +1366,28 @@ function dotClass(status: HostStatus) {
 @keyframes rcb-pulse-blue{
   0%,100%{box-shadow:0 0 0 2px rgba(122,162,247,.15)}
   50%{box-shadow:0 0 0 5px rgba(122,162,247,0)}
+}
+/* 连接中：状态点外扩一圈涟漪（transform/opacity，不触发布局） */
+.p-connecting .rcb-dot::after{
+  content:'';position:absolute;inset:-3px;border-radius:50%;
+  border:1px solid rgba(122,162,247,.55);
+  animation:rcb-ring 1.4s ease-out infinite;
+  pointer-events:none;
+}
+@keyframes rcb-ring{
+  0%{transform:scale(.6);opacity:.9}
+  100%{transform:scale(2.2);opacity:0}
+}
+/* 连接中：整条状态条上的柔光横扫，指示「握手进行中」 */
+.rc-banner.p-connecting::after{
+  content:'';position:absolute;top:0;bottom:0;left:0;width:26%;
+  background:linear-gradient(90deg,transparent,rgba(122,162,247,.14),transparent);
+  animation:rcb-sheen 1.8s ease-in-out infinite;
+  pointer-events:none;
+}
+@keyframes rcb-sheen{
+  from{transform:translateX(-100%)}
+  to{transform:translateX(400%)}
 }
 /* 离线终态：红色常亮，不再脉冲（自动流程已停止） */
 .p-offline .rcb-dot{
@@ -1430,7 +1454,7 @@ function dotClass(status: HostStatus) {
 
 /* 底边进度线：贴状态条下沿 2px（offline 无此元素） */
 .rcb-bar{
-  position:absolute;left:0;right:0;bottom:-1px;height:2px;
+  position:absolute;left:0;right:0;bottom:0;height:2px;
   background:var(--border-soft);overflow:hidden;pointer-events:none;
 }
 .rcb-bar i{display:block;height:100%}
@@ -1438,23 +1462,31 @@ function dotClass(status: HostStatus) {
 .rcb-bar .shrink{
   width:100%;
   background:linear-gradient(90deg,var(--orange),var(--yellow));
+  transform-origin:left center;
   animation-name:rcb-shrink;animation-timing-function:linear;animation-fill-mode:forwards;
 }
-@keyframes rcb-shrink{from{width:100%}to{width:0%}}
-/* 尝试/连接中：不定宽条左右滑动 */
+@keyframes rcb-shrink{from{transform:scaleX(1)}to{transform:scaleX(0)}}
+/* 尝试/连接中：不定宽条左右滑动（transform 动画，避免逐帧布局） */
 .rcb-bar .slide{
-  position:relative;width:34%;
+  position:absolute;top:0;left:0;height:100%;width:34%;
   background:linear-gradient(90deg,transparent,var(--orange),transparent);
-  animation:rcb-slide 1.1s ease-in-out infinite;
+  animation:rcb-scan 1.1s ease-in-out infinite;
 }
 .p-connecting .rcb-bar .slide{
   background:linear-gradient(90deg,transparent,var(--blue),transparent);
 }
-@keyframes rcb-slide{
-  0%{margin-left:-36%}
-  100%{margin-left:102%}
+@keyframes rcb-scan{
+  from{transform:translateX(-100%)}
+  to{transform:translateX(300%)}
 }
 .rcb-bar .full{width:100%;background:var(--green)}
+
+@media (prefers-reduced-motion: reduce){
+  .p-connecting .rcb-dot::after,
+  .rc-banner.p-connecting::after,
+  .rcb-bar .slide{animation:none}
+  .rcb-bar .shrink{animation-timing-function:steps(1,end)}
+}
 
 /* 状态条真实占位：xterm 容器与悬浮工具栏下移避让（特异性高于全局规则）；
    banner 出现/消失后由 watch(bannerOn) 触发 safeFit 重算行列 */
