@@ -1489,6 +1489,7 @@ html:not([data-platform="macos"]) *{
     box-shadow:0 0 6px rgba(248,81,73,.7);
 }
 
+.tb-settings{margin-left:4px}
 .tb-group{
     display:flex;align-items:center;gap:2px;
     padding:2px;background:var(--bg);
@@ -3533,7 +3534,12 @@ html[data-theme="light"] .grid-link-arrow{stroke:var(--blue)}
     font-size:10.5px;color:var(--muted-2);
     margin-top:6px;line-height:1.55;
 }
-.st-link-row{display:flex;gap:8px;margin-top:12px;margin-bottom:22px}
+.st-link-row{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:12px;margin-bottom:22px}
+/* 检查更新结果：与按钮同排，错误信息可换行 */
+.st-update-text{font-size:11.5px;color:var(--muted);line-height:1.5;min-width:0}
+.st-update-text.new{color:var(--green);font-weight:600}
+.st-update-text.err{color:var(--red);max-width:100%;word-break:break-all}
+.st-update-date{color:var(--muted-2);font-weight:400}
 /* 危险按钮（如密钥删除确认） */
 .btn.danger{
     color:var(--red);

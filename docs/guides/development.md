@@ -225,4 +225,4 @@ refactor(sftp): 传输队列改为串行调度
 
 - 根目录 `README.md` 的部分技术描述已过时（写的是 Pinia、ssh2、sled、spawn_blocking、旧目录结构），与当前实现不符时**以本文档与代码为准**；
 - 仓库无前端 lint/format 配置，但有 `.husky/commit-msg` + commitlint 约束提交信息，以及 `.github/workflows/{docs,release}.yml`；提交前至少保证 `npm run build` 与 `cargo test` 通过；
-- SFTP 覆盖策略、断点校验（含 SHA256）、并发上限与带宽限速、失败重试、GPU/WebGL 渲染后端均已接入业务逻辑；设置项若仍带 TODO 徽章（`tunnelKeepaliveSec`、`key.splitV/H`、`autoUpdate`、`updateChannel`）则为仅持久化未消费，以 `SettingsModal.vue` 的 `todo` 说明为准。
+- SFTP 覆盖策略、断点校验（含 SHA256）、并发上限与带宽限速、失败重试、GPU/WebGL 渲染后端均已接入业务逻辑；设置项若仍带 TODO 徽章（`tunnelKeepaliveSec`、`key.splitV/H`）则为仅持久化未消费，以 `SettingsModal.vue` 的 `todo` 说明为准。

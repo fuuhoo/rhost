@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 全局命令面板（⌘K / 标题栏「命令」按钮唤起）。
+ * 全局命令面板（命令面板快捷键 / 标题栏「命令」按钮唤起）。
  *
  * 定位：把散落在标题栏、右键菜单里的命令收敛为一个可键盘驱动的入口，
  * 项与项的动作全部复用 store 既有函数，本组件只做收集、过滤与派发。
@@ -10,6 +10,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { showPalette, settingsFocusPanel, termFindTick } from '../lib/uiBus'
 import { getTerm } from '../lib/termRegistry'
+import { fmtCombo } from '../lib/keyHint'
 import { toast } from '../composables/useToast'
 import { savedSettings, showSettings } from '../stores/settings'
 import { showNewConn } from '../stores/hosts'
@@ -171,12 +172,12 @@ async function runTemplate(raw: string) {
   toast('命令已发送到终端', 'ok', 1500)
 }
 
-/** 右侧快捷键提示：直接回显设置里的绑定串（改绑即时同步） */
+/** 右侧快捷键提示：回显设置里的绑定串（改绑即时同步），并按当前平台换算 ⌘ / Ctrl */
 function hintOf(c: Command): string {
   if (c.hint) return c.hint
   if (!c.binding) return ''
   const raw = (savedSettings as Record<string, unknown>)[c.binding]
-  return typeof raw === 'string' ? raw : ''
+  return typeof raw === 'string' ? fmtCombo(raw) : ''
 }
 
 const query = ref('')

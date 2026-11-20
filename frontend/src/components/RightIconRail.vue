@@ -2,9 +2,12 @@
 import { computed, watch } from 'vue'
 import { appView, rightPanelTab, rightPanelVisible } from '../stores/session'
 import { savedSettings } from '../stores/settings'
+import { fmtCombo } from '../lib/keyHint'
 
 const isHome = computed(() => appView.value === 'home')
 const aiEnabled = computed(() => savedSettings.aiEnabled)
+/** 组件内固定快捷键（⌘I），按平台显示成 ⌘I / Ctrl+I */
+const aiHint = fmtCombo('⌘+I')
 
 /** AI 关闭时若正停留在 AI 页签，折叠面板并回退到主机页签 */
 watch(aiEnabled, on => {
@@ -50,7 +53,7 @@ function onIcon(tab: 'hosts' | 'ai') {
       v-if="aiEnabled"
       class="rail-btn"
       :class="{ on: rightPanelVisible && rightPanelTab === 'ai' }"
-      title="AI 助手 (⌘I)"
+      :title="`AI 助手 (${aiHint})`"
       @click="onIcon('ai')"
     >
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"

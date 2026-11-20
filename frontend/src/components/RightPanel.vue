@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, defineAsyncComponent, watch } from 'vue'
+import { fmtCombo } from '../lib/keyHint'
 import HostsPane from './wb/HostsPane.vue'
 import HistoryPane from './wb/HistoryPane.vue'
 import { appView, activeSession, rightPanelMaximized, rightPanelTab, rightPanelVisible, rightPanelWidth } from '../stores/session'
@@ -133,7 +134,7 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
           <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
         </svg>
       </button>
-      <button class="close-btn" title="折叠 (⌘I)" @click="collapse">
+      <button class="close-btn" :title="`折叠 (${fmtCombo('⌘+I')})`" @click="collapse">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M9 18l6-6-6-6" />

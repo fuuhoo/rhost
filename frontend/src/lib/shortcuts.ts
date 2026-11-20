@@ -1,12 +1,14 @@
 /**
  * 设置驱动的全局快捷键（设置 → 快捷键）。
  *
- * 绑定值由 SettingsModal 的录入器写成展示串：修饰键标签 ⌘/Ctrl/Alt/Shift + 主键，
- * 以 '+' 连接（如 '⌘+T'、'Ctrl+Shift+B'、'⌘+,'）。本模块负责解析并派发。
+ * 绑定值由 SettingsModal 的录入器写成「修饰键 + 主键」以 '+' 连接：mac 上主修饰键
+ * 是 ⌘（如 '⌘+T'），Windows/Linux 上落成 Ctrl（如 'Ctrl+Shift+T'）；其它平台读到
+ * 历史配置里的 ⌘ 也按 Ctrl 解释（见 lib/keyHint.ts）。本模块负责解析并派发。
  *
  * 与组件内硬编码监听的分工：按键输入本身仍由 xterm 处理，这里只接命令类快捷键；
  * TerminalPane 仅保留广播条（⌘⇧B）这类与组件内部状态强绑定的快捷键。
  */
+import { isMac } from './keyHint'
 import { savedSettings, showSettings } from '../stores/settings'
 import { showNewConn } from '../stores/hosts'
 import { activeSessionId, closeSession, openBlankSession } from '../stores/session'
@@ -61,11 +63,14 @@ export function parseCombo(raw: unknown): Combo | null {
   const main = parts[parts.length - 1] as string
   const key = normalizeKey(main)
   if (!key) return null
+  const is = (...names: string[]) => mods.some(m => names.includes(m.toLowerCase()))
+  // ⌘ 是「主修饰键」：mac 上对应 Command（meta），其它平台对应 Ctrl
+  const primary = is('⌘', 'meta', 'cmd', 'command')
   return {
-    meta: mods.some(m => m === '⌘' || m.toLowerCase() === 'meta' || m.toLowerCase() === 'cmd'),
-    ctrl: mods.some(m => m.toLowerCase() === 'ctrl' || m.toLowerCase() === 'control'),
-    alt: mods.some(m => m.toLowerCase() === 'alt' || m === '⌥'),
-    shift: mods.some(m => m.toLowerCase() === 'shift'),
+    meta: isMac && primary,
+    ctrl: (isMac ? is('⌃', 'ctrl', 'control') : primary || is('⌃', 'ctrl', 'control')),
+    alt: is('⌥', 'alt', 'option'),
+    shift: is('shift', '⇧'),
     key,
   }
 }

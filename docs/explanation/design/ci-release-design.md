@@ -6,7 +6,7 @@
 >
 > created: 2026-10-08 09:28:16
 >
-> updated: 2026-10-15 16:50:00
+> updated: 2026-11-19 17:00:00
 >
 > author: [sjzhao](https://github.com/ShiJieCloud/rhost)
 
@@ -328,7 +328,7 @@ Tauri 2 默认产物名由 `productName` + `version` + `arch` 派生，可定制
 - macOS x86_64：是否为 Intel Mac 增加 `macos-13` matrix 条目或出 universal2 包（构建时长翻倍），待有 Intel 用户诉求后决策；
 - macOS 签名/公证、Windows Authenticode：需要开发者账号与证书 secrets，发布对外正式版前评估；
 - e2e 测试入 CI（ubuntu runner 起 docker/debian-sshd 容器跑 `cargo test --test ssh_e2e`）与 PR 快速检查 job（`cargo check` + `vue-tsc`）——待构建流水线稳定后追加；
-- tauri-updater 自动更新通道（`autoUpdate`/`updateChannel` 设置项已预留但后端未实现）——另立设计；
+- tauri-updater 自动更新（应用内下载安装）：发布产物未签名，当前应用内只提供「检查更新」——读 GitHub Releases 最新 tag 比对版本并跳发布页，不下载安装；签名产物与 updater 通道另立设计；
 
 ## 10. CHANGELOG 引入与提取方案
 

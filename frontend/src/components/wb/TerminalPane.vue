@@ -13,6 +13,7 @@ import ContextMenu, { type MenuItem } from './ContextMenu.vue'
 import { toast } from '../../composables/useToast'
 import { registerTerm, unregisterTerm } from '../../lib/termRegistry'
 import { termFindTick } from '../../lib/uiBus'
+import { ENTER_LABEL, comboParts, fmtCombo } from '../../lib/keyHint'
 import { addToAiChat } from '../../stores/aiQuote'
 import { hosts, showNewConn } from '../../stores/hosts'
 import { clampBgImgBlur, clampBgImgOpacity, resolveTerminalFontFamily, savedSettings, termBgImageTint, termPalette } from '../../stores/settings'
@@ -198,8 +199,8 @@ function openTermMenu(id: string, x: number, y: number) {
   const inst = termInsts.get(id)
   if (!inst) return
   termMenuItems.value = [
-    { label: '复制', icon: ICON_COPY, shortcut: '⌘C', disabled: !inst.term.hasSelection(), action: () => copySelection(id) },
-    { label: '粘贴', icon: ICON_PASTE, shortcut: '⌘V', action: () => pasteFromClipboard(id) },
+    { label: '复制', icon: ICON_COPY, shortcut: fmtCombo('⌘C'), disabled: !inst.term.hasSelection(), action: () => copySelection(id) },
+    { label: '粘贴', icon: ICON_PASTE, shortcut: fmtCombo('⌘V'), action: () => pasteFromClipboard(id) },
     { divider: true },
     {
       label: '添加到 AI 对话', icon: ICON_AI, disabled: !inst.term.hasSelection(),
@@ -211,8 +212,8 @@ function openTermMenu(id: string, x: number, y: number) {
       },
     },
     { divider: true },
-    { label: '清屏', icon: ICON_CLEAR, action: () => inst.term.clear() },
-    { label: '全选', icon: ICON_SELECT, shortcut: '⌘A', action: () => inst.term.selectAll() },
+    { label: '清屏', icon: ICON_CLEAR, shortcut: fmtCombo(savedSettings['key.clear']), action: () => inst.term.clear() },
+    { label: '全选', icon: ICON_SELECT, shortcut: fmtCombo('⌘A'), action: () => inst.term.selectAll() },
   ]
   termMenuPos.value = { x, y }
   termMenuOpen.value = true
@@ -716,6 +717,13 @@ const targetLabel = computed(() => {
  * 唤起：设置里的「查找」快捷键（lib/shortcuts.ts）或命令面板，二者都 bump
  * termFindTick；查找条为浮动层，随活动会话切换重新统计（各会话自带 addon）。
  * ============================================================ */
+/** 空态底部的快捷键提示：绑定值来自设置，标签按当前平台渲染 */
+const quickHints = computed(() => [
+  { label: '新建连接', keys: comboParts(savedSettings['key.newTab']) },
+  { label: '新建终端窗口', keys: comboParts(savedSettings['key.newWindow']) },
+  { label: '命令面板', keys: comboParts(savedSettings['key.palette']) },
+])
+
 const findOpen = ref(false)
 const findQuery = ref('')
 const findCase = ref(false)
@@ -1023,7 +1031,7 @@ function dotClass(status: HostStatus) {
       <button
         class="bcast-tool"
         :class="{ on: bcastOpen }"
-        title="广播命令到多个会话 (⌘⇧B)"
+        :title="`广播命令到多个会话 (${fmtCombo('⌘⇧B')})`"
         @click="toggleBroadcast"
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1237,7 +1245,7 @@ function dotClass(status: HostStatus) {
           @click="broadcastSend"
         >
           发送
-          <kbd>↵</kbd>
+          <kbd>{{ ENTER_LABEL }}</kbd>
         </button>
       </div>
     </div>
@@ -1285,9 +1293,9 @@ function dotClass(status: HostStatus) {
       </div>
 
       <div class="hints">
-        <span><kbd>⌘</kbd><kbd>T</kbd> 新建连接</span>
-        <span><kbd>⌘</kbd><kbd>⇧</kbd><kbd>T</kbd> 新建终端窗口</span>
-        <span><kbd>⌘</kbd><kbd>K</kbd> 命令面板</span>
+        <span v-for="h in quickHints" :key="h.label">
+          <kbd v-for="(k, i) in h.keys" :key="i">{{ k }}</kbd> {{ h.label }}
+        </span>
       </div>
     </div>
 

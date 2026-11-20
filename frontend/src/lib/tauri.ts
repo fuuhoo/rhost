@@ -30,6 +30,15 @@ export async function appWindow() {
 }
 
 /**
+ * 当前应用版本号（不含「开发版」后缀），如 `2.3.0`；浏览器 dev 预览无注入时为空串。
+ * 与 Cargo.toml / tauri.conf.json / frontend/package.json 同源。
+ */
+export const appVersion: string = (() => {
+  const boot = (window as unknown as { __RHOST_BOOT__?: { appVersion?: string } }).__RHOST_BOOT__
+  return boot?.appVersion ?? ''
+})()
+
+/**
  * 应用版本展示串，如「2.3.0 · 开发版」（开发版仅在 debug 构建下出现）。
  * 取 lib.rs 首帧注入的 window.__RHOST_BOOT__，与 Cargo.toml / tauri.conf.json /
  * frontend/package.json 的版本同源；浏览器 dev 预览无注入时为空串，调用方需隐藏该行。

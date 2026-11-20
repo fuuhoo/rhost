@@ -13,6 +13,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { resolveTerminalFontFamily, savedSettings, termPalette } from '../../stores/settings'
+import { fmtCombo } from '../../lib/keyHint'
 import { confirmDialog } from '../../composables/useConfirm'
 import ContextMenu, { type MenuItem } from './ContextMenu.vue'
 
@@ -152,11 +153,11 @@ function openMenu(x: number, y: number) {
   const t = term
   if (!t) return
   menuItems.value = [
-    { label: '复制', icon: ICON_COPY, shortcut: '⌘C', disabled: !t.hasSelection(), action: copySelection },
-    { label: '粘贴', icon: ICON_PASTE, shortcut: '⌘V', action: pasteFromClipboard },
+    { label: '复制', icon: ICON_COPY, shortcut: fmtCombo('⌘C'), disabled: !t.hasSelection(), action: copySelection },
+    { label: '粘贴', icon: ICON_PASTE, shortcut: fmtCombo('⌘V'), action: pasteFromClipboard },
     { divider: true },
     { label: '清屏', icon: ICON_CLEAR, action: () => t.clear() },
-    { label: '全选', icon: ICON_SELECT, shortcut: '⌘A', action: () => t.selectAll() },
+    { label: '全选', icon: ICON_SELECT, shortcut: fmtCombo('⌘A'), action: () => t.selectAll() },
   ]
   menuPos.value = { x, y }
   menuOpen.value = true

@@ -12,6 +12,7 @@ import TunnelPane from './TunnelPane.vue'
 import FileIcon from './FileIcon.vue'
 import PermModal from './PermModal.vue'
 import { detectPlatform, isTauri } from '../../lib/tauri'
+import { fmtCombo } from '../../lib/keyHint'
 import { dropToCss, watchFileDrop } from '../../lib/fileDrop'
 import { getSnapshot, onConfigLoad, patchUiState } from '../../stores/appConfig'
 import ContextMenu from './ContextMenu.vue'
@@ -1980,9 +1981,9 @@ function buildMenu(side: Side, targets: FsEntry[]): MenuItem[] {
       { label: '新建文件夹', icon: ICON.mkdir, action: () => startEdit(side, 'mkdir') },
       { label: '新建文件', icon: ICON.mkfile, action: () => startEdit(side, 'mkfile') },
       { divider: true },
-      { label: '粘贴', icon: ICON.paste, shortcut: '⌘V', disabled: !clipboard.value, action: () => void pasteTargets(side) },
+      { label: '粘贴', icon: ICON.paste, shortcut: fmtCombo('⌘V'), disabled: !clipboard.value, action: () => void pasteTargets(side) },
       { divider: true },
-      { label: '全选', icon: ICON.all, shortcut: '⌘A', action: () => selectAll(side) },
+      { label: '全选', icon: ICON.all, shortcut: fmtCombo('⌘A'), action: () => selectAll(side) },
       { label: '刷新', icon: ICON.refresh, action: () => void refreshSide(side) },
     ]
   }
@@ -1994,7 +1995,7 @@ function buildMenu(side: Side, targets: FsEntry[]): MenuItem[] {
   if (single) {
     items.push(single.type === 'dir'
       ? { label: '进入目录', icon: ICON.enter, action: () => onRowDblClick(side, single) }
-      : { label: '编辑', icon: ICON.edit, shortcut: '⌘↵', action: () => openEntriesInEditor(side, [single]) })
+      : { label: '编辑', icon: ICON.edit, shortcut: fmtCombo('⌘↵'), action: () => openEntriesInEditor(side, [single]) })
     items.push({ divider: true })
   }
 
@@ -2015,15 +2016,15 @@ function buildMenu(side: Side, targets: FsEntry[]): MenuItem[] {
   if (onlyFiles && targets.length > 1) {
     items.push({
       label: `用编辑器打开 ${targets.length} 个文件`,
-      icon: ICON.edit, shortcut: '⌘↵',
+      icon: ICON.edit, shortcut: fmtCombo('⌘↵'),
       disabled: side === 'remote' && !connected.value,
       action: () => openEntriesInEditor(side, targets),
     })
     items.push({ divider: true })
   }
 
-  items.push({ label: '复制', icon: ICON.copy, shortcut: '⌘C', action: () => copySelection(side, 'copy') })
-  items.push({ label: '剪切', icon: ICON.cut, shortcut: '⌘X', action: () => copySelection(side, 'cut') })
+  items.push({ label: '复制', icon: ICON.copy, shortcut: fmtCombo('⌘C'), action: () => copySelection(side, 'copy') })
+  items.push({ label: '剪切', icon: ICON.cut, shortcut: fmtCombo('⌘X'), action: () => copySelection(side, 'cut') })
   if (single) {
     items.push({ label: '重命名', icon: ICON.rename, shortcut: 'F2', action: () => startEdit(side, 'rename', single) })
     /* 权限对话框只挂远端：本机侧未接 chmod 命令 */
@@ -3368,7 +3369,7 @@ onUnmounted(() => {
 
           <span class="spacer"></span>
 
-          <button class="mini-ico" :class="{ active: searchVisible }" title="搜索日志 (Ctrl/⌘+F)"
+          <button class="mini-ico" :class="{ active: searchVisible }" :title="`搜索日志 (${fmtCombo(savedSettings['key.find'])})`"
                   @click="openSearch">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                  stroke-linecap="round" stroke-linejoin="round">

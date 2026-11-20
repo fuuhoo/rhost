@@ -4,7 +4,7 @@
 >
 > created: 2026-10-09 19:14:43
 >
-> updated: 2026-11-05 08:36:51
+> updated: 2026-11-19 17:20:00
 >
 > author: [sjzhao](https://github.com/ShiJieCloud/rhost)
 
@@ -36,6 +36,9 @@
 终端连接成功后直接键入命令，回车执行。终端使用 PTY 通道，支持完整的终端控制序列（颜色、光标移动、全屏程序如 `vim`/`htop`/`tmux`）。
 
 ### 2.2 复制与粘贴
+
+> 键位按平台显示：macOS 为 `⌘`，Windows / Linux 为 `Ctrl`（如 `⌘V` ↔ `Ctrl+V`）。
+> 下文按键位沿用 macOS 记法，应用内提示与右键菜单会按当前系统渲染。
 
 | 操作 | 方式 |
 |---|---|

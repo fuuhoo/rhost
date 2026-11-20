@@ -44,7 +44,9 @@ impl Default for ConfigWriteLock {
 }
 
 /// 当前配置结构版本
-const CURRENT_VERSION: u32 = 1;
+///
+/// v2：SFTP 隐藏文件从默认关闭改为默认显示（见 [`migrate`]）。
+const CURRENT_VERSION: u32 = 2;
 
 /// 配置文件名（app config dir 下）
 pub const APP_CONFIG_FILE_NAME: &str = "app_config.json";
@@ -221,12 +223,14 @@ pub(crate) struct SettingsSection {
     /// 外部编辑器命令（空串=自动探测 code/codium/cursor）。仅由前端 invoke 传给
     /// localfs::open_in_editor，Rust 侧只负责持久化，不读它决定行为
     sftp_editor_command: String,
-    // 关于
-    auto_update: bool,
-    update_channel: String,
     /// 本版本不认识的 settings 字段，读改写原样保留
     #[serde(flatten)]
     extra: Map<String, Value>,
+}
+
+/// 快捷键主修饰键的默认写法：mac 为 ⌘，其它平台为 Ctrl（与 FinalShell 键位习惯一致）
+fn primary_mod() -> &'static str {
+    if cfg!(target_os = "macos") { "⌘" } else { "Ctrl" }
 }
 
 impl Default for SettingsSection {
@@ -282,14 +286,15 @@ impl Default for SettingsSection {
             ],
             command_templates_seeded: false,
 
-            key_new_tab: "⌘+T".into(),
-            key_close_tab: "⌘+W".into(),
-            key_split_v: "⌘+D".into(),
-            key_split_h: "⌘+E".into(),
-            key_clear: "⌘+L".into(),
-            key_palette: "⌘+K".into(),
-            key_find: "⌘+F".into(),
-            key_settings: "⌘+,".into(),
+            // 默认键位按平台给：mac 用 ⌘+X，Windows/Linux 用 Ctrl+X
+            key_new_tab: format!("{}+T", primary_mod()),
+            key_close_tab: format!("{}+W", primary_mod()),
+            key_split_v: format!("{}+D", primary_mod()),
+            key_split_h: format!("{}+E", primary_mod()),
+            key_clear: format!("{}+L", primary_mod()),
+            key_palette: format!("{}+K", primary_mod()),
+            key_find: format!("{}+F", primary_mod()),
+            key_settings: format!("{}+,", primary_mod()),
 
             gpu_accel: true,
             renderer: "auto".into(),
@@ -314,11 +319,9 @@ impl Default for SettingsSection {
             sftp_idle_timeout_sec: 300,
             sftp_verify_hash: false,
             sftp_blacklist: ".DS_Store\nThumbs.db".into(),
-            sftp_show_hidden: false,
+            sftp_show_hidden: true,
             sftp_show_local_pane: false,
             sftp_editor_command: String::new(),
-            auto_update: true,
-            update_channel: "stable".into(),
 
             extra: Map::new(),
         }
@@ -492,9 +495,25 @@ impl AppConfigFile {
 
 /// 读取完整配置文件（全节）；文件不存在 / JSON 损坏均回退默认值。
 pub fn load_full(path: &Path) -> AppConfigFile {
-    match std::fs::read_to_string(path) {
+    let mut file = match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str::<AppConfigFile>(&text).unwrap_or_default(),
         Err(_) => AppConfigFile::default(),
+    };
+    migrate(&mut file);
+    file
+}
+
+/// 结构迁移（只升不降，纯内存；随后任意写盘都会带上新版本号）。
+///
+/// v1→v2：SFTP 浏览默认显示隐藏文件。旧默认 false 在升级时一次性翻成 true，
+/// 否则 `.env` 这类文件的可见性会跟着旧配置走远；用户之后在设置里关掉，
+/// 写盘即为 v2，不会被再次翻转。
+fn migrate(file: &mut AppConfigFile) {
+    if file.version < 2 {
+        if let Some(settings) = file.settings.as_object_mut() {
+            settings.insert("sftpShowHidden".into(), Value::Bool(true));
+        }
+        file.version = 2;
     }
 }
 
@@ -672,7 +691,7 @@ mod tests {
         // 原子写不留临时文件；顶层带 version
         assert!(!dir.join("nested/.app_config.json.tmp").exists());
         let raw: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
-        assert_eq!(raw["version"], 1);
+        assert_eq!(raw["version"], 2);
         assert!(raw["logs"].is_object());
     }
 
@@ -760,6 +779,31 @@ mod tests {
     }
 
     #[test]
+    fn v1_config_enables_hidden_files_exactly_once() {
+        let dir = unique_dir("hidefiles");
+        let f = dir.join(APP_CONFIG_FILE_NAME);
+        // 旧版默认：隐藏文件被过滤
+        std::fs::write(
+            &f,
+            r#"{"version":1,"settings":{"sftpShowHidden":false}}"#,
+        )
+        .unwrap();
+        assert_eq!(load_full(&f).settings["sftpShowHidden"], json!(true));
+
+        // 用户升级后在设置里主动关掉 → 写盘为 v2，不再被迁移翻转
+        save_section(&f, "settings", json!({"sftpShowHidden": false})).unwrap();
+        let raw: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+        assert_eq!(raw["version"], 2);
+        assert_eq!(load_full(&f).settings["sftpShowHidden"], json!(false));
+    }
+
+    #[test]
+    fn default_settings_show_hidden_files() {
+        let v = default_settings_value();
+        assert_eq!(v["sftpShowHidden"], json!(true));
+    }
+
+    #[test]
     fn save_section_rejects_unknown_name() {
         let dir = unique_dir("secname");
         let f = dir.join(APP_CONFIG_FILE_NAME);
@@ -778,8 +822,8 @@ mod tests {
         assert_eq!(raw["settings"]["uiTheme"], "light");
         assert_eq!(raw["settings"]["fontSize"], 15);
         assert_eq!(raw["settings"]["motd"], true); // 默认补齐
-        assert_eq!(raw["settings"]["key.newTab"], "⌘+T");
-        assert_eq!(raw["settings"]["updateChannel"], "stable");
+        let expected_new_tab = if cfg!(target_os = "macos") { "⌘+T" } else { "Ctrl+T" };
+        assert_eq!(raw["settings"]["key.newTab"], expected_new_tab);
         // 预置命令模板随默认值补齐，且 marker 保持 false 交由前端补种
         assert_eq!(raw["settings"]["commandTemplates"].as_array().unwrap().len(), 2);
         assert_eq!(raw["settings"]["commandTemplatesSeeded"], false);

@@ -3,6 +3,7 @@ import { onConfigLoad, persistSectionNow } from './appConfig'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri } from '../lib/tauri'
+import { MOD, isMac, toNativeCombo } from '../lib/keyHint'
 import {
   TERM_BG_BLUE, TERM_SCHEMES, contrastRatio, normalizeTermBg, normalizeTermScheme,
   resolveTermBgImage, srgbChannelLuma, srgbLuminance, type TermPalette,
@@ -231,9 +232,6 @@ export interface AppSettings {
   tunnelIdleTimeoutSec: number
   /** 动态转发（SOCKS）域名解析位置：local 本地 / remote 远端 */
   tunnelDnsResolve: string
-  /* ---- 关于 ---- */
-  autoUpdate: boolean
-  updateChannel: string
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -278,16 +276,16 @@ export const DEFAULT_SETTINGS: AppSettings = {
   ],
   commandTemplatesSeeded: false,
 
-  'key.newTab': '⌘+T',
-  // 与 FinalShell 默认键位一致（Ctrl+Shift+T 新建终端窗口）
-  'key.newWindow': '⌘+Shift+T',
-  'key.closeTab': '⌘+W',
-  'key.splitV': '⌘+D',
-  'key.splitH': '⌘+E',
-  'key.clear': '⌘+L',
-  'key.palette': '⌘+K',
-  'key.find': '⌘+F',
-  'key.settings': '⌘+,',
+  // 默认键位按平台给：mac 用 ⌘+X，Windows/Linux 用 Ctrl+X（与 FinalShell 习惯一致）
+  'key.newTab': `${MOD}+T`,
+  'key.newWindow': `${MOD}+Shift+T`,
+  'key.closeTab': `${MOD}+W`,
+  'key.splitV': `${MOD}+D`,
+  'key.splitH': `${MOD}+E`,
+  'key.clear': `${MOD}+L`,
+  'key.palette': `${MOD}+K`,
+  'key.find': `${MOD}+F`,
+  'key.settings': `${MOD}+,`,
 
   gpuAccel: true,
   renderer: 'auto',
@@ -339,7 +337,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   sftpIdleTimeoutSec: 300,
   sftpVerifyHash: false,
   sftpBlacklist: '.DS_Store\nThumbs.db',
-  sftpShowHidden: false,
+  sftpShowHidden: true,
   sftpShowLocalPane: false,
   sftpEditorCommand: '',
 
@@ -350,9 +348,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   tunnelKeepaliveSec: 15,
   tunnelIdleTimeoutSec: 0,
   tunnelDnsResolve: 'local',
-
-  autoUpdate: true,
-  updateChannel: 'stable',
 }
 
 /* ---- 持久化：后端 app_config.json settings 节（唯一真相源，localStorage 已下线） ---- */
@@ -363,6 +358,32 @@ function cloneDefaults(): AppSettings {
 
 /** 启动初始/后端不可用时为默认值；loadAppConfig 后由快照 hydrate 覆盖 */
 export const savedSettings = reactive<AppSettings>(cloneDefaults())
+
+/** 快捷键字段（settings 节里 key.* 的强类型成员） */
+const KEY_FIELDS = [
+  'key.newTab', 'key.newWindow', 'key.closeTab', 'key.splitV', 'key.splitH',
+  'key.clear', 'key.palette', 'key.find', 'key.settings',
+] as const satisfies ReadonlyArray<keyof AppSettings>
+
+/**
+ * 非 mac 平台的旧配置迁移：早期版本把默认键位按 mac 习惯写成 '⌘+T'，
+ * Windows/Linux 上既按不出也用不了。启动时统一换成 Ctrl+T 落盘，之后配置文件中
+ * 不再出现 mac 符号；mac 上原样保留（用户自己绑的 Ctrl 也是合法键位）。
+ */
+function migrateKeyCombos() {
+  if (isMac) return
+  let changed = false
+  for (const k of KEY_FIELDS) {
+    const v = savedSettings[k]
+    if (typeof v !== 'string' || !/[⌘⌥⇧⌃]/.test(v)) continue
+    const next = toNativeCombo(v)
+    if (next !== v) {
+      savedSettings[k] = next
+      changed = true
+    }
+  }
+  if (changed) persistSettings()
+}
 
 /** settings 节（非 log* 键，后端 camelCase 原样）灌入内存态 */
 function applySettingsSection(section: Record<string, unknown>) {
@@ -383,6 +404,7 @@ function applySettingsSection(section: Record<string, unknown>) {
   if (section.termTheme === 'light' && typeof section.termMode !== 'string') section.termBg = 'light'
   delete section.termMode
   Object.assign(savedSettings, section)
+  migrateKeyCombos()
   // 一次性补种内置命令模板：预置项曾只存在于前端 DEFAULT_SETTINGS，任何一次保存
   // 设置都会被后端按默认值补成空数组写盘，之后每次启动 hydrate 又用空数组覆盖
   // 前端预置，面板里就再也看不到它们。标记缺省时把预置项补回（已有自建命令则

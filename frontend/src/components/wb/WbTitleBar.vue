@@ -1,8 +1,10 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { appWindow, detectPlatform } from '../../lib/tauri'
+import { comboParts, fmtCombo } from '../../lib/keyHint'
 import AppLogo from '../AppLogo.vue'
 import { showNewConn } from '../../stores/hosts'
-import { showSettings } from '../../stores/settings'
+import { savedSettings, showSettings } from '../../stores/settings'
 import { showPalette, showToolbox } from '../../lib/uiBus'
 import { toast } from '../../composables/useToast'
 import {
@@ -11,6 +13,10 @@ import {
 
 // macOS 由原生 Overlay 红绿灯渲染（左侧安全区）；Windows/Linux 前端自绘右侧窗口按钮
 const showWinCtrl = detectPlatform() !== 'macos'
+
+// 快捷键提示跟随设置里的绑定值与当前平台（mac 显示 ⌘，Windows/Linux 显示 Ctrl）
+const findHint = computed(() => fmtCombo(savedSettings['key.find']))
+const paletteKeys = computed(() => comboParts(savedSettings['key.palette']))
 
 async function onClose() {
   ;(await appWindow())?.close()
@@ -48,11 +54,6 @@ function onPaletteClick() {
   showPalette.value = true
 }
 
-/** 通知中心尚无独立子系统；应用真实的事件流就是底部面板的运行日志页签 */
-function onNotify() {
-  openDock('log')
-}
-
 function onSettings() {
   showSettings.value = true
 }
@@ -74,7 +75,7 @@ function onSettings() {
     </button>
 
     <!-- 搜索 -->
-    <button class="tb-btn" title="搜索日志 (⌘F)" @click="onSearch">
+    <button class="tb-btn" :title="`搜索日志 (${findHint})`" @click="onSearch">
       <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
     </button>
 
@@ -103,7 +104,7 @@ function onSettings() {
     <button class="tb-cmdk" title="执行命令…" @click="onPaletteClick">
       <svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
       <span class="text">执行命令…</span>
-      <span class="kbd"><kbd>⌘</kbd><kbd>K</kbd></span>
+      <span class="kbd"><kbd v-for="(k, i) in paletteKeys" :key="i">{{ k }}</kbd></span>
     </button>
 
     <!-- 视图切换组 -->
@@ -134,13 +135,8 @@ function onSettings() {
       </button>
     </div>
 
-    <!-- 通知：打开底部运行日志（应用事件流） -->
-    <button class="tb-btn" title="运行日志" @click="onNotify">
-      <svg viewBox="0 0 24 24"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 01-3.4 0"/></svg>
-    </button>
-
     <!-- 设置 -->
-    <button class="tb-btn" title="设置" @click="onSettings">
+    <button class="tb-btn tb-settings" title="设置" @click="onSettings">
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.9l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.9-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.9.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.9 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.9l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.9.3h.1a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.9-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.9v.1a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg>
     </button>
 

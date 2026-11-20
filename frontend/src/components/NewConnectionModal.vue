@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { fmtCombo } from '../lib/keyHint'
 import { invoke } from '@tauri-apps/api/core'
 import { toast } from '../composables/useToast'
 import { confirmDialog, confirmState } from '../composables/useConfirm'
@@ -1575,8 +1576,8 @@ async function save() {
 
         <span class="kbd">
           <b>Esc</b>
-          <b>⌘T 测试</b>
-          <b>⌘↵ 保存</b>
+          <b>{{ fmtCombo('⌘T') }} 测试</b>
+          <b>{{ fmtCombo('⌘↵') }} 保存</b>
         </span>
 
         <button class="btn ghost" @click="close">取消</button>

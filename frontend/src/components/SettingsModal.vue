@@ -17,7 +17,10 @@ import {
   TERM_BG_BUILTINS, TERM_BG_BUILTIN_PREFIX,
   resolveTermBgImage, termBgBuiltinKey, termBgBuiltinThumb, termBgImageLabel,
 } from '../lib/termThemes'
-import { isTauri, detectPlatform, appVersionLabel } from '../lib/tauri'
+import { openUrl } from '@tauri-apps/plugin-opener'
+import { isMac, comboParts, fmtCombo } from '../lib/keyHint'
+import { appVersion, isTauri, detectPlatform, appVersionLabel } from '../lib/tauri'
+import { fetchLatestRelease, isNewer, releasesUrl, type ReleaseInfo } from '../lib/updateCheck'
 import { settingsFocusPanel } from '../lib/uiBus'
 import { pathBaseName, readFileFromPath } from '../lib/localFile'
 import { aiClearMemories, aiGetApiKey, aiListMemories, aiListPromptAssets, aiRevealPromptDir, aiSaveMemories, aiSetApiKey, aiTestConnection, AI_MEMORY_CONTENT_MAX_CHARS, type AiMemoryItem, type AiPromptAsset, type AiPromptAssets } from '../lib/ai'
@@ -76,7 +79,7 @@ interface RowDef {
     id:
       | 'exportFile' | 'importFile'
       | 'resetSettings'
-      | 'changelog' | 'checkUpdate' | 'openLogDir' | 'testAiConnection'
+      | 'checkUpdate' | 'openLogDir' | 'testAiConnection'
       | 'openSkillsDir' | 'openRulesDir' | 'refreshAssets'
       | 'clearMemories'
     label: string
@@ -498,7 +501,7 @@ const PANELS: PanelDef[] = [
   },
   {
     id: 'commands', label: '命令模板', glyph: 'commands',
-    title: '命令模板', sub: '自定义常用命令，在「执行命令…」面板（⌘K）里选中即写入当前活动终端并回车执行',
+    title: '命令模板', sub: `自定义常用命令，在「执行命令…」面板（${fmtCombo('⌘+K')}）里选中即写入当前活动终端并回车执行`,
     groups: [
       {
         label: '命令列表',
@@ -628,17 +631,8 @@ const PANELS: PanelDef[] = [
   },
   {
     id: 'about', label: '关于', glyph: 'about',
-    title: '关于', sub: '版本信息与更新通道', about: true,
-    groups: [
-      {
-        label: '更新',
-        rows: [
-          { key: 'autoUpdate', title: '自动检查更新', desc: '启动时在后台检查新版本', kind: 'switch', keywords: '自动更新 检查 update 升级 TODO', todo: '仅持久化，无更新检查逻辑' },
-          { key: 'updateChannel', title: '更新通道', kind: 'select', width: 140, keywords: '更新通道 beta 稳定 stable channel TODO', todo: '仅持久化，无更新通道逻辑',
-            options: [{ v: 'stable', t: '稳定版' }, { v: 'beta', t: '测试版' }, { v: 'nightly', t: '每日构建' }] },
-        ],
-      },
-    ],
+    title: '关于', sub: '版本信息与更新检查', about: true,
+    groups: [],
   },
 ]
 
@@ -701,6 +695,8 @@ function close() {
 const activePanel = computed(() => PANELS.find(p => p.id === activePanelId.value) ?? PANELS[0])
 
 /* ---- 搜索 ---- */
+/** 关于页的搜索关键词（该页无设置行） */
+const ABOUT_KEYWORDS = '关于 版本 检查更新 更新 升级 about version update '
 function rowMatch(r: RowDef, q: string): boolean {
   return ((r.keywords ?? '') + ' ' + r.title + ' ' + (r.desc ?? '')).toLowerCase().includes(q)
 }
@@ -712,6 +708,11 @@ const displayPanels = computed(() => {
     const groups = p.groups
       .map(g => ({ ...g, rows: g.rows.filter(r => rowMatch(r, q)) }))
       .filter(g => g.rows.length)
+    // 关于页没有设置行，靠页签名与关键词命中（搜「更新」「版本」仍能找到检查更新按钮）
+    if (p.about && !groups.length && (ABOUT_KEYWORDS + p.title + p.sub).toLowerCase().includes(q)) {
+      out.push({ ...p, searching: false, groups: [] })
+      continue
+    }
     if (groups.length) out.push({ ...p, searching: true, groups })
   }
   return out
@@ -928,8 +929,9 @@ function setTplCommand(i: number, v: string) { draft.commandTemplates[i]!.comman
 /* ---- 快捷键录制 ---- */
 const recordingKey = ref<keyof AppSettings | null>(null)
 const keyLabels = ['Control', 'Meta', 'Alt', 'Shift', 'Escape']
+/** 键帽分段：按当前平台把 ⌘ 显示成 ⌘ 或 Ctrl（见 lib/keyHint.ts） */
 function splitKeys(s: string): string[] {
-  return s.split('+').filter(Boolean)
+  return comboParts(s)
 }
 function resetRecording() {
   recordingKey.value = null
@@ -949,8 +951,19 @@ function onKey(e: KeyboardEvent) {
     }
     if (keyLabels.includes(e.key)) return // 只按了修饰键，继续等待
     const parts: string[] = []
-    if (e.metaKey) parts.push('⌘')
-    if (e.ctrlKey) parts.push('Ctrl')
+    if (isMac) {
+      // mac：Command 是主修饰键，Control 单独记为 Ctrl（显示时渲染成 ⌃）
+      if (e.metaKey) parts.push('⌘')
+      if (e.ctrlKey) parts.push('Ctrl')
+    } else {
+      // Windows/Linux：Ctrl 是主修饰键。Meta（Win/Super）是系统保留键，不参与绑定；
+      // 命中时直接放弃这次录制，避免把 Win+E 这类组合录成裸主键 E
+      if (e.metaKey) {
+        toast('Windows 键 / Super 键不参与快捷键绑定', 'warn', 1600)
+        return
+      }
+      if (e.ctrlKey) parts.push('Ctrl')
+    }
     if (e.altKey) parts.push('Alt')
     if (e.shiftKey) parts.push('Shift')
     let k = e.key
@@ -973,7 +986,10 @@ function onKey(e: KeyboardEvent) {
   }
 }
 onMounted(() => document.addEventListener('keydown', onKey))
-onUnmounted(() => document.removeEventListener('keydown', onKey))
+onUnmounted(() => {
+  document.removeEventListener('keydown', onKey)
+  updateAbort?.abort()
+})
 
 /* ---- 保存 / 放弃 ---- */
 /** list 项 key 集合（从面板定义推导，保持数据驱动） */
@@ -1203,12 +1219,7 @@ async function onAction(id: string) {
       void onResetSettings()
       break
     case 'checkUpdate':
-      // TODO: 未实现 — 当前为假实现，需接入真实的更新检查后端
-      toast('当前已是最新版本', 'ok', 1800)
-      break
-    case 'changelog':
-      // TODO: 未实现 — 当前为假实现，需接入真实的更新日志视图
-      toast('更新日志开发中', 'info')
+      void checkUpdate()
       break
     case 'openLogDir':
       void openLogDir()
@@ -1229,6 +1240,48 @@ async function onAction(id: string) {
       void clearAllMemories()
       break
   }
+}
+
+/* ---- 检查更新（GitHub Releases，不下载安装） ---- */
+
+type UpdateState = 'idle' | 'checking' | 'latest' | 'available' | 'error'
+
+const updateState = ref<UpdateState>('idle')
+const latestRelease = ref<ReleaseInfo | null>(null)
+const updateError = ref('')
+let updateAbort: AbortController | null = null
+
+/** 发布日期只到日，缺失时不显示 */
+const latestReleaseDate = computed(() => {
+  const iso = latestRelease.value?.publishedAt
+  if (!iso) return ''
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString('zh-CN')
+})
+
+async function checkUpdate() {
+  if (updateState.value === 'checking') return
+  updateAbort?.abort()
+  const ctrl = new AbortController()
+  updateAbort = ctrl
+  updateState.value = 'checking'
+  updateError.value = ''
+  try {
+    const rel = await fetchLatestRelease(ctrl.signal)
+    latestRelease.value = rel
+    // 浏览器 dev 预览拿不到本机版本，只能报最新发布，不做比对
+    updateState.value = appVersion && isNewer(rel.version, appVersion) ? 'available' : 'latest'
+  } catch (e) {
+    if (ctrl.signal.aborted) return
+    updateError.value = e instanceof Error ? e.message : String(e)
+    updateState.value = 'error'
+  } finally {
+    if (updateAbort === ctrl) updateAbort = null
+  }
+}
+
+function openReleases() {
+  void openUrl(releasesUrl).catch(() => { window.open(releasesUrl, '_blank') })
 }
 
 /* ---- 技能/规则提示资产（M3.2） ---- */
@@ -1607,12 +1660,24 @@ function optionList(r: RowDef): Opt[] {
                 </div>
               </div>
               <div v-if="p.about" class="st-link-row">
-                <button class="btn" title="TODO: 未实现 — 更新日志视图开发中" @click="onAction('changelog')">
-                  查看更新日志 <span class="st-todo">TODO</span>
+                <button class="btn" :disabled="updateState === 'checking'" @click="onAction('checkUpdate')">
+                  {{ updateState === 'checking' ? '正在检查…' : '检查更新' }}
                 </button>
-                <button class="btn" title="TODO: 未实现 — 未接入真实更新检查" @click="onAction('checkUpdate')">
-                  检查更新 <span class="st-todo">TODO</span>
-                </button>
+                <span v-if="updateState === 'latest'" class="st-update-text" role="status">
+                  已是最新版本<span v-if="appVersion">（v{{ appVersion }}）</span>
+                </span>
+                <template v-else-if="updateState === 'available'">
+                  <span class="st-update-text new" role="status">
+                    发现新版本 v{{ latestRelease?.version }}<span
+                      v-if="latestReleaseDate" class="st-update-date"
+                    > · {{ latestReleaseDate }}</span>
+                  </span>
+                  <button class="btn" @click="openReleases">打开发布页</button>
+                </template>
+                <template v-else-if="updateState === 'error'">
+                  <span class="st-update-text err" role="status">{{ updateError }}</span>
+                  <button class="btn" @click="openReleases">手动查看发布页</button>
+                </template>
               </div>
             </template>
             <div v-else class="st-search-label">{{ p.label }}</div>
@@ -2073,7 +2138,7 @@ function optionList(r: RowDef): Opt[] {
                 </div>
                 <button class="st-btn-ghost" @click="addCmdTpl">＋ 添加命令</button>
                 <div v-if="!draft.commandTemplates.length" class="st-cmd-empty">
-                  还没有命令模板。添加后用 ⌘K 打开「执行命令…」即可看到，选中即执行。
+                  还没有命令模板。添加后用 {{ fmtCombo('⌘+K') }} 打开「执行命令…」即可看到，选中即执行。
                 </div>
               </template>
 

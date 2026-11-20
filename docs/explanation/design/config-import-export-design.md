@@ -87,7 +87,7 @@
 
 ## 4. 导出文件 Schema
 
-单文件 JSON，建议扩展名 `.rhost.json`（或 `.json`）。
+单文件 JSON，建议扩展名 `.rhost.json`（或 `.json`）。下例为 macOS 导出，`key.*` 用 `⌘` 记法；Windows / Linux 上这些字段是 `Ctrl+X` 形式。
 
 ```json
 {
@@ -176,9 +176,7 @@
       "sftpIdleTimeoutSec": 300,
       "sftpVerifyHash": false,
       "sftpBlacklist": ".DS_Store\nThumbs.db",
-      "sftpShowHidden": false,
-      "autoUpdate": true,
-      "updateChannel": "stable"
+      "sftpShowHidden": true
     },
     "keys": [
       {
@@ -294,7 +292,7 @@
 合并规则按节独立适用，**导入文件缺失的节完全不动本地数据**（这就是 scope 在导入端的自然语义——导入端无需读取 `meta.scope`，只需检查 `data` 中实际存在哪些节）：
 
 - **连接**：按 `id` 合并。**id 冲突时继续导入并重命名**：导入的连接分配新 id，显示名追加「（导入）」后缀；本地原连接**保留不动**（禁止静默覆盖用户已有连接）。连接里的 `keyPath` 已剔除（§5），导入后为空需用户重选。
-- **设置**：导入文件中存在的字段覆盖本地；缺失字段保留本地值。**跨平台容错**：快捷键 `key.*` 含平台修饰键（如 macOS `⌘`），目标平台不认识的修饰键静默忽略（回退默认绑定）。
+- **设置**：导入文件中存在的字段覆盖本地；缺失字段保留本地值。**跨平台容错**：快捷键 `key.*` 含平台修饰键（如 macOS `⌘`），目标平台不认识的修饰键静默忽略（回退默认绑定）。默认键位按平台生成（macOS `⌘` / Windows·Linux `Ctrl`）；Windows / Linux 读到历史配置里的 `⌘+X` 会按 `Ctrl+X` 解释，并在启动时改写成 `Ctrl+X` 落盘。
 - **密钥**：按 `id` 合并，冲突策略同连接（id 冲突 → 新 id + 名称追加「（导入）」）。
 - **分组**：按名称去重并集，导入文件中的分组定义优先（颜色等元数据以导入为准）。
 - **UI 状态**：全量覆盖（`homeView`、`layout`、`sessions`、`logWrap` 等）。
