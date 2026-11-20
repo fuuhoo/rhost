@@ -130,10 +130,79 @@ interface DockerConfig {
 type Tab = 'firewall' | 'ports' | 'network' | 'pubkey' | 'docker' | 'syslog' | 'time' | 'mirror'
 type DockerView = 'containers' | 'images' | 'networks' | 'volumes' | 'config'
 
+interface ToolMeta {
+  id: Tab
+  label: string
+  hint: string
+  /** 24×24 图标内部标记，描边跟随 currentColor */
+  icon: string
+}
+
+/**
+ * 工具清单：卡片入口的唯一数据源。
+ * 新增工具只需往这里追加一项并在模板里补上对应面板，入口布局会自动换行，
+ * 不再受横向页签宽度限制。
+ */
+const TOOLS: ToolMeta[] = [
+  {
+    id: 'docker',
+    label: 'Docker',
+    hint: '容器 / 镜像 / 网络 / 卷',
+    icon: '<path d="M4 8.5l8-3.5 8 3.5-8 3.5-8-3.5z"/><path d="M4 8.5V16l8 3.5 8-3.5V8.5"/><path d="M12 12v7.5"/>',
+  },
+  {
+    id: 'firewall',
+    label: '防火墙',
+    hint: 'ufw / firewalld / iptables 规则',
+    icon: '<path d="M12 3.2l7 2.8v5.6c0 4.4-2.9 7.4-7 9-4.1-1.6-7-4.6-7-9V6l7-2.8z"/><path d="M9.4 11.8l1.9 1.9 3.4-3.7"/>',
+  },
+  {
+    id: 'ports',
+    label: '端口',
+    hint: '监听端口与占用进程',
+    icon: '<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/>',
+  },
+  {
+    id: 'network',
+    label: '网络',
+    hint: '网卡 / 地址 / 路由 / DNS',
+    icon: '<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17"/><path d="M12 3.5c4 4.2 4 12.8 0 17-4-4.2-4-12.8 0-17z"/>',
+  },
+  {
+    id: 'pubkey',
+    label: '公钥',
+    hint: '下发公钥到 authorized_keys',
+    icon: '<circle cx="8" cy="8" r="3.6"/><path d="M10.6 10.6L20 20"/><path d="M17.2 17.2l2-2"/><path d="M14.4 14.4l2-2"/>',
+  },
+  {
+    id: 'syslog',
+    label: '日志',
+    hint: 'journald 与日志文件检索',
+    icon: '<path d="M14 3.5H7.5A1.5 1.5 0 006 5v14a1.5 1.5 0 001.5 1.5h9A1.5 1.5 0 0018 19V7.5l-4-4z"/><path d="M14 3.5V8h4"/><path d="M9 13h6M9 16.5h4"/>',
+  },
+  {
+    id: 'time',
+    label: '时间',
+    hint: '时区与 NTP 同步',
+    icon: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.2V12l3.4 2"/>',
+  },
+  {
+    id: 'mirror',
+    label: '软件源',
+    hint: 'apt / yum 镜像站切换',
+    icon: '<path d="M12 3.5v10"/><path d="M8 9.8l4 4 4-4"/><path d="M4.5 16v2.5a1.5 1.5 0 001.5 1.5h12a1.5 1.5 0 001.5-1.5V16"/>',
+  },
+]
+
+const TOOL_MAP = Object.fromEntries(TOOLS.map(t => [t.id, t])) as Record<Tab, ToolMeta>
+
 const SUDO_REQUIRED = 'SUDO_PASSWORD_REQUIRED'
 const SUDO_INCORRECT = 'SUDO_PASSWORD_INCORRECT'
 
 const tab = ref<Tab>('docker')
+/** home = 卡片入口；tool = 具体工具面板 */
+const view = ref<'home' | 'tool'>('home')
+const currentTool = computed(() => TOOL_MAP[tab.value])
 const busy = ref<'' | 'fw' | 'fw-toggle' | 'ports' | 'add' | 'remove' | 'pubkey' | 'docker' | 'docker-act'>('')
 const error = ref('')
 
@@ -1653,6 +1722,21 @@ function switchTab(next: Tab) {
   }
 }
 
+/** 卡片入口：进入某个工具 */
+function openTool(next: Tab) {
+  view.value = 'tool'
+  switchTab(next)
+}
+
+/** 返回卡片入口；先收掉 Docker 的日志/终端子视图，避免下次进入时停在半截状态 */
+function backToTools() {
+  dockerTerm.value = null
+  dockerLogs.value = null
+  error.value = ''
+  pubkeyResult.value = null
+  view.value = 'home'
+}
+
 function retryCurrent() {
   if (tab.value === 'firewall') void loadFirewall()
   else if (tab.value === 'ports') void loadPorts()
@@ -1662,9 +1746,9 @@ function retryCurrent() {
   } else void deployPubkey()
 }
 
-/** 打开 / 切会话后只预载当前页签，避免无谓的远端采集 */
+/** 打开 / 切会话后只预载当前工具，避免无谓的远端采集 */
 function loadCurrentTab() {
-  if (!sessionReady.value) return
+  if (!sessionReady.value || view.value !== 'tool') return
   if (tab.value === 'firewall') void loadFirewall()
   else if (tab.value === 'ports') void loadPorts()
   else if (tab.value === 'docker') {
@@ -1673,7 +1757,7 @@ function loadCurrentTab() {
   }
 }
 
-/* 打开时只拉当前页；切会话时重新拉，避免展示上一台主机的数据 */
+/* 打开时回到卡片入口；工具内的数据在进入卡片时才拉，避免无谓的远端采集 */
 let openedOnce = false
 function openToolbox() {
   if (!openedOnce) openedOnce = true
@@ -1682,6 +1766,7 @@ function openToolbox() {
   error.value = ''
   resetPubkeyForm()
   resetDocker()
+  view.value = 'home'
   loadCurrentTab()
 }
 watch(showToolbox, v => { if (v) openToolbox() })
@@ -1723,7 +1808,10 @@ onUnmounted(() => {
 <template>
   <Teleport to="body">
     <div class="mask" :class="{ show: showToolbox }" @click.self="close">
-      <div class="modal tbx-modal" role="dialog" aria-modal="true" aria-labelledby="tbxTitle">
+      <div
+        class="modal tbx-modal" :class="{ 'is-home': view === 'home' }"
+        role="dialog" aria-modal="true" aria-labelledby="tbxTitle"
+      >
         <div class="modal-head">
           <div class="modal-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -1733,7 +1821,10 @@ onUnmounted(() => {
           </div>
           <div class="modal-title">
             <h2 id="tbxTitle">工具箱</h2>
-            <p>{{ sessionLabel }} · Docker、防火墙、端口、网络、公钥、系统日志、时间同步与软件源</p>
+            <p>
+              {{ sessionLabel }} ·
+              {{ view === 'home' ? `${TOOLS.length} 个工具，按当前会话实时采集` : currentTool.hint }}
+            </p>
           </div>
           <button class="modal-close" title="关闭 (Esc)" @click="close">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
@@ -1744,34 +1835,38 @@ onUnmounted(() => {
           </button>
         </div>
 
-        <div class="tbx-tabs">
-          <button class="tbx-tab" :class="{ active: tab === 'docker' }" @click="switchTab('docker')">
-            Docker
+        <div v-if="view === 'tool'" class="tbx-nav">
+          <button class="tbx-back" @click="backToTools">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M15 5l-7 7 7 7" />
+            </svg>
+            全部工具
           </button>
-          <button class="tbx-tab" :class="{ active: tab === 'firewall' }" @click="switchTab('firewall')">
-            防火墙
-          </button>
-          <button class="tbx-tab" :class="{ active: tab === 'ports' }" @click="switchTab('ports')">
-            端口
-          </button>
-          <button class="tbx-tab" :class="{ active: tab === 'network' }" @click="switchTab('network')">
-            网络
-          </button>
-          <button class="tbx-tab" :class="{ active: tab === 'pubkey' }" @click="switchTab('pubkey')">
-            公钥
-          </button>
-          <button class="tbx-tab" :class="{ active: tab === 'syslog' }" @click="switchTab('syslog')">
-            日志
-          </button>
-          <button class="tbx-tab" :class="{ active: tab === 'time' }" @click="switchTab('time')">
-            时间
-          </button>
-          <button class="tbx-tab" :class="{ active: tab === 'mirror' }" @click="switchTab('mirror')">
-            软件源
-          </button>
+          <span class="tbx-nav-sep"></span>
+          <strong class="tbx-nav-title">{{ currentTool.label }}</strong>
         </div>
 
-        <div class="tbx-body">
+        <!-- 卡片入口：工具多了自动换行，不再受横向页签宽度限制 -->
+        <div v-if="view === 'home'" class="tbx-home">
+          <div v-if="!sessionReady" class="tbx-empty">请先连接主机再使用工具箱</div>
+          <div v-else class="tbx-grid">
+            <button
+              v-for="t in TOOLS" :key="t.id" class="tbx-card" @click="openTool(t.id)"
+            >
+              <span class="tbx-card-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                     stroke-linecap="round" stroke-linejoin="round" v-html="t.icon"></svg>
+              </span>
+              <span class="tbx-card-text">
+                <span class="tbx-card-label">{{ t.label }}</span>
+                <span class="tbx-card-hint">{{ t.hint }}</span>
+              </span>
+            </button>
+          </div>
+        </div>
+
+        <div v-else class="tbx-body">
           <div v-if="!sessionReady" class="tbx-empty">请先连接主机再使用工具箱</div>
 
           <div v-else-if="error" class="tbx-error">
@@ -2633,30 +2728,104 @@ onUnmounted(() => {
   width: 900px;
   height: min(680px, calc(100vh - 60px));
 }
-.tbx-tabs {
+/* 卡片入口按内容收缩，避免小卡片铺不满整个弹窗；进入工具后再展开到完整高度 */
+.tbx-modal.is-home {
+  height: auto;
+  min-height: 320px;
+  max-height: min(680px, calc(100vh - 60px));
+}
+/* 工具页返回条 */
+.tbx-nav {
   display: flex;
-  gap: 4px;
-  padding: 10px 16px 0;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 16px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
-.tbx-tab {
-  padding: 7px 14px;
-  border: 1px solid transparent;
-  border-bottom: none;
-  border-radius: 7px 7px 0 0;
+.tbx-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: -5px;
+  padding: 4px 8px 4px 5px;
+  border: 0;
+  border-radius: 7px;
   background: none;
   font: inherit;
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--muted);
   cursor: pointer;
 }
-.tbx-tab:hover { color: var(--text); background: var(--hover); }
-.tbx-tab.active {
-  color: var(--text-strong);
-  background: var(--panel-2);
-  border-color: var(--border);
+.tbx-back:hover { color: var(--text); background: var(--hover); }
+.tbx-back svg { width: 13px; height: 13px; }
+.tbx-nav-sep { width: 1px; height: 11px; background: var(--border); }
+.tbx-nav-title { font-size: 12.5px; font-weight: 600; color: var(--text-strong); }
+
+/* 卡片入口 */
+.tbx-home {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 14px 16px 16px;
 }
+.tbx-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  grid-auto-rows: min-content;
+  gap: 11px;
+  align-content: center;
+  align-content: safe center; /* 工具多到需要滚动时，避免首行被裁掉 */
+  overflow: auto;
+}
+.tbx-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  min-height: 92px;
+  padding: 13px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--panel-card);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .14s ease, background .14s ease, transform .14s ease;
+}
+.tbx-card:hover {
+  border-color: var(--border-strong);
+  background: var(--hover);
+  transform: translateY(-1px);
+}
+.tbx-card:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), .35);
+}
+.tbx-card-icon {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel-2);
+  color: var(--text-soft);
+}
+.tbx-card-icon svg { width: 18px; height: 18px; }
+.tbx-card:hover .tbx-card-icon { color: var(--text-strong); border-color: var(--border-strong); }
+.tbx-card-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.tbx-card-label { font-size: 13px; font-weight: 600; color: var(--text); }
+.tbx-card-hint { font-size: 11.5px; line-height: 1.45; color: var(--muted); }
+
 .tbx-body {
   flex: 1;
   min-height: 0;
@@ -3346,4 +3515,9 @@ onUnmounted(() => {
 }
 .dk-preview-edit:focus { outline: none; border-color: var(--border-strong); }
 .dk-preview-edit:disabled { opacity: .6; }
+
+@media (prefers-reduced-motion: reduce) {
+  .tbx-card { transition: none; }
+  .tbx-card:hover { transform: none; }
+}
 </style>
