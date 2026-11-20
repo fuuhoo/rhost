@@ -1478,9 +1478,60 @@ function stopEditPollIfIdle() {
   }
 }
 
+/** 单个本地文件的元数据：读不到一律按「不存在」处理，调用方据此决定重建副本 */
+async function localMetaOf(path: string): Promise<LocalFileMeta> {
+  try {
+    const metas = await invoke<LocalFileMeta[]>('local_files_meta', { paths: [path] })
+    return metas[0] ?? { exists: false, size: 0, mtimeMs: 0 }
+  } catch {
+    return { exists: false, size: 0, mtimeMs: 0 }
+  }
+}
+
+/** 再次打开同一个远端文件前，先跟远端对一次账：手上这份副本还是不是该显示的内容。
+ *  返回 `reuse` = 直接交给编辑器；`reload` = 必须按远端当前内容重新取回。
+ *
+ *  分水岭是「副本干不干净」：lastSize/lastMtimeMs 是上一轮轮询确认过的本地状态，
+ *  与它不同就说明编辑器里有还没回写出去的保存。干净才允许被远端内容覆盖；
+ *  不干净时先回写（远端也改过就照旧弹窗裁决），宁可让本机版本落地，也不静默丢弃。 */
+async function reconcileEditCopy(w: EditWatch): Promise<'reuse' | 'reload'> {
+  const meta = await localMetaOf(w.tempPath)
+  // 副本被临时目录清理或用户删了：必须重建，否则编辑器拿空文件开场、一保存就把远端清空
+  if (!meta.exists) return 'reload'
+  // 正在回写：副本此刻就是上传源，别在这期间替换它
+  if (w.busy || hasLiveTaskFor(w.tempPath)) return 'reuse'
+  // failCount > 0 说明这份副本上有一次「存了但没传成」的改动，远端还没跟上
+  const dirty = w.failCount > 0
+    || meta.mtimeMs !== w.lastMtimeMs || meta.size !== w.lastSize
+  let remote: RemoteStat
+  try {
+    remote = await invoke<RemoteStat>('sftp_stat', { sessionId: w.sessionId, path: w.remotePath })
+  } catch {
+    // 连不上远端：维持现状，不拿推断去覆盖任何一侧
+    return 'reuse'
+  }
+  const changed = !remote.exists || remote.mtimeMs !== w.baseMtimeMs || remote.size !== w.baseSize
+  if (changed && dirty) {
+    // 两头都动过：本机这份更可能是用户刚保存的，交回正常回写流程（冲突会弹窗裁决）
+    w.lastMtimeMs = meta.mtimeMs
+    w.lastSize = meta.size
+    void syncEditWatch(w)
+    return 'reuse'
+  }
+  if (changed) return 'reload'
+  if (dirty) {
+    // 远端没动、副本里有上一轮没来得及回写的保存：打开前补一次，不必等下一轮轮询
+    w.lastMtimeMs = meta.mtimeMs
+    w.lastSize = meta.size
+    void syncEditWatch(w)
+  }
+  return 'reuse'
+}
+
 /** 一批远端文件用本机编辑器打开（右键「用编辑器打开」，支持多选批量）。
  *  每个文件取回一份临时副本并记下远端基线，之后由轮询发现编辑器保存、自动回写。
- *  已在跟踪中的文件不重新取回——那会覆盖编辑器里还没保存的改动，只是再叫编辑器打开它。 */
+ *  已在跟踪中的文件不再无脑复用/重取，而是先 [`reconcileEditCopy`] 对账：
+ *  否则会把上次那份副本（或远端旧内容）端出来，看着像「保存没生效」。 */
 async function openInEditor(entries: FsEntry[]) {
   const backendId = activeSession.value?.backendId
   if (!backendId) { toast('请先建立 SSH 连接', 'warn'); return }
@@ -1499,26 +1550,57 @@ async function openInEditor(entries: FsEntry[]) {
 
   const opened: string[] = []
   const fresh: EditWatch[] = []
+  /** 远端已更新 / 副本被清理：同一路径重新取回，沿用原跟踪项 */
+  const reloaded: EditWatch[] = []
+  /** 被覆盖掉的「无跟踪遗留副本」份数（已备份为 .rhost-prev） */
+  let backedUp = 0
   const failed: string[] = []
   for (const f of files) {
     const remote = joinPath(remotePath.value, f.name)
     const existing = editWatches.value.find(w => w.sessionId === backendId && w.remotePath === remote)
-    if (existing) { opened.push(existing.tempPath); continue }
     // 同一远端目录共用一个子目录：编辑器里「打开文件夹」时能看到兄弟文件
-    const local = `${root}/${fnv1a32(parentPath(remote))}/${f.name}`
+    const local = existing?.tempPath ?? `${root}/${fnv1a32(parentPath(remote))}/${f.name}`
+    if (existing) {
+      // 重新取回走原路径：编辑器里还是同一个标签页，不会多出一个同名新标签
+      if ((await reconcileEditCopy(existing)) === 'reuse') { opened.push(local); continue }
+      reportLog('info', SFTP_EDIT_OPEN, '远端已变化，重新取回副本', {
+        name: f.name, remote, temp: local,
+      })
+    } else if ((await localMetaOf(local)).exists) {
+      // 没有跟踪项却已有同名副本：上次运行/回写中断留下的（临时目录不会自己清）。
+      // 里面可能装着没回写成的改动，先留一份 .rhost-prev 再覆盖，不静默丢弃
+      try {
+        await invoke('local_copy', { src: local, dst: `${local}.rhost-prev` })
+        backedUp++
+      } catch (e) {
+        reportLog('warn', SFTP_EDIT_OPEN, '遗留副本备份失败', { temp: local, err: String(e) })
+      }
+    }
     try {
       const size = await invoke<number>('sftp_fetch', {
         sessionId: backendId, remotePath: remote, localPath: local,
       })
       const st = await invoke<RemoteStat>('sftp_stat', { sessionId: backendId, path: remote })
-      fresh.push({
-        sessionId: backendId, name: f.name, remotePath: remote, tempPath: local,
-        baseSize: st.size, baseMtimeMs: st.mtimeMs,
-        // 本地基线先占位成副本自身，落盘真实状态在取回完成后一次性补齐
-        lastSize: size, lastMtimeMs: 0, busy: false, failCount: 0,
-      })
+      if (existing) {
+        existing.baseSize = st.size
+        existing.baseMtimeMs = st.mtimeMs
+        existing.failCount = 0
+        existing.busy = false
+        existing.lastSize = size
+        existing.lastMtimeMs = 0
+        reloaded.push(existing)
+      } else {
+        fresh.push({
+          sessionId: backendId, name: f.name, remotePath: remote, tempPath: local,
+          baseSize: st.size, baseMtimeMs: st.mtimeMs,
+          // 本地基线先占位成副本自身，落盘真实状态在取回完成后一次性补齐
+          lastSize: size, lastMtimeMs: 0, busy: false, failCount: 0,
+        })
+      }
       opened.push(local)
     } catch (e) {
+      // 取回失败时副本可能已被截断：撤销跟踪，别拿半截文件当回写源
+      if (existing) stopTrackingEdit(existing, '重新取回副本失败')
       failed.push(`${f.name}：${String(e)}`)
       reportLog('error', SFTP_EDIT_OPEN, '编辑器打开失败（取回副本）', {
         name: f.name, remote, err: String(e),
@@ -1531,11 +1613,12 @@ async function openInEditor(entries: FsEntry[]) {
   }
 
   // 记下副本刚落盘时的状态作为「还没保存」基线，否则第一轮轮询就把刚取回的文件当成改动回写
+  const touched = [...reloaded, ...fresh]
   try {
     const metas = await invoke<LocalFileMeta[]>('local_files_meta', {
-      paths: fresh.map(w => w.tempPath),
+      paths: touched.map(w => w.tempPath),
     })
-    fresh.forEach((w, i) => {
+    touched.forEach((w, i) => {
       const m = metas[i]
       if (!m || !m.exists) return
       w.lastMtimeMs = m.mtimeMs
@@ -1571,6 +1654,9 @@ async function openInEditor(entries: FsEntry[]) {
   const suffix = failed.length ? `，${failed.length} 个未能打开` : ''
   toast(`已在 ${editor} 打开 ${opened.length} 个文件${suffix}：保存后自动回写远端`, 'ok', 2800)
   if (failed.length) toast(`打开失败：${failed[0]}`, 'warn', 3200)
+  if (backedUp) {
+    toast(`${backedUp} 个本机遗留副本已备份为 .rhost-prev，当前显示远端内容`, 'info', 3200)
+  }
 }
 
 /** 本机文件直接交给编辑器：就是本地路径，无需临时副本，也不存在回写跟踪 */
@@ -1631,6 +1717,13 @@ async function pollEditWatches() {
     w.lastSize = m.size
     void syncEditWatch(w)
   }
+}
+
+/** 窗口回到前台时立刻补一轮轮询：编辑器挡住 rhost 时 WebView 会节流定时器
+ *  （Windows 上尤其明显），保存要等回前台才被看见，这里把这段延迟抹掉 */
+function onEditWake() {
+  if (document.visibilityState === 'hidden') return
+  if (editWatches.value.length) void pollEditWatches()
 }
 
 /** 单个副本的回写：复核稳定性 → 比对远端基线 →（必要时）弹窗裁决 → 入队上传 */
@@ -2768,6 +2861,9 @@ onMounted(() => {
   document.addEventListener('mouseup', onUp)
   document.addEventListener('keydown', onFindShortcut)
   document.addEventListener('keydown', onSftpShortcut)
+  // 编辑器在前台改文件时 rhost 在后台：回来立刻补一轮编辑轮询，不等被节流的定时器
+  window.addEventListener('focus', onEditWake)
+  document.addEventListener('visibilitychange', onEditWake)
 
   // 拖拽上传：路径由 webview 级拖放事件给出（多选文件/多选文件夹一次全给），
   // 只在落点位于文件栏主体内时建任务——落在 AI 聊天附件区则归那边处理，不劫持成上传。
@@ -2801,6 +2897,8 @@ onUnmounted(() => {
   document.removeEventListener('mouseup', onUp)
   document.removeEventListener('keydown', onFindShortcut)
   document.removeEventListener('keydown', onSftpShortcut)
+  window.removeEventListener('focus', onEditWake)
+  document.removeEventListener('visibilitychange', onEditWake)
   // 浮层仍打开时卸载：watcher 不会触发，这里兜底摘掉 document 监听
   document.removeEventListener('mousedown', onQueueDismiss, true)
   document.removeEventListener('keydown', onQueueDismiss, true)
