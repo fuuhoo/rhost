@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 [中文](./CHANGELOG.zh-CN.md) · **English**
 
+## [2.11.1] - 2026-11-20
+
+### Added
+
+- Batch delete now shows progress: deleting several files at once floats a progress bar (counted per item) and the item currently being removed at the bottom left of the file pane, with a "Stop" button that keeps what is already gone and leaves the rest selected; a single quick delete only shows it when it takes longer than 250 ms, so nothing flickers
+
+### Fixed
+
+- Editing a remote file in an external editor (VS Code and friends) and opening it again showed the previous content: reopening now reconciles with the remote instead of reusing the old copy — if the remote changed while the copy holds no unwritten edits it is fetched again; if the copy does hold an unwritten save that save is written back first (and a remote that also changed still asks before overwriting); a copy removed by temp cleanup is rebuilt instead of opening an empty buffer that would wipe the remote file on save
+- A same-named copy left behind without any tracking record (from a previous run or an interrupted write-back) is now backed up as `<name>.rhost-prev` before being rebuilt from the remote, with a notice, instead of silently dropping edits that may never have been written back
+- The webview throttles timers while rhost sits behind the editor (most visible on Windows): returning to the foreground now runs an extra detection pass immediately, so saves no longer wait for a throttled timer
+
 ## [2.11.0] - 2026-11-20
 
 ### Added
