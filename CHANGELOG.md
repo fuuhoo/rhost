@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 [中文](./CHANGELOG.zh-CN.md) · **English**
 
+## [2.11.0] - 2026-11-20
+
+### Added
+
+- The toolbox entry is now a card grid: the eight tools (Docker, Firewall, Ports, Network, Public key, Logs, Time, Software sources) wrap into rows as the window is resized, each card naming the tool and describing it in one line; clicking a card opens the tool and "All tools" returns to the grid, so a new tool only adds a row instead of squeezing a tab strip
+- "Check for updates" on the About page now really works: it reads the latest GitHub release, compares it with the running version and reports "already up to date", the new version with its release date plus an "Open releases page" button, or the concrete failure reason with a manual link; it only answers whether a newer version exists, and never downloads or installs anything
+
+### Changed
+
+- Shortcut defaults and hints follow the host platform: macOS keeps ⌘ while Windows / Linux use Ctrl (⌘⇧T ↔ Ctrl+Shift+T), across the title bar, the terminal and SFTP context menus, the command palette, the empty-terminal hints, the settings keycaps and the new-connection footer; a config still storing ⌘+X is rewritten to Ctrl+X on first start on Windows / Linux
+- Removed the About page's placeholder update settings ("Check for updates automatically", "Update channel") and its "View changelog" button: the two settings were only persisted and never read
+- Removed the bell button left of the settings gear in the title bar: it only opened the bottom log panel, duplicating the dock toggle and suggesting notifications that never arrived
+
 ## [2.10.0] - 2026-11-19
 
 ### Added
