@@ -2645,6 +2645,53 @@ html[data-theme="light"] .grid-link-arrow{stroke:var(--blue)}
     animation:task-stripes .6s linear infinite;
 }
 @keyframes task-stripes{to{background-position:10px 0}}
+/* ============================================================
+   批量删除进度：锚在文件区左下角，不占布局；条内沿用传输任务的流动条纹
+   ============================================================ */
+.del-pop{
+    position:absolute;left:10px;bottom:10px;z-index:13;
+    width:292px;max-width:calc(100% - 20px);
+    padding:9px 11px 10px;
+    border:1px solid var(--border-strong);border-radius:9px;
+    background:var(--panel);
+    box-shadow:0 12px 30px color-mix(in srgb,var(--shadow-color) 55%);
+    animation:task-in .16s ease both;
+}
+.del-head{display:flex;align-items:center;gap:7px;font-size:11px}
+.del-head .spacer{flex:1}
+.del-title{color:var(--text);font-weight:600;white-space:nowrap}
+.del-count{font-family:var(--ui);font-size:10.5px;color:var(--blue);white-space:nowrap}
+.del-stop{
+    flex-shrink:0;height:19px;padding:0 8px;
+    border:1px solid var(--border);border-radius:5px;
+    background:transparent;color:var(--muted);
+    font:inherit;font-size:10.5px;cursor:pointer;transition:.13s;
+}
+.del-stop:hover:not(:disabled){
+    color:var(--text);border-color:var(--border-strong);background:var(--hover);
+}
+.del-stop:disabled{opacity:.55;cursor:default}
+.del-track.track{height:5px;margin-top:7px}
+/* 浅色下 --bg 与面板白几乎同色，轨道要单独加深一档才看得出进度条的「底」 */
+html[data-theme="light"] .del-track.track{background:#e8eaee}
+.del-pop .track .fill{background:linear-gradient(90deg,#3d7bd6,#7aa2f7)}
+.del-pop .track .fill::after{
+    content:"";position:absolute;inset:0;
+    background-image:linear-gradient(45deg,
+      rgba(255,255,255,.15) 25%,transparent 25%,transparent 50%,
+      rgba(255,255,255,.15) 50%,rgba(255,255,255,.15) 75%,transparent 75%);
+    background-size:10px 10px;
+    animation:task-stripes .6s linear infinite;
+}
+.del-name{
+    margin-top:6px;font-size:10.5px;color:var(--muted);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+@media (prefers-reduced-motion: reduce){
+    .del-pop{animation:none}
+    .del-pop .track .fill::after{animation:none}
+    .del-pop .track .fill{transition:none}
+}
 /* 元信息行：字节 · 速率 · 备注 */
 .task-sub{
     display:flex;align-items:center;gap:7px;margin-top:4px;

@@ -1732,21 +1732,106 @@ function stopTrackingEdit(w: EditWatch, reason: string) {
 
 /* ---- 文件管理操作（右键菜单与快捷键共用同一套业务函数） ---- */
 
-/** 删除目标：不进回收站、不做二次确认，逐项直接删除 → 刷新；软链只删链接本身（后端保证） */
+/* ---- 批量删除进度（多项或耗时较久时浮在文件区左下角） ---- */
+
+interface DelJob {
+  total: number
+  /** 已删完的项数；正在删的那项不计入，所以进度条随每项完成跳一格 */
+  done: number
+  /** 正在删的名字，浮层里显示，删目录时不至于看不出在干什么 */
+  current: string
+}
+
+const delJob = ref<DelJob | null>(null)
+/** 250ms 内删完的单项不弹浮层，避免闪一下 */
+const delVisible = ref(false)
+/** 已点「停止」：当前项删完就收手 */
+const delStopping = ref(false)
+let delCancelled = false
+let delShowTimer: ReturnType<typeof setTimeout> | null = null
+
+const delPct = computed(() => {
+  const j = delJob.value
+  return j && j.total ? Math.min(100, Math.round((j.done / j.total) * 100)) : 0
+})
+
+function stopDelete() {
+  if (!delJob.value || delCancelled) return
+  delCancelled = true
+  delStopping.value = true
+}
+
+function endDeleteJob() {
+  if (delShowTimer) {
+    clearTimeout(delShowTimer)
+    delShowTimer = null
+  }
+  delVisible.value = false
+  delStopping.value = false
+  delCancelled = false
+  delJob.value = null
+}
+
+/**
+ * 删除目标：不进回收站、不做二次确认，逐项直接删除 → 刷新；软链只删链接本身（后端保证）。
+ * 进度按「项」累计（远端删目录是后端一次递归，无法拆到文件级），因此多项删除时给进度条，
+ * 单项删除只在超过 250ms 时露面；中途可「停止」，已删的保留，未删的继续留在列表与选中态里。
+ */
 async function deleteTargets(side: Side, targets: FsEntry[]) {
   if (!targets.length) return
+  if (delJob.value) {
+    toast('正在删除上一批，请稍候', 'info', 1600)
+    return
+  }
+  delJob.value = { total: targets.length, done: 0, current: targets[0].name }
+  delShowTimer = setTimeout(() => {
+    delShowTimer = null
+    delVisible.value = true
+  }, 250)
+
+  let done = 0
+  let failure: { name: string; message: string } | null = null
   try {
     for (const t of targets) {
-      await invokeSide(side, 'remove', { path: joinPath(sidePath(side), t.name) })
+      if (delCancelled) break
+      delJob.value.current = t.name
+      try {
+        await invokeSide(side, 'remove', { path: joinPath(sidePath(side), t.name) })
+      } catch (e) {
+        failure = { name: t.name, message: (e as Error).message }
+        break
+      }
+      done += 1
+      delJob.value.done = done
     }
-    sideSel(side).value = new Set()
-    reportLog('info', SFTP_MANAGE_REMOVE, `删除 ${targets.length} 项`, {
-      side: side === 'local' ? '本地' : '远程', count: targets.length,
-    })
-    toast(`已删除 ${targets.length} 项`, 'ok', 1800)
-    void refreshSide(side)
   } catch (e) {
-    toast(`删除失败：${(e as Error).message}`, 'warn')
+    // 逐项删除的失败已在循环内收口，这里兜住意外异常（如路径拼接），避免误报「已删除 0 项」
+    failure ??= { name: targets[done]?.name ?? '所选条目', message: (e as Error).message }
+  } finally {
+    const total = targets.length
+    const stopped = delCancelled && !failure && done < total
+    endDeleteJob()
+
+    // 只摘掉真正删掉的项，停止/失败后剩下的仍留在选中态，方便接着处理
+    const sel = sideSel(side).value
+    for (const t of targets.slice(0, done)) sel.delete(t.name)
+    sideSel(side).value = new Set(sel)
+
+    const sideLabel = side === 'local' ? '本地' : '远程'
+    if (failure) {
+      reportLog('error', SFTP_MANAGE_REMOVE, `删除失败：${failure.name}`, {
+        side: sideLabel, name: failure.name, deleted: done, err: failure.message,
+      })
+      toast(`删除「${failure.name}」失败：${failure.message}`, 'warn')
+    } else if (stopped) {
+      reportLog('warn', SFTP_MANAGE_REMOVE, `删除已停止，完成 ${done} 项`, {
+        side: sideLabel, deleted: done, skipped: total - done,
+      })
+      toast(`已停止：删除 ${done} 项，剩余 ${total - done} 项未删`, 'info', 2400)
+    } else {
+      reportLog('info', SFTP_MANAGE_REMOVE, `删除 ${done} 项`, { side: sideLabel, count: done })
+      toast(`已删除 ${done} 项`, 'ok', 1800)
+    }
     void refreshSide(side)
   }
 }
@@ -3348,6 +3433,30 @@ onUnmounted(() => {
                 </div>
               </div>
             </div>
+          </div>
+
+          <!-- 批量删除进度：多项删除或单项耗时超过 250ms 才出现，不占布局、不挡文件列表操作 -->
+          <div v-if="delVisible && delJob" class="del-pop" role="status" aria-live="polite">
+            <div class="del-head">
+              <span class="del-title">
+                {{ delJob.total > 1 ? `正在删除 ${delJob.total} 项` : '正在删除' }}
+              </span>
+              <span class="del-count">{{ delJob.done }} / {{ delJob.total }}</span>
+              <span class="spacer"></span>
+              <button
+                v-if="delJob.total > 1"
+                class="del-stop"
+                :disabled="delStopping"
+                :title="delStopping ? '删完当前项后停止' : '删完当前项后停止，已删的不会回来'"
+                @click="stopDelete"
+              >{{ delStopping ? '停止中…' : '停止' }}</button>
+            </div>
+            <span
+              class="track del-track" role="progressbar"
+              :aria-valuenow="delPct" aria-valuemin="0" aria-valuemax="100"
+              aria-label="删除进度"
+            ><i class="fill" :style="{ width: delPct + '%' }"></i></span>
+            <div class="del-name" :title="delJob.current">{{ delJob.current }}</div>
           </div>
 
         </div>
