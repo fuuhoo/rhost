@@ -24,7 +24,7 @@ Rhost 是一款基于 **Tauri 2** 的跨平台 SSH 远程主机管理器（对�
 
 | 层 | 技术 | 说明 |
 |---|---|---|
-| 桌面框架 | Tauri 2.12 | 无边框窗口（`decorations: false`），自绘标题栏 |
+| 桌面框架 | Tauri 2.12 | 主窗口无边框（`decorations: false`）+ 自绘标题栏；工具箱独立窗口（`toolbox-*`）用系统原生标题栏 |
 | 后端 | Rust edition 2024（rustc ≥ 1.90）、tokio 全异步 | russh 0.63 / russh-sftp 3，**纯 async，禁止 `spawn_blocking` 包 SSH IO** |
 | 前端 | Vue 3.5（`<script setup>`）+ TypeScript 6 + Vite 8 | **未使用 Pinia、Vue Router**；状态用模块级单例 |
 | 终端 | @xterm/xterm 6 + addon-fit + addon-web-links | 透明背景（xterm 主题 `background` 恒透明，容器底色由 CSS 变量提供，可走玻璃不透明度），ANSI 配色由「配色方案 × 背景颜色」解析（`lib/termThemes.ts` 单一来源）；背景图片开启时「背景颜色」整条退出、衬底改由图片自身提供（浓度层下面垫图片平均色，避免浅色窗口玻璃把壁纸洗成灰膜），墨色按图片平均亮度在方案的深/浅变体里取对比度更高的一套（模糊/浓度只作用图片层，文字恒清晰）；等宽字形四款随包内置（`public/fonts` TTF + `@fontsource` woff2），不依赖系统安装 |

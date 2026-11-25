@@ -267,6 +267,7 @@
 | NTP 安装 / 配置 / 校时 / 启停 / 时区 | `toolbox.time.change` | INFO/WARN | op（install/configure/sync/enable/disable/start/stop/timezone）、service、package_manager（安装）、servers（保存的地址列表）、timezone / tz_offset_minutes（时区）、active/enabled（操作后）、exit_code、timed_out、elapsed_ms；失败 WARN 另记 err |
 | 软件源状态读取 | `toolbox.mirror.status` | INFO/WARN | 完成：os、distro、package_manager、managed、current（命中的预设镜像 id）、files（源文件数）、backups（备份数）、elapsed_ms；失败 WARN 记 elapsed_ms、err。**kv 不含源文件内容与 sudo 口令** |
 | 软件源切换 / 还原 | `toolbox.mirror.change` | INFO/WARN | 切换：op=apply、preset、host、files（改动文件数）、changed（改动行数）、skipped（未改写的 mirrorlist/metalink 数）、probe（是否预探测）、backup（备份标识）、current（操作后命中的镜像站）、exit_code、timed_out、elapsed_ms；还原：op=restore、backup（被还原的备份）、saved（还原前另存的备份，可空）；失败 WARN 另记 err。**kv 不含源文件内容与 sudo 口令** |
+| 工具箱独立窗口 | `toolbox.window.open` | INFO | 独立窗口创建成功（sid=后端会话 id，无 kv）。同一会话重复点「独立窗口」只聚焦已存在窗口，不重复记录 |
 
 ### 4.7 AI 助手（target: `ai`，带 scope 标签）
 

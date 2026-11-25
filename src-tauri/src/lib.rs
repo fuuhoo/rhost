@@ -39,6 +39,37 @@ fn prevent_default_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri_plugin_prevent_default::init()
 }
 
+/// 首帧注入的 boot payload（写入 `window.__RHOST_BOOT__`）：splash 背景模式、运行平台、
+/// 应用版本、界面主题与玻璃不透明度。
+///
+/// 主窗口与工具箱独立窗口共用：两者都必须在页面任何脚本执行前知道主题与平台，
+/// 否则首帧会先按默认深色渲染再跳一下。settings 节缺失/非法一律按默认值回退。
+pub(crate) fn boot_payload(settings: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        // 关闭透明时 splash 直接用深色底（index.html 头部脚本据此挂 splash-solid）
+        "splashTransparent": settings
+            .get("splashTransparent")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        // 运行平台（macos / windows / linux）：前端据此切换标题栏安全区与窗口控件渲染
+        "platform": std::env::consts::OS,
+        // 版本取 Cargo.toml（与 tauri.conf.json、frontend/package.json 同步），
+        // 走首帧注入而非异步 IPC，避免版本号先空后现
+        "appVersion": env!("CARGO_PKG_VERSION"),
+        "appDevBuild": cfg!(debug_assertions),
+        // 原始值 dark/light/auto；缺失为 null（前端视为 auto）
+        "uiTheme": settings
+            .get("uiTheme")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        // 背景不透明度 60–100：index.html 据此在首帧前挂 --glass-a
+        "opacity": settings
+            .get("opacity")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.min(100) as u32),
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = BOOT_INSTANT.set(std::time::Instant::now());
@@ -85,11 +116,8 @@ pub fn run() {
             // 首帧注入：splash 背景模式必须在页面任何脚本执行前同步可知（异步 IPC 会导致
             // 透明/深色底闪烁）。窗口改由 Rust 创建（tauri.conf.json windows 留空），经
             // initialization_script 写入 window.__RHOST_BOOT__；settings 节缺失/非法回退默认透明
-            let splash_transparent = app_cfg
-                .settings
-                .get("splashTransparent")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
+            let boot_payload = boot_payload(&app_cfg.settings);
+            let boot_script = format!("window.__RHOST_BOOT__={boot_payload};");
             // 界面主题（dark/light/auto）：index.html 头部脚本据此在首帧前挂
             // html[data-theme]，避免浅色用户看到深色底闪一下；auto 由前端
             // matchMedia 解析。此处传原始字符串，缺失时不注入（前端视为 auto）
@@ -98,29 +126,6 @@ pub fn run() {
                 .get("uiTheme")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            // 背景不透明度（60–100）：index.html 头部脚本据此在首帧前挂 --glass-a，
-            // 避免透明窗口先实心再变玻璃的跳变；缺失/非法由前端回退默认 96
-            let opacity = app_cfg
-                .settings
-                .get("opacity")
-                .and_then(|v| v.as_u64())
-                .map(|v| v.min(100) as u32);
-            let boot_script = format!(
-                "window.__RHOST_BOOT__={};",
-                serde_json::json!({
-                    "splashTransparent": splash_transparent,
-                    // 同步注入运行平台（前端据此切换标题栏安全区与窗口控件渲染），
-                    // 取 std::env::consts::OS：macos / windows / linux
-                    "platform": std::env::consts::OS,
-                    // 同步注入应用版本与是否开发版：侧栏/关于卡片据此显示，
-                    // 走首帧注入而非异步 IPC，避免版本号先空后现的闪跳。
-                    // 版本取 Cargo.toml（与 tauri.conf.json、frontend/package.json 同步）
-                    "appVersion": env!("CARGO_PKG_VERSION"),
-                    "appDevBuild": cfg!(debug_assertions),
-                    "uiTheme": ui_theme,
-                    "opacity": opacity,
-                })
-            );
             // 属性与原静态窗口定义保持一致；label 固定 "main"（capabilities/default.json 按此授权）
             // 跨平台标题栏策略：
             // - macOS：decorations(true) + Overlay 标题栏样式 + hidden_title，原生红绿灯浮于
@@ -408,6 +413,7 @@ pub fn run() {
             ipc::reveal_log_storage_dir,
             ipc::set_window_theme,
             ipc::set_window_glass,
+            ipc::open_toolbox_window,
             ipc::set_log_config,
             ipc::load_app_config,
             ipc::set_app_config_section,

@@ -15,6 +15,7 @@ import AppToast from './components/AppToast.vue'
 import { installGlobalShortcuts } from './lib/shortcuts'
 import { installPageCopy } from './lib/pageCopy'
 import { startExternalLinks } from './lib/externalLinks'
+import { startToolboxSessionBroadcast } from './lib/toolboxWindowSync'
 import { appView, rightPanelMaximized, rightPanelVisible } from './stores/session'
 import { loadHosts, showNewConn } from './stores/hosts'
 import { savedSettings, showSettings } from './stores/settings'
@@ -71,13 +72,17 @@ function clampSplashMs(v: unknown): number {
 // 设置驱动的全局快捷键（设置 → 快捷键）在 App 层唯一注册，避免与组件内监听重复派发
 let uninstallShortcuts: (() => void) | undefined
 let uninstallPageCopy: (() => void) | undefined
+/** 工具箱独立窗口的会话存活广播（会话集合变化时通知各独立窗口） */
+let uninstallToolboxSync: (() => void) | undefined
 onMounted(() => {
   uninstallShortcuts = installGlobalShortcuts()
   uninstallPageCopy = installPageCopy()
+  uninstallToolboxSync = startToolboxSessionBroadcast()
 })
 onBeforeUnmount(() => {
   uninstallShortcuts?.()
   uninstallPageCopy?.()
+  uninstallToolboxSync?.()
 })
 
 // 启动流程：先注册全局错误上报；然后从后端拉取全节配置快照（localStorage 已下线，

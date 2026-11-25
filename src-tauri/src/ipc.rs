@@ -973,6 +973,86 @@ pub fn reveal_log_dir() -> Result<(), String> {
     tauri_plugin_opener::open_path(hub.log_dir(), None::<&str>).map_err(|e| e.to_string())
 }
 
+/// 在独立窗口中打开工具箱（工具箱弹窗头部的「独立窗口」按钮）。
+///
+/// 独立窗口是第二个 Webview，跑同一份前端 bundle，由前端按首帧注入的
+/// `window.__RHOST_TOOLBOX__` 决定只挂载工具箱（见 `views/ToolboxWindow.vue`）。
+/// 会话不复制：窗口里的命令仍按主窗口传来的 backend_id 打到后端那条 SSH 会话，
+/// 所以关掉悬浮弹窗后采集照旧；主窗口断开后这边的命令会正常报错。
+///
+/// label 按会话固定为 `toolbox-<会话 id 前 8 位>`：重复点「独立窗口」只聚焦已有窗口，
+/// 不会叠出第二个；多个会话可各自开一个（capabilities/default.json 按 `toolbox-*` 授权）。
+///
+/// 保持同步命令：窗口创建要在主线程完成（macOS 的 NSWindow / Windows 的 HWND 都属于
+/// 主线程），带 `async` 的命令会被丢到 async runtime 的线程池里执行。
+#[tauri::command]
+pub fn open_toolbox_window(
+    app: AppHandle,
+    session_id: String,
+    label: String,
+    user: String,
+    port: u16,
+    host: String,
+) -> Result<(), String> {
+    slow_span!("open_toolbox_window");
+    let win_label = format!("toolbox-{}", session_id.chars().take(8).collect::<String>());
+    if let Some(win) = app.get_webview_window(&win_label) {
+        // 已开过：恢复到前台并聚焦（最小化状态先还原，否则只闪一下任务栏）
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+        return Ok(());
+    }
+
+    let path = app_config_file(&app)?;
+    let cfg = cfg_persisted::load_full(&path);
+    // 主题与平台同样走首帧注入，避免独立窗口先按默认深色渲染再跳
+    let boot = crate::boot_payload(&cfg.settings);
+    // 会话信息也走注入：窗口不必等 IPC 就能把标题与副标题写成「主机 · 工具箱」
+    let sid = session_id.clone();
+    let meta = serde_json::json!({
+        "sessionId": session_id,
+        "label": label,
+        "user": user,
+        "port": port,
+        "host": host,
+    });
+    let script = format!("window.__RHOST_BOOT__={boot};window.__RHOST_TOOLBOX__={meta};");
+    let theme = match cfg.settings.get("uiTheme").and_then(|v| v.as_str()) {
+        Some("dark") => Some(tauri::Theme::Dark),
+        Some("light") => Some(tauri::Theme::Light),
+        _ => None,
+    };
+
+    // 用系统原生标题栏与边框：这个窗口没有前端自绘标题栏，交给系统最省事，
+    // 关窗按钮与跨平台拖拽也都不用另做
+    let mut builder = tauri::webview::WebviewWindowBuilder::new(
+        &app,
+        &win_label,
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title(format!("Rhost · 工具箱 — {label}"))
+    .inner_size(1040.0, 720.0)
+    .min_inner_size(680.0, 480.0)
+    .initialization_script(&script);
+    if let Some(t) = theme {
+        builder = builder.theme(Some(t));
+    }
+    builder
+        .build()
+        .map_err(|e| format!("创建工具箱独立窗口失败：{e}"))?;
+
+    crate::applog::emit(
+        log::Level::Info,
+        "toolbox",
+        crate::applog::events::TOOLBOX_WINDOW_OPEN,
+        Some(&sid),
+        "工具箱已在独立窗口中打开",
+        None,
+    );
+    Ok(())
+}
+
 /// 设置主窗口原生外观（设置 → 外观 → 界面主题）。
 /// theme 传设置原始值："dark"/"light" 锁定 NSAppearance（macOS 红绿灯配色/毛玻璃
 /// 底色联动，Windows 标题栏随之）；"auto"/其他/缺省传 None 交还系统跟随。

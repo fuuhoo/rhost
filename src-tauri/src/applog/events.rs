@@ -226,6 +226,8 @@ pub const TOOLBOX_NETWORK_LIST: &str = "toolbox.network.list";
 pub const TOOLBOX_MIRROR_STATUS: &str = "toolbox.mirror.status";
 /// 软件源切换 / 还原（kv 带 preset/改动文件数/skipped/备份标识，不含文件内容）
 pub const TOOLBOX_MIRROR_CHANGE: &str = "toolbox.mirror.change";
+/// 工具箱在独立窗口中打开（kv 带 session/label，不含主机口令）
+pub const TOOLBOX_WINDOW_OPEN: &str = "toolbox.window.open";
 
 /// 前端上报允许的 event_id 域（report_app_log 校验白名单）：
 /// web.* 前端通用事件 + sftp.* 传输队列事件（队列管理逻辑在前端，§7.3）
@@ -390,6 +392,7 @@ mod tests {
             TOOLBOX_NETWORK_LIST,
             TOOLBOX_MIRROR_STATUS,
             TOOLBOX_MIRROR_CHANGE,
+            TOOLBOX_WINDOW_OPEN,
         ];
         for id in all {
             assert!(

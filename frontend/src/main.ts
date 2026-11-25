@@ -13,9 +13,22 @@ import '@fontsource/cascadia-code/700.css'
 import './fonts.css'
 import './style.css'
 import App from './App.vue'
+import { toolboxWindowMeta } from './lib/tauri'
 
 // Splash JS 层兜底：任何加载期错误立即撤掉启动画面（docs/splash-design.md §6）
 window.addEventListener('error', () => (window as any).__hideSplash?.())
 window.addEventListener('unhandledrejection', () => (window as any).__hideSplash?.())
 
-createApp(App).mount('#app')
+// 同一份 bundle 两个入口：Rust 建主窗口时注入 __RHOST_BOOT__，建工具箱独立窗口时
+// 额外注入 __RHOST_TOOLBOX__（会话信息）。见到它就只挂工具箱，不挂整套主界面——
+// 独立窗口没有标签栏/侧栏/终端，挂 App.vue 会白跑一遍主窗口的启动流程。
+if (toolboxWindowMeta()) {
+  import('./views/ToolboxWindow.vue')
+    .then(m => createApp(m.default).mount('#app'))
+    .catch(e => {
+      console.error('工具箱独立窗口加载失败：', e)
+      ;(window as any).__hideSplash?.()
+    })
+} else {
+  createApp(App).mount('#app')
+}

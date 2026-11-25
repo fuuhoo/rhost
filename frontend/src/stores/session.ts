@@ -46,6 +46,52 @@ export const activeSession = computed(
 export const activeHost = computed(() => activeSession.value?.host ?? null)
 export const connected = computed(() => activeSession.value?.state === 'online')
 
+/**
+ * 工具箱独立窗口专用：用主窗口注入的会话信息造一条「影子会话」。
+ *
+ * 独立窗口是另一个 Webview，拿不到主窗口的 sessions 数组，但工具箱只从
+ * activeSession / activeHost 读 backendId 与主机名，真正的采集命令都按 backendId
+ * 打到后端那条 SSH 会话上。所以这里只填展示与命令参数需要的字段：不建连、
+ * 不落盘、不进历史，也不参与主机列表的任何逻辑。
+ */
+export function adoptDetachedSession(meta: {
+  backendId: string
+  label: string
+  user: string
+  port: number
+  host: string
+}) {
+  const host: Host = {
+    id: `${meta.user}@${meta.host}:${meta.port}`,
+    user: meta.user,
+    ip: meta.host,
+    port: meta.port,
+    os: '',
+    color: 'green',
+    label: meta.label,
+    tag: '',
+    status: 'online',
+    lat: null,
+    cpu: '',
+    mem: '',
+    uptime: '',
+    group: '',
+  }
+  const shadow: Session = {
+    id: `detached-${meta.backendId}`,
+    host,
+    state: 'online',
+    startedAt: Date.now(),
+    backendId: meta.backendId,
+    disconnectReason: '',
+    retryAt: null,
+    resetSeq: 0,
+    alias: '',
+  }
+  sessions.value = [shadow]
+  activeSessionId.value = shadow.id
+}
+
 /* ---- Dock / 面板 UI 状态 ---- */
 
 /** 左栏监控面板显隐（仅工作台）；折叠时宽度保留，展开无缝恢复 */

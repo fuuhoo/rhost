@@ -33,6 +33,13 @@
         // 挂 documentElement 而非 .app，覆盖 Teleport 到 body 的弹窗/菜单。首帧前生效避免闪跳。
         var plat = boot && boot.platform
         if (plat) document.documentElement.dataset.platform = plat
+        // 工具箱独立窗口（Rust 额外注入 __RHOST_TOOLBOX__）：窗口不透明、也不跑主界面，
+        // 首帧就给 html 挂标记，CSS 据此铺整窗底色而不是透出玻璃底；顺手跳过启动画面——
+        // 一个弹出来就能用的工具窗口没必要先亮一下 LOGO
+        if (boot && window.__RHOST_TOOLBOX__) {
+          document.documentElement.classList.add('detached-window')
+          document.documentElement.classList.remove('splash-active')
+        }
       } catch (e) {}
     </script>
     <style>
@@ -44,6 +51,12 @@
       /* 深色底模式（设置关闭透明）：html.splash-solid 特异度 (0,1,2) 覆盖 .splash-active body */
       html.splash-solid,html.splash-solid body{background:#06090d}
       html.splash-solid[data-theme="light"],html.splash-solid[data-theme="light"] body{background:#f5f5f5}
+      /* 工具箱独立窗口：窗口不透明，首帧就要有底色，否则深色主题下会先闪一下白。
+         底色盖在 body 的环境光渐变之上（选择器多一个元素，优先于 style.css 的 body 规则）；
+         工具箱弹窗随后铺满整个客户区，这里只是兜首帧。 */
+      html.detached-window,html.detached-window body{background:#06090d}
+      html.detached-window[data-theme="light"],html.detached-window[data-theme="light"] body{background:#f5f5f5}
+      html.detached-window #splash{display:none}
       /* LOGO 悬浮层自身无任何背景 */
       #splash{position:fixed;inset:0;z-index:99999;pointer-events:none;
         display:flex;align-items:center;justify-content:center;

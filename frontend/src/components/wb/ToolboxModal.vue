@@ -9,12 +9,17 @@ import { confirmDialog, confirmState } from '../../composables/useConfirm'
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog'
 import { toast } from '../../composables/useToast'
 import { copyText, keys } from '../../stores/keys'
+import { appWindow, openToolboxWindow } from '../../lib/tauri'
 import type { SshKey } from '../../types'
 import DockerTerminal, { type DockerTermChannel } from './DockerTerminal.vue'
 import SyslogPanel from './SyslogPanel.vue'
 import TimePanel from './TimePanel.vue'
 import MirrorPanel from './MirrorPanel.vue'
 import NetworkPanel from './NetworkPanel.vue'
+
+/** detached：以工具箱独立窗口的根组件方式挂载（Views/ToolboxWindow.vue）。
+ *  此时弹窗铺满整个窗口、没有遮罩，关闭按钮关的是窗口而不是弹窗。 */
+const props = withDefaults(defineProps<{ detached?: boolean }>(), { detached: false })
 
 interface PortRow {
   port: number
@@ -1787,7 +1792,44 @@ function close() {
   dockerTerm.value = null
   dockerLogs.value = null
   transfer.value = null
+  // 独立窗口模式下「关闭」= 关掉这个窗口（弹窗本身没有可回退的主界面）
+  if (props.detached) {
+    void appWindow().then(w => w?.close())
+    return
+  }
   showToolbox.value = false
+}
+
+/**
+ * 提升为独立窗口：新建一个只跑工具箱的 Webview，本窗口的弹窗随即关闭。
+ * 会话不复制，两边命令打到同一条 SSH 会话；同一会话重复点只聚焦已有窗口。
+ */
+async function openDetached() {
+  const sid = activeSession.value?.backendId
+  if (!sid) {
+    toast('请先连接主机再使用工具箱', 'warn', 2200)
+    return
+  }
+  try {
+    await openToolboxWindow({
+      sessionId: sid,
+      label: sessionLabel.value,
+      user: activeHost.value?.user ?? '',
+      port: sshPort.value,
+      host: activeHost.value?.ip ?? '',
+    })
+    toast('已在独立窗口中打开工具箱', 'ok', 2200)
+    // 走 close() 而不是直接置 false：容器终端等浮层要一并卸掉，
+    // 否则它们持有的远端 docker exec 通道会留在主窗口里
+    close()
+  } catch (e) {
+    toast(`打开独立窗口失败：${e}`, 'err', 3600)
+  }
+}
+
+/** 点遮罩空白处关闭；独立窗口里铺满客户区的就是弹窗本身，没有可点的空白 */
+function onMaskClick() {
+  if (!props.detached) close()
 }
 
 function onKey(e: KeyboardEvent) {
@@ -1807,7 +1849,10 @@ onUnmounted(() => {
 
 <template>
   <Teleport to="body">
-    <div class="mask" :class="{ show: showToolbox }" @click.self="close">
+    <div
+      class="mask" :class="{ show: showToolbox, detached: props.detached }"
+      @click.self="onMaskClick"
+    >
       <div
         class="modal tbx-modal" :class="{ 'is-home': view === 'home' }"
         role="dialog" aria-modal="true" aria-labelledby="tbxTitle"
@@ -1826,6 +1871,17 @@ onUnmounted(() => {
               {{ view === 'home' ? `${TOOLS.length} 个工具，按当前会话实时采集` : currentTool.hint }}
             </p>
           </div>
+          <button
+            v-if="!props.detached" class="modal-close tbx-pop"
+            title="在独立窗口中打开" @click="openDetached"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M15 3h6v6" />
+              <path d="M10 14 21 3" />
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+            </svg>
+          </button>
           <button class="modal-close" title="关闭 (Esc)" @click="close">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
                  stroke-linecap="round">
@@ -2734,6 +2790,31 @@ onUnmounted(() => {
   min-height: 320px;
   max-height: min(680px, calc(100vh - 60px));
 }
+/* 弹窗头右侧的「独立窗口」按钮：与关闭按钮同形，紧邻时留一点间距 */
+.tbx-pop { margin-right: 2px; }
+/* ---- 独立窗口：原生窗口已给出标题栏、边框与阴影，弹窗铺满整个客户区 ---- */
+.mask.detached {
+  background: var(--bg);
+  backdrop-filter: none;
+  display: block;
+  padding: 0;
+  animation: none;
+}
+.mask.detached .tbx-modal,
+.mask.detached .tbx-modal.is-home {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  max-width: none;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  transform: none;
+  animation: none;
+}
+/* 顶部强调色装饰线是「浮层浮起」的暗示；独立窗口没有边界，留着反而像条多余的分隔 */
+.mask.detached .tbx-modal::before { display: none; }
 /* 工具页返回条 */
 .tbx-nav {
   display: flex;

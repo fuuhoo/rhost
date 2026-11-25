@@ -51,3 +51,41 @@ export const appVersionLabel: string = (() => {
   if (!v) return ''
   return boot?.appDevBuild ? `${v} · 开发版` : v
 })()
+
+/* ---- 工具箱独立窗口 ---- */
+
+/** 独立窗口的会话信息：Rust 建窗时经首帧注入 `window.__RHOST_TOOLBOX__` 传进来，
+ *  省掉一次 IPC（也可以避免窗口先渲染成空壳再填内容） */
+export interface ToolboxWindowMeta {
+  /** 后端 SSH 会话 id（connect_ssh 返回的 uuid） */
+  sessionId: string
+  /** 主机展示名（标题副标题与窗口标题） */
+  label: string
+  user: string
+  port: number
+  host: string
+}
+
+/** 当前窗口是否是工具箱独立窗口：是则返回注入的会话信息，主窗口返回 null */
+export function toolboxWindowMeta(): ToolboxWindowMeta | null {
+  const meta = (window as unknown as { __RHOST_TOOLBOX__?: ToolboxWindowMeta })
+    .__RHOST_TOOLBOX__
+  return meta?.sessionId ? meta : null
+}
+
+/**
+ * 把当前会话的工具箱提升为独立窗口。
+ * 同一会话重复调用只聚焦已有窗口（label 按会话固定，由 Rust 侧保证），
+ * 多个会话可各自开一个；会话本身不复制，两边命令打到同一条 SSH 会话上。
+ */
+export async function openToolboxWindow(meta: ToolboxWindowMeta): Promise<void> {
+  if (!isTauri) return
+  const { invoke } = await import('@tauri-apps/api/core')
+  await invoke('open_toolbox_window', {
+    sessionId: meta.sessionId,
+    label: meta.label,
+    user: meta.user,
+    port: meta.port,
+    host: meta.host,
+  })
+}
