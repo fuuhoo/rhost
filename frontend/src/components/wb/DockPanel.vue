@@ -7,7 +7,7 @@ import { revealItemInDir } from '@tauri-apps/plugin-opener'
 import { activeHost, activeSession, activeSftpCwd, closeDock, connected, dockCollapsed, dockHeight, DOCK_DEFAULT_HEIGHT, dockTab, dockVisible, searchTick, sessions, sftpLocalRatio, sftpTreeWidth, sftpViewMode } from '../../stores/session'
 import { savedSettings } from '../../stores/settings'
 import { toast } from '../../composables/useToast'
-import { confirmDialog } from '../../composables/useConfirm'
+import { confirmDialog, confirmState } from '../../composables/useConfirm'
 import TunnelPane from './TunnelPane.vue'
 import FileIcon from './FileIcon.vue'
 import PermModal from './PermModal.vue'
@@ -1865,8 +1865,41 @@ function endDeleteJob() {
   delJob.value = null
 }
 
+/** 弹窗里列名字用：最多列 4 个，其余折成「等 N 项」 */
+function namePreview(items: { name: string }[], max = 4) {
+  const head = items.slice(0, max).map(i => i.name).join('、')
+  return items.length > max ? `${head} 等 ${items.length} 项` : head
+}
+
+/** 删除前的二次确认：删远端/本机都不可撤销、也不进回收站，删目录还会连带内容 */
+async function confirmDelete(side: Side, targets: FsEntry[]) {
+  const where = side === 'local' ? '本机' : '远端'
+  const dirs = targets.filter(t => t.type === 'dir').length
+  const single = targets.length === 1 ? targets[0] : null
+  let title = `删除 ${targets.length} 项`
+  let what: string
+  if (single) {
+    title = single.type === 'dir' ? '删除文件夹' : '删除文件'
+    what = single.type === 'dir'
+      ? `文件夹「${single.name}」及其中的全部内容`
+      : `「${single.name}」`
+  } else {
+    what = dirs
+      ? `${targets.length} 项（其中 ${dirs} 个文件夹会连同内部内容一并删除）`
+      : `${targets.length} 项`
+  }
+  const head = single
+    ? `将从${where}永久删除${what}。`
+    : `将从${where}永久删除${what}：\n${namePreview(targets)}`
+  return confirmDialog(
+    `${head}\n此操作不可撤销，也不会进入回收站。`,
+    title,
+    { confirmText: '删除', danger: true },
+  )
+}
+
 /**
- * 删除目标：不进回收站、不做二次确认，逐项直接删除 → 刷新；软链只删链接本身（后端保证）。
+ * 删除目标：先二次确认，再逐项直接删除 → 刷新；软链只删链接本身（后端保证）。
  * 进度按「项」累计（远端删目录是后端一次递归，无法拆到文件级），因此多项删除时给进度条，
  * 单项删除只在超过 250ms 时露面；中途可「停止」，已删的保留，未删的继续留在列表与选中态里。
  */
@@ -1876,6 +1909,9 @@ async function deleteTargets(side: Side, targets: FsEntry[]) {
     toast('正在删除上一批，请稍候', 'info', 1600)
     return
   }
+  if (!(await confirmDelete(side, targets))) return
+  // 确认期间可能又起了别的删除（Enter 连按 / 另一侧同时删），再挡一次
+  if (delJob.value) return
   delJob.value = { total: targets.length, done: 0, current: targets[0].name }
   delShowTimer = setTimeout(() => {
     delShowTimer = null
@@ -2018,6 +2054,20 @@ async function pasteTargets(side: Side) {
       j.dst = joinPath(dstDir, free)
     }
     used.add(j.name)
+  }
+
+  if (cb.mode === 'cut') {
+    const from = cb.srcSide === 'local' ? '本机' : '远端'
+    const to = side === 'local' ? '本机' : '远端'
+    const cross = cb.srcSide !== side
+    const ok = await confirmDialog(
+      cross
+        ? `将把${from} ${jobs.length} 项移动到${to}「${dstDir}」：\n${namePreview(jobs)}\n传输成功后自动删除${from}源文件。`
+        : `将把 ${jobs.length} 项移动到「${dstDir}」：\n${namePreview(jobs)}`,
+      cross ? '移动（跨侧）' : '移动',
+      { confirmText: '移动' },
+    )
+    if (!ok) return
   }
 
   if (cb.srcSide === side) {
@@ -2805,6 +2855,8 @@ function toggleDock() {
 function onSftpShortcut(e: KeyboardEvent) {
   if (!dockVisible.value || activeTab.value !== 'sftp') return
   if (menu.value) return // 菜单有自己的键盘行为（Esc/方向/Enter）
+  // 确认弹窗开着时键盘全归它：否则 Enter 既是「确定删除」又会穿透到列表打开条目
+  if (confirmState.visible.value) return
   const el = e.target as HTMLElement | null
   if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) return
   const side = lastSide.value
