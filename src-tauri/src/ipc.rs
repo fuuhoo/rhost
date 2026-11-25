@@ -983,10 +983,21 @@ pub fn reveal_log_dir() -> Result<(), String> {
 /// label 按会话固定为 `toolbox-<会话 id 前 8 位>`：重复点「独立窗口」只聚焦已有窗口，
 /// 不会叠出第二个；多个会话可各自开一个（capabilities/default.json 按 `toolbox-*` 授权）。
 ///
-/// 保持同步命令：窗口创建要在主线程完成（macOS 的 NSWindow / Windows 的 HWND 都属于
-/// 主线程），带 `async` 的命令会被丢到 async runtime 的线程池里执行。
+/// 保持 **async** 命令——这是 Windows 上能建出这个窗口的唯一做法（踩过坑，别改回去）：
+///
+/// 前端 invoke 的消息由 WebView2 的 `WebMessageReceived` 回调派发，而那个回调就跑在主线程上。
+/// 同步命令会在这个回调里直接建第二个 WebView2 控制器，于是 WebView2 的「控制器创建完成」
+/// 回调要等当前回调返回、当前回调又在等它 —— 互等死锁。表现是：
+///   - 窗口框出来了（标题栏在、内容区整块空白，WebView2 永远不合成第一帧）；
+///   - 命令永远不返回，前端 invoke 的 Promise 一直悬着，界面看起来就是「点了没反应」；
+///   - 日志里只有「开始建窗」，没有「建窗完成」——因为 emit 排在 build() 之后。
+///
+/// 改成 async 后命令体跑在异步线程上，`WebviewWindowBuilder::build()` 会把建窗投递回事件循环，
+/// 由主线程在正常消息泵里执行，不再嵌套在 WebView2 回调内部，死锁消失。
+/// 窗口本身仍然由主线程创建（macOS 的 NSWindow / Windows 的 HWND 都属于主线程），
+/// 所以「窗口必须在主线程建」这条并没有被破坏，被打破的只是「命令在哪个线程上被调用」。
 #[tauri::command]
-pub fn open_toolbox_window(
+pub async fn open_toolbox_window(
     app: AppHandle,
     session_id: String,
     label: String,
@@ -996,11 +1007,34 @@ pub fn open_toolbox_window(
 ) -> Result<(), String> {
     slow_span!("open_toolbox_window");
     let win_label = format!("toolbox-{}", session_id.chars().take(8).collect::<String>());
+    // 分步日志：Windows 上「点了没反应」时，前端只等得到一个不返回的 Promise，
+    // 事后完全看不出命令有没有进来、卡在哪一步。这里先把线程与标签记下来，
+    // 后面每一步再各记一条，排查时不用靠猜。
+    crate::applog::emit(
+        log::Level::Info,
+        "toolbox",
+        crate::applog::events::TOOLBOX_WINDOW_OPEN,
+        Some(&session_id),
+        "收到工具箱独立窗口建窗请求",
+        Some(serde_json::json!({
+            "stage": "enter",
+            "label": win_label,
+            "thread": format!("{:?}", std::thread::current().id()),
+        })),
+    );
     if let Some(win) = app.get_webview_window(&win_label) {
         // 已开过：恢复到前台并聚焦（最小化状态先还原，否则只闪一下任务栏）
         let _ = win.unminimize();
         let _ = win.show();
         let _ = win.set_focus();
+        crate::applog::emit(
+            log::Level::Info,
+            "toolbox",
+            crate::applog::events::TOOLBOX_WINDOW_OPEN,
+            Some(&session_id),
+            "工具箱独立窗口已存在，改为聚焦",
+            Some(serde_json::json!({ "stage": "focus-existing", "label": win_label })),
+        );
         return Ok(());
     }
 
@@ -1046,50 +1080,35 @@ pub fn open_toolbox_window(
     if let Some(t) = theme {
         builder = builder.theme(Some(t));
     }
-    // 一律建成可见窗口。前一版为了躲 Windows 的空白曾用 visible(false) 建窗、过一会儿再
-    // show，结果 Windows 上出现过「点了没反应」——窗口压根没上屏。宁可晚一帧刷出内容，
-    // 也不能让窗口不出现，所以这条路彻底不要了。
+    // 一律建成可见窗口：窗口一建出来就带首帧内容，不做「先隐藏再显示」那套。
+    // 早前 Windows 上的「整窗空白」和「点了没反应」其实是同一个病根（命令在 WebView2 的
+    // IPC 回调里同步建第二个控制器 → 死锁），已由本命令改成 async 根治，
+    // 于是那些「推 1px 逼 WebView2 合成」「过 0.8 秒再拉一次」的补丁一并撤掉。
+    crate::applog::emit(
+        log::Level::Info,
+        "toolbox",
+        crate::applog::events::TOOLBOX_WINDOW_OPEN,
+        Some(&session_id),
+        "开始创建工具箱独立窗口",
+        Some(serde_json::json!({ "stage": "build-begin", "label": win_label })),
+    );
     let win = builder
         .build()
         .map_err(|e| format!("创建工具箱独立窗口失败：{e}"))?;
-    // Windows：运行中新建的窗口，WebView2 有时不做首次合成——窗口框与标题栏都在、内容区
-    // 整块空白，拖一下或改窗口大小才刷出来。这里替用户做那次「改尺寸」：推出 1px 再拉回，
-    // 肉眼看不出来，只为触发一次 SetBounds。（主窗口在 setup 里创建没这毛病，只在 Windows 做）
-    if cfg!(target_os = "windows") {
-        let w = win.clone();
-        let sid_log = sid.clone();
-        std::thread::spawn(move || {
-            // 推出 1px 再拉回；窗口尺寸确实变化过一次，合成器才会把内容铺满客户区
-            let nudge = || {
-                if let (Ok(size), Ok(scale)) = (w.inner_size(), w.scale_factor()) {
-                    let logical = size.to_logical::<f64>(scale);
-                    let _ = w.set_size(tauri::LogicalSize::new(logical.width + 1.0, logical.height));
-                    std::thread::sleep(std::time::Duration::from_millis(60));
-                    let _ = w.set_size(tauri::LogicalSize::new(logical.width, logical.height));
-                }
-            };
-            std::thread::sleep(std::time::Duration::from_millis(240));
-            let _ = w.show();
-            let _ = w.set_focus();
-            nudge();
-            // 兜底：极少数情况下窗口建出来却没上屏（点按钮像是没反应），过一会儿查一次，
-            // 不可见就再拉起来，并把这次补救记进日志，便于下次排查
-            std::thread::sleep(std::time::Duration::from_millis(800));
-            if !w.is_visible().unwrap_or(true) {
-                let _ = w.show();
-                let _ = w.set_focus();
-                nudge();
-                crate::applog::emit(
-                    log::Level::Warn,
-                    "toolbox",
-                    crate::applog::events::TOOLBOX_WINDOW_OPEN,
-                    Some(&sid_log),
-                    "工具箱独立窗口建出后未上屏，已再次显示",
-                    None,
-                );
-            }
-        });
-    }
+    crate::applog::emit(
+        log::Level::Info,
+        "toolbox",
+        crate::applog::events::TOOLBOX_WINDOW_OPEN,
+        Some(&session_id),
+        "工具箱独立窗口已创建",
+        Some(serde_json::json!({
+            "stage": "build-done",
+            "label": win_label,
+            "visible": win.is_visible().unwrap_or(false),
+        })),
+    );
+    // 建窗后把它拉到前台：主窗口在前，独立窗口默认可能压在后面
+    let _ = win.set_focus();
 
     crate::applog::emit(
         log::Level::Info,
