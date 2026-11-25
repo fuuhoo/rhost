@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 [中文](./CHANGELOG.zh-CN.md) · **English**
 
+## [2.12.1] - 2026-11-25
+
+### Fixed
+
+- Opening the toolbox in its own window showed an entirely blank window on Windows. A window created visible while the app is already running does not always get its first WebView2 paint — the frame and title bar are there but the content area stays empty until the window is moved or resized. The window is now created hidden, shown about 180 ms later and given a 1 px resize nudge, which forces that paint (Windows only; the main window is created during setup and never had the problem). The builder also sets the background colour up front, so a not-yet-painted surface no longer flashes white
+- The detached window no longer waits for the config before rendering: it used to mount only after `loadAppConfig()` resolved, so a slow, failing or stuck config IPC left it blank. It now adopts the session, shows the toolbox and paints right away (theme comes from the first-frame injection), then hydrates settings with a 3 s cap
+- Besides, if the script never loads or mounting throws, the window now shows a diagnostic panel (boot injection state, user agent, captured errors) instead of a blank surface, so the failure can be reported precisely
+
 ## [2.12.0] - 2026-11-25
 
 ### Added
