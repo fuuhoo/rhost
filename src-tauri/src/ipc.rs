@@ -1043,32 +1043,50 @@ pub fn open_toolbox_window(
     .min_inner_size(680.0, 480.0)
     .background_color(bg)
     .initialization_script(&script);
-    // Windows：运行中新建的可见窗口，WebView2 有时不做首次合成——窗口框出来了、标题栏
-    // 在、内容区整块空白，拖一下或改窗口大小才刷出来。先建隐藏窗口，等首帧之后再显示，
-    // 强制走一次合成。（主窗口在 setup 里创建，没这个毛病，所以只在 Windows 上绕）
-    if cfg!(target_os = "windows") {
-        builder = builder.visible(false);
-    }
     if let Some(t) = theme {
         builder = builder.theme(Some(t));
     }
+    // 一律建成可见窗口。前一版为了躲 Windows 的空白曾用 visible(false) 建窗、过一会儿再
+    // show，结果 Windows 上出现过「点了没反应」——窗口压根没上屏。宁可晚一帧刷出内容，
+    // 也不能让窗口不出现，所以这条路彻底不要了。
     let win = builder
         .build()
         .map_err(|e| format!("创建工具箱独立窗口失败：{e}"))?;
+    // Windows：运行中新建的窗口，WebView2 有时不做首次合成——窗口框与标题栏都在、内容区
+    // 整块空白，拖一下或改窗口大小才刷出来。这里替用户做那次「改尺寸」：推出 1px 再拉回，
+    // 肉眼看不出来，只为触发一次 SetBounds。（主窗口在 setup 里创建没这毛病，只在 Windows 做）
     if cfg!(target_os = "windows") {
         let w = win.clone();
+        let sid_log = sid.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(180));
+            // 推出 1px 再拉回；窗口尺寸确实变化过一次，合成器才会把内容铺满客户区
+            let nudge = || {
+                if let (Ok(size), Ok(scale)) = (w.inner_size(), w.scale_factor()) {
+                    let logical = size.to_logical::<f64>(scale);
+                    let _ = w.set_size(tauri::LogicalSize::new(logical.width + 1.0, logical.height));
+                    std::thread::sleep(std::time::Duration::from_millis(60));
+                    let _ = w.set_size(tauri::LogicalSize::new(logical.width, logical.height));
+                }
+            };
+            std::thread::sleep(std::time::Duration::from_millis(240));
             let _ = w.show();
             let _ = w.set_focus();
-            // 再推一次尺寸：WebView2 的合成器要收到 resize 才把内容铺满客户区，
-            // 1px 的推拉在视觉上看不出来，但足以触发那次 SetBounds
-            std::thread::sleep(std::time::Duration::from_millis(120));
-            if let (Ok(size), Ok(scale)) = (w.inner_size(), w.scale_factor()) {
-                let logical = size.to_logical::<f64>(scale);
-                let _ = w.set_size(tauri::LogicalSize::new(logical.width + 1.0, logical.height));
-                std::thread::sleep(std::time::Duration::from_millis(60));
-                let _ = w.set_size(tauri::LogicalSize::new(logical.width, logical.height));
+            nudge();
+            // 兜底：极少数情况下窗口建出来却没上屏（点按钮像是没反应），过一会儿查一次，
+            // 不可见就再拉起来，并把这次补救记进日志，便于下次排查
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            if !w.is_visible().unwrap_or(true) {
+                let _ = w.show();
+                let _ = w.set_focus();
+                nudge();
+                crate::applog::emit(
+                    log::Level::Warn,
+                    "toolbox",
+                    crate::applog::events::TOOLBOX_WINDOW_OPEN,
+                    Some(&sid_log),
+                    "工具箱独立窗口建出后未上屏，已再次显示",
+                    None,
+                );
             }
         });
     }

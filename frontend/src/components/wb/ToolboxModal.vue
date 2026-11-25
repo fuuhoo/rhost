@@ -1800,30 +1800,46 @@ function close() {
   showToolbox.value = false
 }
 
+/** 建窗进行中：禁用按钮，防连点建出多个窗口 */
+const detachBusy = ref(false)
+
 /**
  * 提升为独立窗口：新建一个只跑工具箱的 Webview，本窗口的弹窗随即关闭。
  * 会话不复制，两边命令打到同一条 SSH 会话；同一会话重复点只聚焦已有窗口。
  */
 async function openDetached() {
+  if (detachBusy.value) return
   const sid = activeSession.value?.backendId
   if (!sid) {
     toast('请先连接主机再使用工具箱', 'warn', 2200)
     return
   }
+  detachBusy.value = true
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    await openToolboxWindow({
-      sessionId: sid,
-      label: sessionLabel.value,
-      user: activeHost.value?.user ?? '',
-      port: sshPort.value,
-      host: activeHost.value?.ip ?? '',
-    })
+    // 加一道超时：建窗命令万一不返回（会表现为「点了没反应」），至少给句话，
+    // 不然弹窗一直杵着、也没提示，只能靠猜
+    await Promise.race([
+      openToolboxWindow({
+        sessionId: sid,
+        label: sessionLabel.value,
+        user: activeHost.value?.user ?? '',
+        port: sshPort.value,
+        host: activeHost.value?.ip ?? '',
+      }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('建窗 8 秒无响应')), 8000)
+      }),
+    ])
     toast('已在独立窗口中打开工具箱', 'ok', 2200)
     // 走 close() 而不是直接置 false：容器终端等浮层要一并卸掉，
     // 否则它们持有的远端 docker exec 通道会留在主窗口里
     close()
   } catch (e) {
-    toast(`打开独立窗口失败：${e}`, 'err', 3600)
+    toast(`打开独立窗口失败：${e instanceof Error ? e.message : e}`, 'err', 4200)
+  } finally {
+    if (timer) clearTimeout(timer)
+    detachBusy.value = false
   }
 }
 
@@ -1873,7 +1889,7 @@ onUnmounted(() => {
           </div>
           <button
             v-if="!props.detached" class="modal-close tbx-pop"
-            title="在独立窗口中打开" @click="openDetached"
+            title="在独立窗口中打开" :disabled="detachBusy" @click="openDetached"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                  stroke-linecap="round" stroke-linejoin="round">
