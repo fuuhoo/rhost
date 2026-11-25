@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 [中文](./CHANGELOG.zh-CN.md) · **English**
 
+## [2.12.0] - 2026-11-25
+
+### Added
+
+- Deleting and moving now ask first: the delete dialog names the side (local/remote), the number of items and the first few names, spells out that folders go with everything inside them, and says the operation skips the trash and cannot be undone (red "Delete" button); the move dialog (cut + paste) states the target folder, the item count and the auto-renamed names, and on a cross-side move adds that the source is deleted once the transfer succeeds. Cancelling the move keeps the clipboard so it can be pasted elsewhere
+- Drag to move: grab a file row, a folder tile or a node in the directory tree and drop it on another folder in the same pane (or the tree), then confirm in the dialog. Dragging an unselected row moves just that row, dragging any row of a multi-selection moves the whole batch, and a tree node moves one folder. While dragging, the source dims, the drop target gets an outline and a small label follows the cursor; `Esc` or losing window focus cancels. Dropping a folder into itself or its own subtree is refused, and the other side never lights up as a target — that would mean "transfer, then delete the source", so use cut/paste instead. Name collisions are auto-renamed (`a.txt` → `a (1).txt`, same rule as paste) and the dialog shows the names that will actually land
+- The toolbox can be opened in its own window: the dialog header gained an "open in a separate window" button. It builds a real second window (native title bar, 1040×720, resizable) that loads the same bundle but only mounts the toolbox — no tab bar, sidebar or terminal — and runs the commands against the same SSH session without duplicating it. Clicking the button again for the same session focuses the existing window instead of opening another; different hosts can each have their own. If the session goes away (tab closed, reconnect with a new id) the window says so and closes itself; theme, accent colour, terminal palette and the key list all follow the main window's settings
+
 ## [2.11.1] - 2026-11-20
 
 ### Added
