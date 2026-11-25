@@ -30,13 +30,8 @@ onMounted(async () => {
     ;(window as any).__hideSplash?.()
     return
   }
-  try {
-    // 与主窗口同一条启动路径：settings / keys 等节 hydrate 之后，
-    // 主题、强调色、终端配色与公钥下拉才和主窗口一致
-    await loadAppConfig()
-  } catch (e) {
-    console.error('独立窗口加载配置失败，使用内置默认值：', e)
-  }
+  // 先把界面挂起来，再去拉配置：配置 IPC 慢一点、或者干脆失败，都不该让窗口只剩一块空白。
+  // 主题与强调色由 index.html 的首帧注入先顶上，loadAppConfig 回来后再 hydrate 覆盖。
   adoptDetachedSession({
     backendId: meta.sessionId,
     label: meta.label,
@@ -47,6 +42,18 @@ onMounted(async () => {
   showToolbox.value = true
   ready.value = true
   ;(window as any).__hideSplash?.()
+
+  try {
+    // 与主窗口同一条启动路径：settings / keys 等节 hydrate 之后，
+    // 主题、强调色、终端配色与公钥下拉才和主窗口一致。
+    // 3 秒还没回来就先让界面用默认值跑，配置到了再补（不能一直等）
+    await Promise.race([
+      loadAppConfig(),
+      new Promise(resolve => setTimeout(resolve, 3000)),
+    ])
+  } catch (e) {
+    console.error('独立窗口加载配置失败，使用内置默认值：', e)
+  }
 
   // 它盯的那条会话没了（标签关闭、或断线重连换了新会话）：自己收摊，
   // 否则留下一个每个操作都报「会话不存在」的窗口

@@ -1023,6 +1023,13 @@ pub fn open_toolbox_window(
         Some("light") => Some(tauri::Theme::Light),
         _ => None,
     };
+    // 窗口底色先给对（与 index.html 的 detached-window 底色一致）：WebView2 首帧合成
+    // 完成前会先露窗口自身的背景，留默认白底会在深色主题下闪一下，出问题时也更像「白屏」
+    let bg = if matches!(theme, Some(tauri::Theme::Dark)) {
+        tauri::window::Color(6, 9, 13, 255)
+    } else {
+        tauri::window::Color(245, 245, 245, 255)
+    };
 
     // 用系统原生标题栏与边框：这个窗口没有前端自绘标题栏，交给系统最省事，
     // 关窗按钮与跨平台拖拽也都不用另做
@@ -1034,13 +1041,37 @@ pub fn open_toolbox_window(
     .title(format!("Rhost · 工具箱 — {label}"))
     .inner_size(1040.0, 720.0)
     .min_inner_size(680.0, 480.0)
+    .background_color(bg)
     .initialization_script(&script);
+    // Windows：运行中新建的可见窗口，WebView2 有时不做首次合成——窗口框出来了、标题栏
+    // 在、内容区整块空白，拖一下或改窗口大小才刷出来。先建隐藏窗口，等首帧之后再显示，
+    // 强制走一次合成。（主窗口在 setup 里创建，没这个毛病，所以只在 Windows 上绕）
+    if cfg!(target_os = "windows") {
+        builder = builder.visible(false);
+    }
     if let Some(t) = theme {
         builder = builder.theme(Some(t));
     }
-    builder
+    let win = builder
         .build()
         .map_err(|e| format!("创建工具箱独立窗口失败：{e}"))?;
+    if cfg!(target_os = "windows") {
+        let w = win.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(180));
+            let _ = w.show();
+            let _ = w.set_focus();
+            // 再推一次尺寸：WebView2 的合成器要收到 resize 才把内容铺满客户区，
+            // 1px 的推拉在视觉上看不出来，但足以触发那次 SetBounds
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            if let (Ok(size), Ok(scale)) = (w.inner_size(), w.scale_factor()) {
+                let logical = size.to_logical::<f64>(scale);
+                let _ = w.set_size(tauri::LogicalSize::new(logical.width + 1.0, logical.height));
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                let _ = w.set_size(tauri::LogicalSize::new(logical.width, logical.height));
+            }
+        });
+    }
 
     crate::applog::emit(
         log::Level::Info,

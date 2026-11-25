@@ -42,6 +42,47 @@
         }
       } catch (e) {}
     </script>
+    <script>
+      // 工具箱独立窗口的兜底：bundle 没跑起来、或挂载路上抛错时，窗口里至少能看到原因，
+      // 而不是一个纯空白窗口（Windows 上 WebView2 出这类问题时最难判断卡在哪一步）。
+      // 只在独立窗口生效——判断放在超时里做，别在解析时就读注入标记：注入若晚一步，
+      // 整段兜底会连带失效。
+      var dtxErrs = []
+      window.addEventListener('error', function (e) {
+        dtxErrs.push(e.message || String((e && e.error) || 'script error'))
+      })
+      window.addEventListener('unhandledrejection', function (e) {
+        var r = e.reason
+        dtxErrs.push(r && r.message ? r.message : String(r))
+      })
+      window.__RHOST_DTX_ERRORS__ = dtxErrs
+      setTimeout(function () {
+        if (!window.__RHOST_TOOLBOX__) return
+        var app = document.getElementById('app')
+        if (app && app.childElementCount > 0) return
+        var pre = document.createElement('pre')
+        pre.style.cssText = 'position:fixed;inset:0;margin:0;z-index:99998;padding:22px;'
+          + 'overflow:auto;background:#06090d;color:#e6edf3;'
+          + 'font:12px/1.75 ui-monospace,Consolas,monospace;white-space:pre-wrap'
+        var lines = [
+          '工具箱独立窗口没有渲染出来。',
+          '',
+          'boot 注入：' + (window.__RHOST_BOOT__ ? '有' : '没有'),
+          'UA：' + (navigator.userAgent || '未知'),
+          '',
+        ]
+        if (dtxErrs.length) {
+          lines.push('捕获到的错误：')
+          for (var i = 0; i < Math.min(dtxErrs.length, 6); i++) lines.push('  · ' + dtxErrs[i])
+        } else {
+          lines.push('没有捕获到 JS 错误：多半是脚本资源没加载完（资源协议层面）。')
+        }
+        pre.textContent = lines.join('\n')
+        document.body.appendChild(pre)
+        var sp = document.getElementById('splash')
+        if (sp) sp.style.display = 'none'
+      }, 2600)
+    </script>
     <style>
       html,body{margin:0;height:100%;background:transparent}
       /* splash 存活期：页面全透明（透出桌面），主界面隐藏；
