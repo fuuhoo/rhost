@@ -66,6 +66,8 @@ export const SFTP_DROP_ACCEPTED = 'sftp.drop.accepted'
 /** 拖入的文件落在文件栏主体外（终端/AI 附件区等）：不建任务，用于区分「事件没来」与「落点没命中」 */
 export const SFTP_DROP_MISSED = 'sftp.drop.missed'
 export const SFTP_MANAGE_REMOVE = 'sftp.manage.remove'
+/** 同侧移动（拖拽/剪切粘贴都落到 rename）：kv 带 src / dst */
+export const SFTP_MANAGE_RENAME = 'sftp.manage.rename'
 /** 远端改权限（chmod，含递归）：kv 带 path / mode（八进制串）/ recursive / scope */
 export const SFTP_MANAGE_CHMOD = 'sftp.manage.chmod'
 /** 外部编辑器协同：取回副本并打开编辑器 */

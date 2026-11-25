@@ -4479,3 +4479,37 @@ html[data-theme="light"] .del-track.track{background:#e8eaee}
     .km-bar-fill{transition:none}
     .km-row{transition:none}
 }
+
+/* ---------- SFTP 拖拽移动：源条目半透明，目标目录行/树节点描边高亮 ----------
+   深浅主题都从 --accent-rgb 派生（跟随设置里的强调色）；浅色底上强调色太淡，
+   另给一档偏蓝的实色，和文件区的选中态（#dfecf4）同族但更醒目。
+   选择器放在文件末尾是为了压过 .row:nth-child(even) / .row.selected 这类同特异度规则。 */
+.row.dragging,.grid-cell.dragging,.tree-row.dragging{opacity:.42}
+.row.drop-into,.grid-cell.drop-into,.tree-row.drop-into{
+    background:rgba(var(--accent-rgb),.22);
+    box-shadow:inset 0 0 0 1px rgba(var(--accent-rgb),.62);
+}
+html[data-theme="light"] .row.drop-into,
+html[data-theme="light"] .grid-cell.drop-into,
+html[data-theme="light"] .tree-row.drop-into{
+    background:#cde4f6;
+    box-shadow:inset 0 0 0 1px #74adda;
+}
+
+/* 拖动移动时：全窗口变成「抓手」，光标旁跟一条提示，说明正在搬哪几项 */
+body.dragging-files,body.dragging-files *{cursor:grabbing !important;user-select:none}
+.drag-ghost{
+    position:fixed;z-index:60;pointer-events:none;
+    max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    padding:3px 8px;border-radius:5px;
+    background:rgba(var(--accent-rgb),.92);color:#08120c;
+    font-size:11.5px;line-height:1.5;font-weight:600;
+    box-shadow:0 6px 18px rgba(0,0,0,.3);
+}
+html[data-theme="light"] .drag-ghost{
+    background:#2f6fb3;color:#fff;
+    box-shadow:0 6px 18px rgba(0,0,0,.18);
+}
+/* 行内的图标与文字都不许触发原生拖拽：拖动手势由鼠标事件自己接管，别和浏览器的
+   「拖这张 SVG / 这段文字」抢（Windows 上拖到一半变成拖图片就再也落不到目录上） */
+.row *,.grid-cell *,.tree-row *{-webkit-user-drag:none}

@@ -25,6 +25,7 @@ import {
   SFTP_TRANSFER_RESUME, SFTP_TRANSFER_BLOCKED, SFTP_TRANSFER_RETRY, SFTP_MANAGE_REMOVE,
   SFTP_DROP_ACCEPTED, SFTP_DROP_MISSED,
   SFTP_MANAGE_CHMOD,
+  SFTP_MANAGE_RENAME,
   SFTP_EDIT_OPEN, SFTP_EDIT_SYNC, SFTP_EDIT_CONFLICT,
 } from '../../stores/applog'
 import type { LogLevel } from '../../stores/applog'
@@ -299,6 +300,8 @@ function toggleTree(path: string) {
 
 /** 点行：右侧列表切到该目录，同时展开它，使树与列表停在同一处 */
 function onTreeRowClick(r: TreeRow) {
+  // 刚拖完的那次 click 不当作导航（拖动路径由 mouseup 单独处理）
+  if (performance.now() - lastDragEnd < 350) return
   if (!r.expanded) toggleTree(r.path)
   if (r.path !== remotePath.value) gotoCrumb('remote', r.path)
 }
@@ -500,16 +503,10 @@ function entryExists(side: Side, name: string) {
  * `used` 为本批粘贴已占用的名字（尚未落盘，列表里查不到）。
  */
 function nextFreeName(side: Side, name: string, used: Set<string>) {
-  const dot = name.lastIndexOf('.')
-  // dot > 0：".bashrc" 的点在首位，按无扩展名处理
-  const stem = dot > 0 ? name.slice(0, dot) : name
-  const ext = dot > 0 ? name.slice(dot) : ''
-  let n = 1
-  for (;;) {
-    const candidate = `${stem} (${n})${ext}`
-    if (!used.has(candidate) && !entryExists(side, candidate)) return candidate
-    n++
-  }
+  // 当前目录已有项 + 本批已占用名，一起交给 freeNameIn 取名
+  const taken = new Set(used)
+  for (const e of sideRaw(side).value) taken.add(e.name)
+  return freeNameIn(taken, name)
 }
 
 /**
@@ -2107,6 +2104,289 @@ async function pasteTargets(side: Side) {
   }
 }
 
+/* ---- 拖拽移动（同侧） ----
+   把文件区的行 / 目录树节点拖到另一个目录行或树节点上，松手后确认，再把条目 rename 过去。
+   只在同一侧生效：跨侧等于「传输 + 删源文件」，误拖一下就会删本机文件，因此跨侧不给落点，
+   要做请走剪切/粘贴。
+
+   用鼠标事件自己实现而不是 HTML5 拖放：Tauri 默认开着 dragDropEnabled（系统文件拖入上传靠它），
+   而它接管了 Windows WebView2 的拖放处理器，HTML5 的 dragstart/drop 在 Win 上根本不会触发。
+   自己算落点反而更可控：能画跟随光标的提示、能按 4px 阈值区分「点一下」与「拖」。 */
+interface DragItem { name: string; isDir: boolean }
+interface DragState { side: Side; base: string; items: DragItem[] }
+/** 按下但还没超过阈值：超过才真正开始拖，否则就是一次普通点击 */
+interface PressState extends DragState { x: number; y: number; treePath: string }
+
+const dragState = ref<DragState | null>(null)
+/** 悬停中的目标目录绝对路径：只用于给落点描边高亮 */
+const dropPath = ref('')
+/** 正在被拖的树节点（树行与列表行同名时不能只按名字判断） */
+const draggingTreePath = ref('')
+/** 跟随光标的提示（自己实现的拖拽没有系统拖影，不给提示看不出在拖） */
+const dragGhost = ref<{ x: number; y: number; label: string } | null>(null)
+/** 一次移动没走完之前不再接受新的拖动，避免同一批被搬两次 */
+const movingBusy = ref(false)
+
+let pressMove: PressState | null = null
+/** 拖动刚结束时浏览器还会补一个 click，用它把这次 click 吞掉 */
+let lastDragEnd = 0
+const DRAG_THRESHOLD = 4
+
+/** 路径比较口径：本地在 Windows 上可能是反斜杠、末尾可能带分隔符，先归一再比 */
+function normPath(p: string) {
+  return p.replace(/\\/g, '/').replace(/\/+$/, '') || '/'
+}
+/** child 就是 dir 或在其内部（把目录拖进自己/自己的子目录必须拦下） */
+function pathWithin(child: string, dir: string) {
+  const c = normPath(child)
+  const d = normPath(dir)
+  return c === d || c.startsWith(d === '/' ? '/' : `${d}/`)
+}
+function entryPath(side: Side, e: { name: string }) {
+  return joinPath(sidePath(side), e.name)
+}
+
+function ghostLabel(items: DragItem[]) {
+  const first = items[0]?.name ?? ''
+  const head = first.length > 18 ? `${first.slice(0, 17)}…` : first
+  return items.length > 1 ? `${head} 等 ${items.length} 项` : head
+}
+
+function armPress() {
+  document.addEventListener('mousemove', onDragMouseMove)
+  document.addEventListener('mouseup', onDragMouseUp)
+  document.addEventListener('keydown', onDragKey)
+  window.addEventListener('blur', onDragBlur)
+}
+
+/** 收尾：无论成功、取消还是失败，都从这里把拖拽状态与监听清干净 */
+function endPress() {
+  document.removeEventListener('mousemove', onDragMouseMove)
+  document.removeEventListener('mouseup', onDragMouseUp)
+  document.removeEventListener('keydown', onDragKey)
+  window.removeEventListener('blur', onDragBlur)
+  pressMove = null
+  dragState.value = null
+  dropPath.value = ''
+  draggingTreePath.value = ''
+  dragGhost.value = null
+  document.body.classList.remove('dragging-files')
+}
+
+function beginDrag(p: PressState, ev: MouseEvent) {
+  // 拖的是未选中行：先把它（这一批）选中，视觉上才跟得上。
+  // 树节点不算选区，只让树行自己变淡，别去动右侧列表的选中态
+  if (!p.treePath) {
+    const sel = sideSel(p.side)
+    if (!p.items.every(i => sel.value.has(i.name))) {
+      sideSel(p.side).value = new Set(p.items.map(i => i.name))
+    }
+  }
+  dragState.value = { side: p.side, base: p.base, items: p.items }
+  draggingTreePath.value = p.treePath
+  dragGhost.value = { x: ev.clientX, y: ev.clientY, label: ghostLabel(p.items) }
+  document.body.classList.add('dragging-files')
+}
+
+/** 抓行：已多选的按整批拖，未选中的只拖这一行（不在这里改选区，交给 click 的既有逻辑） */
+function onRowMouseDown(side: Side, e: FsEntry, ev: MouseEvent) {
+  if (ev.button !== 0 || movingBusy.value || edit.value) return
+  lastSide.value = side
+  const picked = sideSel(side).value.has(e.name) ? selectedEntries(side) : [e]
+  pressMove = {
+    side,
+    base: sidePath(side),
+    items: picked.map(x => ({ name: x.name, isDir: x.type === 'dir' })),
+    x: ev.clientX,
+    y: ev.clientY,
+    treePath: '',
+  }
+  armPress()
+}
+
+/** 抓目录树节点：一次一个目录，源目录取它的父目录 */
+function onTreeMouseDown(r: TreeRow, ev: MouseEvent) {
+  if (ev.button !== 0 || movingBusy.value || r.path === TREE_ROOT) return
+  lastSide.value = 'remote'
+  pressMove = {
+    side: 'remote',
+    base: parentPath(r.path),
+    items: [{ name: r.name, isDir: true }],
+    x: ev.clientX,
+    y: ev.clientY,
+    treePath: r.path,
+  }
+  armPress()
+}
+
+function onDragMouseMove(ev: MouseEvent) {
+  const p = pressMove
+  if (!p) return
+  if (!dragState.value) {
+    if (Math.abs(ev.clientX - p.x) < DRAG_THRESHOLD && Math.abs(ev.clientY - p.y) < DRAG_THRESHOLD) return
+    beginDrag(p, ev)
+  }
+  if (dragGhost.value) {
+    dragGhost.value.x = ev.clientX
+    dragGhost.value.y = ev.clientY
+  }
+  // 落点按光标下的元素找：行/格子/树行都带 data-drop-dir，文件行没有
+  const el = document.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement | null
+  const zone = el?.closest?.('[data-drop-dir]') as HTMLElement | null
+  const dirPath = zone?.dataset.dropDir ?? ''
+  const side = (zone?.dataset.dropSide ?? '') as Side | ''
+  dropPath.value = dirPath && side && canDropInto(side, dirPath) ? dirPath : ''
+  ev.preventDefault()
+}
+
+function onDragMouseUp() {
+  const dragging = dragState.value
+  const dst = dropPath.value
+  if (dragging) lastDragEnd = performance.now()
+  endPress()
+  if (!dragging || !dst) return
+  void moveToDir(dragging.side, dragging.base, dragging.items, dst)
+}
+
+/** 拖动中按 Esc 取消（不落任何改动） */
+function onDragKey(ev: KeyboardEvent) {
+  if (ev.key !== 'Escape' || !dragState.value) return
+  lastDragEnd = performance.now()
+  endPress()
+}
+
+/** 窗口失去焦点（切到别的应用）：鼠标松开可能收不到，直接收摊，避免状态卡住 */
+function onDragBlur() {
+  if (dragState.value) lastDragEnd = performance.now()
+  endPress()
+}
+
+function isDraggingEntry(side: Side, name: string) {
+  const d = dragState.value
+  return !!d && d.side === side && d.items.some(i => i.name === name)
+}
+function isDropTarget(path: string) {
+  return !!dropPath.value && normPath(dropPath.value) === normPath(path)
+}
+
+/** 能否落到该目录：同侧、非原地、且不是把目录拖进它自己或它的子目录 */
+function canDropInto(side: Side, dirPath: string) {
+  const d = dragState.value
+  if (!d || d.side !== side) return false
+  if (normPath(d.base) === normPath(dirPath)) return false
+  return !d.items.some(i => i.isDir && pathWithin(dirPath, joinPath(d.base, i.name)))
+}
+
+/** 目标目录的现有名字：rename 在目标已存在时会静默覆盖，所以先列一遍再决定名字 */
+async function listNamesAt(side: Side, path: string): Promise<Set<string>> {
+  if (side === 'local') {
+    const res = await invoke<DirListing>('list_local_dir', { path })
+    return new Set(res.entries.map(e => e.name))
+  }
+  const backendId = activeSession.value?.backendId
+  if (!backendId) throw new Error('未连接')
+  const res = await invoke<DirListing>('sftp_list_dir', { sessionId: backendId, path })
+  return new Set(res.entries.map(e => e.name))
+}
+
+/** 重名时取下一个可用名（a.txt → a (1).txt）：与粘贴同一口径，不覆盖任何已有项 */
+function freeNameIn(taken: Set<string>, name: string) {
+  const dot = name.lastIndexOf('.')
+  const stem = dot > 0 ? name.slice(0, dot) : name
+  const ext = dot > 0 ? name.slice(dot) : ''
+  let n = 1
+  for (;;) {
+    const candidate = `${stem} (${n})${ext}`
+    if (!taken.has(candidate)) return candidate
+    n++
+  }
+}
+
+/** 移动后树里源目录与目标目录的子项都可能变了：清缓存，展开着的重新列一遍 */
+function dropTreeCache(paths: string[]) {
+  for (const p of paths) {
+    if (treeChildren.value[p] === undefined) continue
+    delete treeChildren.value[p]
+    if (treeExpanded.value[p]) void loadTreeChildren(p)
+  }
+}
+
+/**
+ * 把一批条目搬到另一个目录：先列目标目录 → 弹窗确认（重名会改名，写清结果）→ 逐项 rename。
+ * 全程同侧，不产生传输；失败项留在原处并保持在选中态。
+ */
+async function moveToDir(side: Side, base: string, items: DragItem[], dstDir: string) {
+  if (movingBusy.value) {
+    toast('上一次移动还没结束', 'info', 1600)
+    return
+  }
+  // 目标在自己或自己的子目录里：连带自己一起搬，动手前就排除
+  const list = items.filter(i => !(i.isDir && pathWithin(dstDir, joinPath(base, i.name))))
+  if (!list.length) return
+
+  let taken: Set<string>
+  try {
+    taken = await listNamesAt(side, dstDir)
+  } catch (e) {
+    toast(`读取目标目录失败：${(e as Error).message}`, 'warn', 3200)
+    return
+  }
+
+  /* 先算出最终名字再问：确认框里写的就是真正要落的名字 */
+  const plan = list.map(it => {
+    const to = taken.has(it.name) ? freeNameIn(taken, it.name) : it.name
+    taken.add(to)
+    return { name: it.name, isDir: it.isDir, to }
+  })
+  const renamed = plan.filter(p => p.to !== p.name)
+  const dirs = plan.filter(p => p.isDir).length
+  const where = side === 'local' ? '本机' : '远端'
+  const ok = await confirmDialog(
+    `将把${where} ${plan.length} 项移动到「${dstDir}」：\n${namePreview(plan)}`
+      + (dirs ? `\n其中 ${dirs} 个文件夹会连同内部内容一并移动。` : '')
+      + (renamed.length
+        ? `\n目标已有同名项，将自动改名：${namePreview(renamed.map(p => ({ name: `${p.name} → ${p.to}` })), 2)}`
+        : ''),
+    '移动',
+    { confirmText: '移动' },
+  )
+  if (!ok) return
+
+  movingBusy.value = true
+  const done: string[] = []
+  const failed: string[] = []
+  try {
+    for (const p of plan) {
+      const src = joinPath(base, p.name)
+      const dst = joinPath(dstDir, p.to)
+      try {
+        await invokeSide(side, 'rename', { oldPath: src, newPath: dst })
+        done.push(p.name)
+      } catch (e) {
+        failed.push(`${p.name}：${(e as Error).message}`)
+        reportLog('error', SFTP_MANAGE_RENAME, `移动失败：${p.name}`, { src, dst, err: String(e) })
+      }
+    }
+  } finally {
+    movingBusy.value = false
+    if (done.length) {
+      reportLog('info', SFTP_MANAGE_RENAME, `移动 ${done.length} 项`, {
+        from: base, to: dstDir, count: done.length, renamed: renamed.length,
+      })
+    }
+    // 选区只摘掉真搬走的；失败的仍留在原处与选中态
+    const sel = new Set(sideSel(side).value)
+    for (const n of done) sel.delete(n)
+    sideSel(side).value = sel
+    void refreshSide(side)
+    if (side === 'remote') dropTreeCache([base, dstDir])
+    if (failed.length) toast(`移动 ${done.length} 项，${failed.length} 项失败：${failed[0]}`, 'warn', 3600)
+    else if (done.length) {
+      toast(`已移动 ${done.length} 项到「${dstDir}」${renamed.length ? `，${renamed.length} 项重名已改名` : ''}`, 'ok', 2400)
+    }
+  }
+}
+
 /** 复制选中项完整路径到系统剪贴板（多项换行分隔） */
 async function copyPaths(side: Side, targets: FsEntry[]) {
   if (!targets.length) return
@@ -2284,6 +2564,8 @@ function buildMenu(side: Side, targets: FsEntry[]): MenuItem[] {
 
 /* 行交互：单击选择（Ctrl/⌘ 多选）、双击目录进入、双击文件用编辑器打开 */
 function onRowClick(side: Side, entry: FsEntry, e: MouseEvent) {
+  // 拖动结束后浏览器会补一次 click（落点不在行上时也可能补到源行），别让它改选区
+  if (performance.now() - lastDragEnd < 350) return
   lastSide.value = side
   const sel = side === 'local' ? localSelected : remoteSelected
   if (e.ctrlKey || e.metaKey) {
@@ -2944,6 +3226,7 @@ onMounted(() => {
 onUnmounted(() => {
   dropStop?.()
   dropStop = null
+  endPress() // 拖动中卸载（切页/切会话）：把临时的 mousemove/mouseup 监听一起摘掉
   if (editTimer) { clearInterval(editTimer); editTimer = null }
   document.removeEventListener('mousemove', onMove)
   document.removeEventListener('mouseup', onUp)
@@ -3156,10 +3439,18 @@ onUnmounted(() => {
                   v-for="r in treeRows"
                   :key="r.path"
                   class="tree-row"
-                  :class="{ active: r.path === remotePath, failed: r.failed }"
+                  :class="{
+                    active: r.path === remotePath,
+                    failed: r.failed,
+                    dragging: draggingTreePath === r.path,
+                    'drop-into': isDropTarget(r.path),
+                  }"
                   :style="{ paddingLeft: `${3 + r.depth * 11}px` }"
                   :title="r.path"
+                  :data-drop-dir="r.path"
+                  data-drop-side="remote"
                   @click="onTreeRowClick(r)"
+                  @mousedown="onTreeMouseDown(r, $event)"
                 >
                   <button
                     class="tree-twisty"
@@ -3251,10 +3542,18 @@ onUnmounted(() => {
                     v-for="e in localEntries"
                     :key="e.name"
                     class="row"
-                    :class="{ dir: e.type==='dir', selected: localSelected.has(e.name) }"
+                    :class="{
+                      dir: e.type==='dir',
+                      selected: localSelected.has(e.name),
+                      dragging: isDraggingEntry('local', e.name),
+                      'drop-into': isDropTarget(entryPath('local', e)),
+                    }"
+                    :data-drop-dir="e.type==='dir' ? entryPath('local', e) : null"
+                    data-drop-side="local"
                     @click="onRowClick('local', e, $event)"
                     @dblclick="onRowDblClick('local', e)"
                     @contextmenu.stop="onRowContext($event, 'local', e)"
+                    @mousedown="onRowMouseDown('local', e, $event)"
                   >
                     <div class="row-name">
                       <FileIcon :dir="e.type==='dir'" />
@@ -3295,11 +3594,18 @@ onUnmounted(() => {
                     v-for="e in localEntries"
                     :key="e.name"
                     class="grid-cell"
-                    :class="{ selected: localSelected.has(e.name) }"
+                    :class="{
+                      selected: localSelected.has(e.name),
+                      dragging: isDraggingEntry('local', e.name),
+                      'drop-into': isDropTarget(entryPath('local', e)),
+                    }"
                     :title="e.name"
+                    :data-drop-dir="e.type==='dir' ? entryPath('local', e) : null"
+                    data-drop-side="local"
                     @click="onRowClick('local', e, $event)"
                     @dblclick="onRowDblClick('local', e)"
                     @contextmenu.stop="onRowContext($event, 'local', e)"
+                    @mousedown="onRowMouseDown('local', e, $event)"
                   >
                     <div class="grid-icon-wrap">
                       <FileIcon :dir="e.type==='dir'" />
@@ -3357,10 +3663,18 @@ onUnmounted(() => {
                     v-for="e in remoteEntries"
                     :key="e.name"
                     class="row"
-                    :class="{ dir: e.type==='dir', selected: remoteSelected.has(e.name) }"
+                    :class="{
+                      dir: e.type==='dir',
+                      selected: remoteSelected.has(e.name),
+                      dragging: isDraggingEntry('remote', e.name),
+                      'drop-into': isDropTarget(entryPath('remote', e)),
+                    }"
+                    :data-drop-dir="e.type==='dir' ? entryPath('remote', e) : null"
+                    data-drop-side="remote"
                     @click="onRowClick('remote', e, $event)"
                     @dblclick="onRowDblClick('remote', e)"
                     @contextmenu.stop="onRowContext($event, 'remote', e)"
+                    @mousedown="onRowMouseDown('remote', e, $event)"
                   >
                     <div class="row-name">
                       <FileIcon :dir="e.type==='dir'" />
@@ -3400,11 +3714,18 @@ onUnmounted(() => {
                     v-for="e in remoteEntries"
                     :key="e.name"
                     class="grid-cell"
-                    :class="{ selected: remoteSelected.has(e.name) }"
+                    :class="{
+                      selected: remoteSelected.has(e.name),
+                      dragging: isDraggingEntry('remote', e.name),
+                      'drop-into': isDropTarget(entryPath('remote', e)),
+                    }"
                     :title="e.name"
+                    :data-drop-dir="e.type==='dir' ? entryPath('remote', e) : null"
+                    data-drop-side="remote"
                     @click="onRowClick('remote', e, $event)"
                     @dblclick="onRowDblClick('remote', e)"
                     @contextmenu.stop="onRowContext($event, 'remote', e)"
+                    @mousedown="onRowMouseDown('remote', e, $event)"
                   >
                     <div class="grid-icon-wrap">
                       <FileIcon :dir="e.type==='dir'" />
@@ -3608,6 +3929,13 @@ onUnmounted(() => {
             ><i class="fill" :style="{ width: delPct + '%' }"></i></span>
             <div class="del-name" :title="delJob.current">{{ delJob.current }}</div>
           </div>
+
+          <!-- 拖动移动时跟随光标的提示：自己实现的拖拽没有系统拖影，靠它表明「正在搬这几项」 -->
+          <div
+            v-if="dragGhost"
+            class="drag-ghost"
+            :style="{ left: `${dragGhost.x + 14}px`, top: `${dragGhost.y + 12}px` }"
+          >{{ dragGhost.label }}</div>
 
         </div>
       </div>
