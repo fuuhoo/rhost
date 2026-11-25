@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 [中文](./CHANGELOG.zh-CN.md) · **English**
 
+## [2.12.2] - 2026-11-25
+
+### Fixed
+
+- On Windows, opening the toolbox in its own window either showed a blank window or did nothing at all when the button was clicked — both were the same deadlock. `open_toolbox_window` used to be a synchronous command, but messages from the frontend `invoke` are dispatched by WebView2's `WebMessageReceived` callback, which runs on the main thread. The synchronous command therefore created a second WebView2 controller from inside that callback, while the controller's own completion callback had to wait for the callback to return — mutual wait. The command is now `async`: it runs on an async thread and `WebviewWindowBuilder::build()` posts window creation back to the event loop, so the main thread performs it in the normal message pump (window creation measured at roughly 220 ms). Windows are still created on the main thread, so cross-platform behaviour is unchanged. The previous workarounds for the blank surface (a 1 px resize nudge, a re-show after 0.8 s) are removed
+- Window creation now emits step-by-step log entries (event `toolbox.window.open`, `kv.stage` being `enter` / `focus-existing` / `build-begin` / `build-done`). If the button ever appears to do nothing again, a `build-begin` without `build-done` points straight at WebView2 controller creation
+
 ## [2.12.1] - 2026-11-25
 
 ### Fixed

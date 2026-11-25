@@ -6,6 +6,13 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.12.2] - 2026-11-25
+
+### 修复
+
+- 在 Windows 上，把工具箱提到独立窗口既出现过「整窗空白」，也出现过「点了没反应」，两者其实是同一个死锁：`open_toolbox_window` 原本是同步命令，而前端 `invoke` 的消息由 WebView2 的 `WebMessageReceived` 回调派发（该回调就在主线程上），同步命令于是嵌套在这个回调内部去建第二个 WebView2 控制器——新控制器的「创建完成」回调要等当前回调返回，当前回调又在等它，互等。命令改为 `async` 后，命令体跑在异步线程上，建窗投递回事件循环、由主线程在正常消息泵里执行，死锁消失（实测建窗约 220ms）。窗口本身仍由主线程创建，跨平台行为一致；上一版为绕开空白而加的「推 1px 尺寸」「0.8 秒后再拉一次」补丁一并撤掉
+- 建窗过程补分步日志（事件 `toolbox.window.open`，`kv.stage` 分别为 `enter` / `focus-existing` / `build-begin` / `build-done`）：再遇到「点了没反应」，只有 `build-begin` 没有 `build-done` 就说明卡在 WebView2 建控制器那一步，不必再靠猜
+
 ## [2.12.1] - 2026-11-25
 
 ### 修复
